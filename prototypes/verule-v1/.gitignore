@@ -1,0 +1,14 @@
+node_modules/
+.pnpm-store/
+dist/
+target/
+.turbo/
+coverage/
+.env
+.template/
+.vitest/
+data/
+playwright-report/
+test-results/
+.changeset/packed/
+AGENTS.md
