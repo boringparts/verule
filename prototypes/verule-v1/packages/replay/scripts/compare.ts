@@ -2,23 +2,17 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Location, Report } from "@verule/sdk";
 
+import type { ComparisonCompiler } from "../src/oxlint-compiler.ts";
 import type { ComparisonFinding } from "../src/oxlint-plugin.ts";
 import { processMemory } from "./memory.ts";
+import { runOxlint } from "./oxlint.ts";
 
 const cli = fileURLToPath(import.meta.resolve("@verule/cli/bin"));
-const oxlintManifest = fileURLToPath(
-  import.meta.resolve("oxlint/package.json"),
-);
-const oxlint = join(
-  dirname(oxlintManifest),
-  JSON.parse(readFileSync(oxlintManifest, "utf8")).bin.oxlint,
-);
-
 function checkedReplace(source: string, before: string, after: string) {
   assert.equal(
     source.split(before).length,
@@ -34,26 +28,38 @@ function atomic(cwd: string) {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
   });
+  const ms = performance.now() - start;
+  if (run.error) throw run.error;
   assert.ok(run.status === 0 || run.status === 1, run.stderr);
   const report = (JSON.parse(run.stdout) as { data: Report }).data;
   assert.equal(run.status, report.diagnostics.length ? 1 : 0);
-  return { report, ms: performance.now() - start };
+  return { report, ms };
 }
-function lint(cwd: string, config: string) {
-  const start = performance.now();
-  const run = spawnSync(
-    process.execPath,
-    [oxlint, "--threads", "1", "--format", "json", "-c", config, "src", "test"],
-    { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
-  );
-  assert.equal(run.status, 0, run.stderr + " " + run.stdout.slice(0, 1000));
-  const diagnostics = (
-    JSON.parse(run.stdout) as { diagnostics: { message: string }[] }
-  ).diagnostics;
-  const entries = diagnostics.map(
+function lint(cwd: string, config: string, compiler: ComparisonCompiler) {
+  const { ms, report } = runOxlint(cwd, config, [], {
+    VERULE_COMPARISON_COMPILER: compiler,
+    VERULE_COMPARISON_TSCONFIG: join(cwd, "tsconfig.json"),
+  });
+  assert.equal(report.number_of_rules, 2);
+  const entries = report.diagnostics.map(
     (d) => JSON.parse(d.message) as ComparisonFinding,
   );
-  return { entries, ms: performance.now() - start };
+  return { ms, entries };
+}
+
+/** Rotate the first fresh run across revisions on the warm filesystem cache. */
+function freshChecks(cwd: string, config: string, index: number) {
+  const check = () => atomic(cwd);
+  const go = () => lint(cwd, config, "tsgo");
+  const rust = () => lint(cwd, config, "tsrs");
+  switch (index % 3) {
+    case 0:
+      return { verule: check(), tsgo: go(), tsrs: rust() };
+    case 1:
+      return { tsgo: go(), tsrs: rust(), verule: check() };
+    default:
+      return { tsrs: rust(), verule: check(), tsgo: go() };
+  }
 }
 
 // Use source anchors from the pinned upstream cases so moving an edit also moves
@@ -333,14 +339,10 @@ export async function compareTools(cwd: string) {
     }
   }
   const rows = [];
-  let originalReports:
-    | {
-        verule: Pick<Report, "diagnostics" | "gaps">;
-        oxlint: ComparisonFinding[];
-      }
-    | undefined;
+  let originalVerule: Pick<Report, "diagnostics" | "gaps"> | undefined;
+  const originalOxlint = new Map<ComparisonCompiler, ComparisonFinding[]>();
   try {
-    for (const round of rounds) {
+    for (const [index, round] of rounds.entries()) {
       const before = round.file ? performance.now() : start;
       if (round.file && round.text) writeFileSync(round.file, round.text);
       const timeout = AbortSignal.timeout(60000);
@@ -360,14 +362,14 @@ export async function compareTools(cwd: string) {
         ),
       ]);
       const watchMemory = watch.pid ? processMemory(watch.pid) : null;
-      const fresh = atomic(cwd);
+      const runs = freshChecks(cwd, oxConfig, index);
+      const fresh = runs.verule;
       assert.deepEqual(
         live.report.diagnostics,
         fresh.report.diagnostics,
         round.label,
       );
       assert.deepEqual(live.report.gaps, fresh.report.gaps, round.label);
-      const baseline = lint(cwd, oxConfig);
       const idSource = readFileSync(idFile, "utf8");
       const dispatchSource = readFileSync(dispatchFile, "utf8");
       const idAt = (marker: string, token: string) =>
@@ -438,28 +440,27 @@ export async function compareTools(cwd: string) {
           ],
         });
       }
-      const findings = baseline.entries.filter((e) => e.kind === "violation");
-      const veruleFindings = fresh.report.diagnostics.map((d) => ({
-        rule: d.rule,
-        at: d.at,
-        evidence: d.evidence.map((e) => e.at),
-      }));
-      const oxlintFindings = findings.map((d) => ({
-        rule: d.ruleId,
-        at: d.location,
-        evidence: d.evidence,
-      }));
-      assertFindings(veruleFindings, expected, "Verule " + round.label);
-      assertFindings(oxlintFindings, expected, "Oxlint " + round.label);
-      const oxlintGaps = baseline.entries
-        .filter((e) => e.kind === "unknown")
-        .map((entry) => ({
-          rule: entry.ruleId,
-          at: entry.location,
-          reason: entry.reason,
-        }));
-      const veruleGaps = fresh.report.gaps;
-      for (const gaps of [veruleGaps, oxlintGaps]) {
+      const verulePayload = {
+        diagnostics: fresh.report.diagnostics,
+        gaps: fresh.report.gaps,
+      };
+      if (round.label === "original") originalVerule = verulePayload;
+      const restored =
+        round.label === "restore-instance" ||
+        round.label === "restore-dispatch";
+      if (restored)
+        assert.deepEqual(verulePayload, originalVerule, round.label);
+      assertFindings(
+        fresh.report.diagnostics.map((d) => ({
+          rule: d.rule,
+          at: d.at,
+          evidence: d.evidence.map((e) => e.at),
+        })),
+        expected,
+        "Verule " + round.label,
+      );
+
+      function checkGaps(gaps: Report["gaps"]) {
         if (round.label === "unknown-factory") {
           const opaque = idAt("executeCli(opaque(second),", "opaque(second)");
           assert.ok(
@@ -485,52 +486,72 @@ export async function compareTools(cwd: string) {
           assert.deepEqual(inputGaps, [], round.label);
         }
       }
-      // Gap reasons and path granularity differ between implementations. Preserve
-      // every unmatched location and its explanation rather than comparing counts.
-      const missingFrom = (
-        left: typeof veruleGaps,
-        right: typeof veruleGaps,
-      ) => {
-        const locations = new Set(right.map((g) => site(g.rule, g.at)));
-        return left.filter((g) => !locations.has(site(g.rule, g.at)));
-      };
-      const orderedOxlint = [...baseline.entries].sort((a, b) =>
-        JSON.stringify(a).localeCompare(JSON.stringify(b)),
-      );
-      const verulePayload = {
-        diagnostics: fresh.report.diagnostics,
-        gaps: veruleGaps,
-      };
-      if (round.label === "original")
-        originalReports = { verule: verulePayload, oxlint: orderedOxlint };
-      if (
-        round.label === "restore-instance" ||
-        round.label === "restore-dispatch"
-      ) {
-        assert.deepEqual(verulePayload, originalReports?.verule, round.label);
-        assert.deepEqual(orderedOxlint, originalReports?.oxlint, round.label);
+
+      const veruleGaps = fresh.report.gaps;
+      checkGaps(veruleGaps);
+      function compareCompiler(compiler: ComparisonCompiler) {
+        const baseline = runs[compiler];
+        const findings = baseline.entries.filter((e) => e.kind === "violation");
+        assertFindings(
+          findings.map((d) => ({
+            rule: d.ruleId,
+            at: d.location,
+            evidence: d.evidence,
+          })),
+          expected,
+          `Oxlint ${compiler} ${round.label}`,
+        );
+        const oxlintGaps = baseline.entries
+          .filter((e) => e.kind === "unknown")
+          .map((e) => ({ rule: e.ruleId, at: e.location, reason: e.reason }));
+        checkGaps(oxlintGaps);
+        // Gap reasons and path granularity differ between implementations. Preserve
+        // every unmatched location and its explanation rather than comparing counts.
+        const missingFrom = (
+          left: typeof veruleGaps,
+          right: typeof veruleGaps,
+        ) => {
+          const locations = new Set(right.map((g) => site(g.rule, g.at)));
+          return left.filter((g) => !locations.has(site(g.rule, g.at)));
+        };
+        const orderedOxlint = [...baseline.entries].sort((a, b) =>
+          JSON.stringify(a).localeCompare(JSON.stringify(b)),
+        );
+
+        if (round.label === "original")
+          originalOxlint.set(compiler, orderedOxlint);
+        if (restored)
+          assert.deepEqual(
+            orderedOxlint,
+            originalOxlint.get(compiler),
+            round.label,
+          );
+        return {
+          ms: baseline.ms,
+          violations: findings.length,
+          gaps: oxlintGaps.length,
+          findings,
+          coverageDifferences: {
+            gapsOnlyInVerule: missingFrom(veruleGaps, oxlintGaps),
+            gapsOnlyInOxlint: missingFrom(oxlintGaps, veruleGaps),
+          },
+        };
       }
       rows.push({
         label: round.label,
         watchMs: live.at - before,
         watchMemory,
         checkMs: fresh.ms,
-        oxlintMs: baseline.ms,
         bytes: live.bytes,
         wireSpanMs: live.wireSpanMs,
-        coverageDifferences: {
-          gapsOnlyInVerule: missingFrom(veruleGaps, oxlintGaps),
-          gapsOnlyInOxlint: missingFrom(oxlintGaps, veruleGaps),
-        },
         verule: {
           violations: fresh.report.diagnostics.length,
           gaps: fresh.report.gaps.length,
           findings: fresh.report.diagnostics,
         },
         oxlint: {
-          violations: findings.length,
-          gaps: baseline.entries.length - findings.length,
-          findings,
+          tsgo: compareCompiler("tsgo"),
+          tsrs: compareCompiler("tsrs"),
         },
       });
     }

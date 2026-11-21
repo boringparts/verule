@@ -288,12 +288,15 @@ importers:
       oxlint:
         specifier: 'catalog:'
         version: 1.94.0(oxlint-tsgolint@7.0.2007)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2007
       tsrs:
         specifier: 7.1.0-beta.tsrs4
         version: 7.1.0-beta.tsrs4
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -304,12 +307,6 @@ importers:
       oxfmt:
         specifier: 'catalog:'
         version: 0.74.0
-      oxlint-tsgolint:
-        specifier: 'catalog:'
-        version: 7.0.2007
-      typescript-7:
-        specifier: 'catalog:'
-        version: typescript@7.0.2
 
   packages/sdk:
     dependencies:
@@ -888,11 +885,6 @@ packages:
     resolution: {integrity: sha512-3GJYwig8ygEI89oaOZdduJX8/aw6O9eRPYHoIt6T3FZl9hkKjiyIspufJoVgqXihPoJu8M5CSV0DlZvzfohBCw==}
     hasBin: true
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -1228,8 +1220,6 @@ snapshots:
       '@turbo/linux-arm64': 2.11.10
       '@turbo/windows-64': 2.11.10
       '@turbo/windows-arm64': 2.11.10
-
-  typescript@5.9.3: {}
 
   typescript@7.0.2:
     optionalDependencies:

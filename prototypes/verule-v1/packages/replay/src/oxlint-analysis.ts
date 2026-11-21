@@ -1,13 +1,16 @@
 import { dirname, relative, resolve } from "node:path";
 
-import ts from "typescript";
+import type * as ast from "typescript-7/unstable/ast";
+import type { Symbol as NativeSymbol } from "typescript-7/unstable/sync";
+
+import { compiler, ts } from "./oxlint-compiler.ts";
 
 type FunctionBody =
-  | ts.FunctionDeclaration
-  | ts.ArrowFunction
-  | ts.FunctionExpression;
+  | ast.FunctionDeclaration
+  | ast.ArrowFunction
+  | ast.FunctionExpression;
 interface Frame {
-  call: ts.CallExpression;
+  call: ast.CallExpression;
   fn: FunctionBody;
   outer: Frame | undefined;
 }
@@ -24,18 +27,18 @@ export interface Point {
 
 export interface Origin {
   kind: "fresh" | "boundary" | "parameter" | "unknown";
-  node: ts.Node;
+  node: ast.Node;
   fields: readonly string[];
   frame: Frame | undefined;
   key: string;
-  evidence: readonly ts.Node[];
+  evidence: readonly ast.Node[];
   reason: string;
 }
 
-function unwrap(value: ts.Expression): ts.Expression {
+function unwrap(value: ast.Expression): ast.Expression {
   while (
     ts.isAsExpression(value) ||
-    ts.isTypeAssertionExpression(value) ||
+    ts.isTypeAssertion(value) ||
     ts.isSatisfiesExpression(value) ||
     ts.isParenthesizedExpression(value) ||
     ts.isNonNullExpression(value)
@@ -44,29 +47,29 @@ function unwrap(value: ts.Expression): ts.Expression {
   return value;
 }
 
-function lexicalFunction(node: ts.Node): ts.Node | undefined {
+function lexicalFunction(node: ast.Node): ast.Node | undefined {
   for (let parent = node.parent; parent; parent = parent.parent) {
-    if (ts.isFunctionLike(parent)) return parent;
+    if (ts.isFunctionLikeDeclaration(parent)) return parent;
   }
   return undefined;
 }
 
-function frameAt(node: ts.Node, frame: Frame | undefined): Frame | undefined {
+function frameAt(node: ast.Node, frame: Frame | undefined): Frame | undefined {
   const owner = lexicalFunction(node);
   while (frame && frame.fn !== owner) frame = frame.outer;
   return frame;
 }
 
-function nodeKey(node: ts.Node): string {
+function nodeKey(node: ast.Node): string {
   return node.getSourceFile().fileName + ":" + node.getStart();
 }
 
 function outcome(
   kind: Origin["kind"],
-  node: ts.Node,
+  node: ast.Node,
   fields: readonly string[],
   frame: Frame | undefined,
-  evidence: readonly ts.Node[],
+  evidence: readonly ast.Node[],
   reason = "",
 ): Origin {
   // Two visits to the same factory body through different callers allocate distinct objects.
@@ -84,14 +87,14 @@ function outcome(
   };
 }
 
-function singleReturn(fn: FunctionBody): ts.Expression | undefined {
+function singleReturn(fn: FunctionBody): ast.Expression | undefined {
   if (!fn.body) return undefined;
   if (!ts.isBlock(fn.body)) return fn.body;
-  const returns: ts.ReturnStatement[] = [];
-  function visit(node: ts.Node): void {
-    if (ts.isFunctionLike(node)) return;
+  const returns: ast.ReturnStatement[] = [];
+  function visit(node: ast.Node): void {
+    if (ts.isFunctionLikeDeclaration(node)) return;
     if (ts.isReturnStatement(node)) returns.push(node);
-    else ts.forEachChild(node, visit);
+    else node.forEachChild(visit);
   }
   visit(fn.body);
   const only = returns[0];
@@ -103,51 +106,36 @@ function singleReturn(fn: FunctionBody): ts.Expression | undefined {
 /** Compiler and call-frame machinery supplied by the comparison plugin itself. */
 export class ComparisonProject {
   readonly root: string;
-  readonly program: ts.Program;
-  private readonly checker: ts.TypeChecker;
-  readonly parse: ts.Declaration;
-  readonly execute: ts.Declaration;
-  readonly createBuilder: ts.Declaration;
-  readonly validate: ts.Declaration;
-  readonly dispatch: ts.Declaration;
+  private readonly native: ReturnType<typeof compiler.open>;
+  private readonly callLists = new WeakMap<
+    ast.SourceFile,
+    ast.CallExpression[]
+  >();
+  private readonly references = new WeakMap<
+    ast.Node,
+    NativeSymbol | undefined
+  >();
+  private readonly declarations = new WeakMap<
+    NativeSymbol,
+    ast.Node | undefined
+  >();
+  readonly parse: ast.Node;
+  readonly execute: ast.Node;
+  readonly createBuilder: ast.Node;
+  readonly validate: ast.Node;
+  readonly dispatch: ast.Node;
   private readonly targets = new WeakMap<
-    ts.CallExpression,
-    ts.Declaration | undefined
+    ast.CallExpression,
+    ast.Node | undefined
   >();
   private readonly returns = new WeakMap<
     FunctionBody,
-    ts.Expression | undefined
+    ast.Expression | undefined
   >();
 
   constructor(config: string) {
     this.root = dirname(config);
-    const configData = ts.readConfigFile(config, (file) =>
-      ts.sys.readFile(file),
-    );
-    if (configData.error)
-      throw new Error(
-        ts.flattenDiagnosticMessageText(configData.error.messageText, "\n"),
-      );
-    const parsed = ts.parseJsonConfigFileContent(
-      configData.config,
-      ts.sys,
-      this.root,
-      {},
-      config,
-    );
-    if (parsed.errors.length)
-      throw new Error(
-        parsed.errors
-          .map((error) =>
-            ts.flattenDiagnosticMessageText(error.messageText, "\n"),
-          )
-          .join("\n"),
-      );
-    this.program = ts.createProgram({
-      rootNames: parsed.fileNames,
-      options: parsed.options,
-    });
-    this.checker = this.program.getTypeChecker();
+    this.native = compiler.open(config);
     this.parse = this.named("src/index.ts", "parseCliInvocation");
     this.execute = this.named("src/index.ts", "executeCli");
     this.createBuilder = this.named("src/index.ts", "defineCli");
@@ -161,7 +149,7 @@ export class ComparisonProject {
     );
   }
 
-  point(node: ts.Node): Point {
+  point(node: ast.Node): Point {
     const file = node.getSourceFile();
     const start = node.getStart(file);
     const end = node.getEnd();
@@ -178,27 +166,73 @@ export class ComparisonProject {
     };
   }
 
-  private binding(symbol: ts.Symbol | undefined): ts.Declaration | undefined {
+  private binding(symbol: NativeSymbol | undefined): ast.Node | undefined {
     if (!symbol) return undefined;
-    if (symbol.flags & ts.SymbolFlags.Alias)
-      symbol = this.checker.getAliasedSymbol(symbol);
-    const declarations = symbol.declarations ?? [];
-    return (
-      declarations.find((d) => ts.isFunctionDeclaration(d) && d.body) ??
-      symbol.valueDeclaration ??
-      declarations[0]
-    );
+    if (this.declarations.has(symbol)) return this.declarations.get(symbol);
+    let node: ast.Node | undefined;
+    if (symbol.flags & compiler.aliasFlag) {
+      this.declarations.set(symbol, undefined);
+      node = this.binding(this.native.checker.getAliasedSymbol(symbol));
+    } else {
+      node = (symbol.valueDeclaration ?? symbol.declarations[0])?.resolve();
+      if (
+        symbol.declarations.length > 1 &&
+        node &&
+        ts.isFunctionDeclaration(node)
+      ) {
+        for (const item of symbol.declarations) {
+          const candidate = item.resolve();
+          if (
+            candidate &&
+            ts.isFunctionDeclaration(candidate) &&
+            candidate.body
+          ) {
+            node = candidate;
+            break;
+          }
+        }
+      }
+    }
+    this.declarations.set(symbol, node);
+    return node;
   }
 
-  private named(path: string, name: string): ts.Declaration {
-    const file = this.program.getSourceFile(resolve(this.root, path));
+  calls(filename: string): readonly ast.CallExpression[] {
+    const file = this.native.program.getSourceFile(filename);
+    if (!file) return [];
+    const cached = this.callLists.get(file);
+    if (cached) return cached;
+    const calls: ast.CallExpression[] = [];
+    function visit(node: ast.Node) {
+      if (ts.isCallExpression(node)) calls.push(node);
+      node.forEachChild(visit);
+    }
+    visit(file);
+    // The checker lives in a separate native process. Resolve one file's
+    // syntactic call heads in one request and share the result across rules.
+    if (calls.length) {
+      const heads = calls.map((call) => unwrap(call.expression));
+      const symbols = this.native.checker.getSymbolAtLocation(heads);
+      heads.forEach((head, index) => this.references.set(head, symbols[index]));
+    }
+    this.callLists.set(file, calls);
+    return calls;
+  }
+
+  private symbolAt(node: ast.Node) {
+    if (!this.references.has(node)) {
+      this.references.set(node, this.native.checker.getSymbolAtLocation(node));
+    }
+    return this.references.get(node);
+  }
+
+  private named(path: string, name: string): ast.Node {
+    const file = this.native.program.getSourceFile(resolve(this.root, path));
     if (file) {
-      const module = this.checker.getSymbolAtLocation(file);
+      const module = this.symbolAt(file);
       if (module) {
         const value = this.binding(
-          this.checker
-            .getExportsOfModule(module)
-            .find((symbol) => symbol.name === name),
+          this.native.checker.getMemberInModuleExports(module, name),
         );
         if (value) return value;
       }
@@ -210,14 +244,14 @@ export class ComparisonProject {
     throw new Error(`Cannot resolve comparison target '${name}' in '${path}'.`);
   }
 
-  target(call: ts.CallExpression): ts.Declaration | undefined {
+  target(call: ast.CallExpression): ast.Node | undefined {
     if (this.targets.has(call)) return this.targets.get(call);
     const expression = unwrap(call.expression);
     let decl =
       ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)
         ? expression
-        : this.binding(this.checker.getSymbolAtLocation(expression));
-    const seen = new Set<ts.Node>();
+        : this.binding(this.symbolAt(expression));
+    const seen = new Set<ast.Node>();
     while (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
       if (seen.has(decl) || !(decl.parent.flags & ts.NodeFlags.Const)) {
         decl = undefined;
@@ -231,18 +265,18 @@ export class ComparisonProject {
       }
       if (!ts.isIdentifier(value) && !ts.isPropertyAccessExpression(value))
         break;
-      decl = this.binding(this.checker.getSymbolAtLocation(value));
+      decl = this.binding(this.symbolAt(value));
     }
     this.targets.set(call, decl);
     return decl;
   }
 
   trace(
-    node: ts.Expression,
+    node: ast.Expression,
     fields: readonly string[] = [],
-    stop?: ts.Declaration,
+    stop?: ast.Node,
     frame?: Frame,
-    evidence: readonly ts.Node[] = [],
+    evidence: readonly ast.Node[] = [],
   ): Origin {
     const value = unwrap(node);
     const gap = (reason: string) =>
@@ -260,7 +294,7 @@ export class ComparisonProject {
       );
     if (
       ts.isElementAccessExpression(value) &&
-      ts.isStringLiteralLike(value.argumentExpression)
+      ts.isStringLiteralLikeNode(value.argumentExpression)
     ) {
       return this.trace(
         value.expression,
@@ -284,7 +318,9 @@ export class ComparisonProject {
         }
         if (
           !prop.name ||
-          !(ts.isIdentifier(prop.name) || ts.isStringLiteralLike(prop.name)) ||
+          !(
+            ts.isIdentifier(prop.name) || ts.isStringLiteralLikeNode(prop.name)
+          ) ||
           prop.name.text !== fields[0]
         )
           continue;
@@ -304,8 +340,8 @@ export class ComparisonProject {
     }
     if (ts.isIdentifier(value)) {
       const symbol = ts.isShorthandPropertyAssignment(value.parent)
-        ? this.checker.getShorthandAssignmentValueSymbol(value.parent)
-        : this.checker.getSymbolAtLocation(value);
+        ? this.native.checker.getShorthandAssignmentValueSymbol(value.parent)
+        : this.symbolAt(value);
       const decl = this.binding(symbol);
       if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
         if (!(decl.parent.flags & ts.NodeFlags.Const))
@@ -318,7 +354,7 @@ export class ComparisonProject {
           path,
         );
       }
-      if (decl && ts.isParameter(decl)) {
+      if (decl && ts.isParameterDeclaration(decl)) {
         const owner = frameAt(decl, frame);
         if (owner) {
           const index = owner.fn.parameters.indexOf(decl);

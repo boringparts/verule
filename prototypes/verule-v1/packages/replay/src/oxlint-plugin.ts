@@ -1,12 +1,13 @@
 import { resolve } from "node:path";
 
-import ts from "typescript";
+import type * as ast from "typescript-7/unstable/ast";
 
 import {
   ComparisonProject,
   type Origin,
   type Point,
 } from "./oxlint-analysis.ts";
+import { ts } from "./oxlint-compiler.ts";
 
 type RuleName = "contract-instance" | "validated-input";
 
@@ -20,15 +21,15 @@ export interface ComparisonFinding {
 
 function finding(
   project: ComparisonProject,
-  rule: RuleName,
+  ruleName: RuleName,
   kind: ComparisonFinding["kind"],
-  node: ts.Node,
+  node: ast.Node,
   reason: string,
-  evidence: readonly ts.Node[],
+  evidence: readonly ast.Node[],
 ): ComparisonFinding {
   return {
     kind,
-    ruleId: `cli/${rule}`,
+    ruleId: `cli/${ruleName}`,
     location: project.point(node),
     reason,
     evidence: [...new Set(evidence)].map((item) => project.point(item)),
@@ -37,7 +38,7 @@ function finding(
 
 function compareInstance(
   project: ComparisonProject,
-  call: ts.CallExpression,
+  call: ast.CallExpression,
 ): ComparisonFinding | undefined {
   const [contract, options] = call.arguments;
   if (!contract || !options) return undefined;
@@ -84,7 +85,7 @@ function compareInstance(
 
 function compareInput(
   project: ComparisonProject,
-  call: ts.CallExpression,
+  call: ast.CallExpression,
 ): ComparisonFinding | undefined {
   const input = call.arguments[2];
   const options = call.arguments[3];
@@ -131,7 +132,7 @@ interface PluginContext {
 }
 
 // Oxlint owns worker and file lifetimes. A one-thread replay constructs the
-// independent TypeScript program once and shares it across both plugin rules.
+// selected native compiler session once and shares it across both plugin rules.
 let shared: ComparisonProject | undefined;
 
 function rule(name: RuleName) {
@@ -147,38 +148,32 @@ function rule(name: RuleName) {
             ),
           );
           const project = shared;
-          const file = project.program.getSourceFile(
+          for (const node of project.calls(
             resolve(context.cwd, context.filename),
-          );
-          if (!file) return;
-          function visit(node: ts.Node): void {
-            if (ts.isCallExpression(node)) {
-              const target = project.target(node);
-              const result =
-                name === "contract-instance" && target === project.execute
-                  ? compareInstance(project, node)
-                  : name === "validated-input" && target === project.dispatch
-                    ? compareInput(project, node)
-                    : undefined;
-              if (result) {
-                // Oxlint's report location is local to the visitor file. The JSON
-                // payload preserves the true source and cross-file evidence for gaps.
-                const point =
-                  result.location.file === project.point(node).file
-                    ? result.location
-                    : project.point(node);
-                context.report({
-                  loc: {
-                    start: { line: point.line, column: point.column - 1 },
-                    end: { line: point.endLine, column: point.endColumn - 1 },
-                  },
-                  message: JSON.stringify(result),
-                });
-              }
+          )) {
+            const target = project.target(node);
+            const result =
+              name === "contract-instance" && target === project.execute
+                ? compareInstance(project, node)
+                : name === "validated-input" && target === project.dispatch
+                  ? compareInput(project, node)
+                  : undefined;
+            if (result) {
+              // Oxlint's report location is local to the visitor file. The JSON
+              // payload preserves the true source and cross-file evidence for gaps.
+              const point =
+                result.location.file === project.point(node).file
+                  ? result.location
+                  : project.point(node);
+              context.report({
+                loc: {
+                  start: { line: point.line, column: point.column - 1 },
+                  end: { line: point.endLine, column: point.endColumn - 1 },
+                },
+                message: JSON.stringify(result),
+              });
             }
-            ts.forEachChild(node, visit);
           }
-          visit(file);
         },
       };
     },

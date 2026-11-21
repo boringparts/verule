@@ -16,15 +16,14 @@
     "@verule/examples": "workspace:*",
     "@verule/sdk": "workspace:*",
     "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
     "tsrs": "7.1.0-beta.tsrs4",
-    "typescript": "5.9.3"
+    "typescript-7": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "@verule-v1/tooling-config": "workspace:*",
-    "oxfmt": "catalog:",
-    "oxlint-tsgolint": "catalog:",
-    "typescript-7": "catalog:"
+    "oxfmt": "catalog:"
   },
   "engines": {
     "node": "^26.13.0"
