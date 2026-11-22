@@ -1068,6 +1068,10 @@ fn execute_list_branches_step(
     Ok(StepResult::ListBranches { items })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Executes branchCoverage step with optional function or local scope handle."
+)]
 fn execute_branch_coverage_step(
     snapshot: &mut SnapshotState,
     project_id: &str,

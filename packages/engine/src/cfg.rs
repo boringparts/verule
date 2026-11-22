@@ -921,25 +921,22 @@ impl CfgBuilder<'_> {
         break_to: Option<usize>,
         continue_to: Option<usize>,
     ) -> usize {
-        match node.kind() {
-            Kind::LabeledStatement => {
-                self.record_gap(
-                    "unmodeled-jump",
-                    "Labeled statements are not precisely modeled.",
-                    node,
-                );
-                let inner = node.as_labeled_statement().statement();
-                let inner_entry = self.stmt(inner, next, break_to, continue_to);
-                self.add_edge(here, inner_entry, EdgeKind::Ordinary);
-            }
-            _ => {
-                self.record_gap(
-                    "unmodeled-loop",
-                    "Control flow through loops is not precisely modeled.",
-                    node,
-                );
-                self.scan_unmodeled_children(node, here, next, None, None);
-            }
+        if node.kind() == Kind::LabeledStatement {
+            self.record_gap(
+                "unmodeled-jump",
+                "Labeled statements are not precisely modeled.",
+                node,
+            );
+            let inner = node.as_labeled_statement().statement();
+            let inner_entry = self.stmt(inner, next, break_to, continue_to);
+            self.add_edge(here, inner_entry, EdgeKind::Ordinary);
+        } else {
+            self.record_gap(
+                "unmodeled-loop",
+                "Control flow through loops is not precisely modeled.",
+                node,
+            );
+            self.scan_unmodeled_children(node, here, next, None, None);
         }
         here
     }
