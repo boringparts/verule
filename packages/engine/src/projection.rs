@@ -1082,11 +1082,18 @@ fn run_find_syntax(
             .collect()
     });
 
+    let explicit_file_targeted = range.is_some() || file_filter.is_some();
     let mut source_files: Vec<(String, P<SourceFile>)> = program
         .get_source_files()
         .iter()
         .copied()
-        .filter(|&sf| is_project_source_file(program, sf))
+        .filter(|&sf| {
+            if explicit_file_targeted {
+                !program.is_source_file_default_library(sf.path())
+            } else {
+                is_project_source_file(program, sf)
+            }
+        })
         .filter_map(|sf| {
             let rel = relative_to_cwd(&snapshot.cwd, sf.file_name());
             if let Some(target_file) = &range_file

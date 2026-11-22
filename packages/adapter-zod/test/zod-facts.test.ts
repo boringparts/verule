@@ -961,4 +961,149 @@ void describe("@verule/adapter-zod", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("extracts drizzle-zod createSelectSchema(table) with .extend/.pick/.transform and cross-package workspace imports", async () => {
+    const root = createTempProject({
+      "packages/db/package.json": JSON.stringify({
+        name: "@acme/db",
+        version: "1.0.0",
+        type: "module",
+        exports: { ".": "./src/index.ts" },
+      }),
+      "packages/db/src/drizzle-stub.ts": [
+        "export type Column<T = unknown> = {",
+        "  readonly _type: T;",
+        "  notNull: () => Column<T>;",
+        "  primaryKey: () => Column<T>;",
+        "  default: (v: T) => Column<T>;",
+        "};",
+        "declare const col: Column<any>;",
+        "export const integer = (_name?: string) => col;",
+        "export const text = (_name?: string) => col;",
+        "export function sqliteTable<T extends Record<string, unknown>>(_name: string, cols: T): T { return cols; }",
+        "export function createSelectSchema(_table: unknown, _refine?: Record<string, unknown>): any { return {}; }",
+        "",
+      ].join("\n"),
+      "packages/db/src/page.ts": [
+        'import { integer, sqliteTable, text } from "./drizzle-stub.js";',
+        "",
+        'export const page = sqliteTable("page", {',
+        '  id: integer("id").primaryKey(),',
+        '  slug: text("slug").notNull(),',
+        '  customDomain: text("custom_domain"),',
+        '  password: text("password"),',
+        '  accessType: text("access_type").notNull().default("public"),',
+        "});",
+        "",
+      ].join("\n"),
+      "packages/db/src/validation.ts": [
+        'import { z } from "zod";',
+        'import { createSelectSchema } from "./drizzle-stub.js";',
+        'import { page } from "./page.js";',
+        "",
+        "export const selectPageSchema = createSelectSchema(page)",
+        "  .extend({",
+        '    password: z.string().nullable().prefault(""),',
+        '    accessType: z.enum(["public", "private"]).prefault("public"),',
+        "  })",
+        "  .transform((v: Record<string, unknown>) => ({ ...v }));",
+        "",
+      ].join("\n"),
+      "packages/db/src/index.ts": [
+        'export { page } from "./page.js";',
+        'export { selectPageSchema } from "./validation.js";',
+        "",
+      ].join("\n"),
+      "src/router.ts": [
+        'import { selectPageSchema } from "@acme/db";',
+        "",
+        "const gateFieldsSchema = selectPageSchema.pick({",
+        "  slug: true,",
+        "  customDomain: true,",
+        "  password: true,",
+        "  accessType: true,",
+        "});",
+        "",
+        "export function parseGate(input: unknown) {",
+        "  return gateFieldsSchema.parse(input);",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    mkdirSync(join(root, "node_modules", "@acme"), { recursive: true });
+    symlinkSync(
+      join(root, "packages", "db"),
+      join(root, "node_modules", "@acme", "db"),
+      "dir",
+    );
+    symlinkSync(
+      join(packageRoot, "node_modules", "zod"),
+      join(root, "node_modules", "zod"),
+      "dir",
+    );
+
+    let inputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorInputFieldsFactValue
+    >[] = [];
+    let outputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorOutputFieldsFactValue
+    >[] = [];
+
+    const rule = defineRule({
+      id: "inspect-create-select-schema",
+      run: async (ctx) => {
+        inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+        outputResults = await ctx.facts(ValidatorOutputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: [zodAdapter],
+          rules: [rule],
+        }),
+      });
+      assert.equal(report.status, "clean");
+      assert.equal(inputResults.length, 1);
+
+      const gateIn = inputResults[0]!;
+      assert.equal(gateIn.value.schemaName, "gateFieldsSchema");
+      assert.deepEqual(gateIn.value.requiredFields, ["customDomain", "slug"]);
+      assert.deepEqual(gateIn.value.defaultedFields, [
+        "accessType",
+        "password",
+      ]);
+      assert.equal(gateIn.value.fields.customDomain?.nullable, true);
+      assert.equal(gateIn.value.fields.slug?.nullable, false);
+
+      assert.ok(
+        gateIn.evidence.some((ev) => ev.at?.file === "packages/db/src/page.ts"),
+      );
+      assert.ok(
+        gateIn.evidence.some(
+          (ev) => ev.at?.file === "packages/db/src/validation.ts",
+        ),
+      );
+
+      const gateOut = outputResults[0]!;
+      assert.deepEqual(gateOut.value.presentFields, [
+        "accessType",
+        "customDomain",
+        "password",
+        "slug",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
