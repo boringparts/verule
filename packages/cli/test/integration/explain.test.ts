@@ -394,3 +394,66 @@ export default defineConfig({
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+void test("verule check --at --output json strips undefined properties from checkpoint details", async () => {
+  const root = mkdtempSync(join(tmpdir(), "verule-cli-explain-undef-"));
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "tsconfig.json"),
+    JSON.stringify({ include: ["src/**/*.ts"] }),
+    "utf8",
+  );
+  writeFileSync(join(root, "src", "app.ts"), "export const x = 1;\n", "utf8");
+  const sdkUrl = import.meta.resolve("@verule/sdk");
+  writeFileSync(
+    join(root, "verule.config.mjs"),
+    `import { defineConfig, defineRule } from ${JSON.stringify(sdkUrl)};
+
+export default defineConfig({
+  tsconfig: "tsconfig.json",
+  rules: [
+    defineRule({
+      id: "rule-with-optional-detail",
+      run: async (ctx) => {
+        const decls = await ctx.findSyntax({ kinds: ["VariableDeclaration"] });
+        for (const decl of decls) {
+          ctx.checkpoint("checked-decl", decl.location, "pass", () => ({
+            present: true,
+            optionalName: undefined,
+          }));
+        }
+      },
+    }),
+  ],
+});
+`,
+    "utf8",
+  );
+
+  try {
+    const res = await captureCli(
+      ["check", "--at", "src/app.ts:1", "--output", "json"],
+      root,
+    );
+    assert.equal(res.status, 0, res.stderr);
+    const parsed = JSON.parse(res.stdout) as {
+      readonly kind: string;
+      readonly data: {
+        readonly explanation: {
+          readonly checkpoints: readonly {
+            readonly name: string;
+            readonly detail?: Record<string, unknown>;
+          }[];
+        };
+      };
+    };
+    assert.equal(parsed.kind, "data");
+    const cp = parsed.data.explanation.checkpoints.find(
+      (item) => item.name === "checked-decl",
+    );
+    assert.ok(cp);
+    assert.deepEqual(cp.detail, { present: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -338,6 +338,40 @@ export function toWireFactConflict(
   };
 }
 
+function sanitizeWireJsonValue(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) =>
+      item === undefined ? null : sanitizeWireJsonValue(item),
+    );
+  }
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (item !== undefined) {
+        out[key] = sanitizeWireJsonValue(item);
+      }
+    }
+    return out;
+  }
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value === "bigint" || typeof value === "symbol") {
+    return value.toString();
+  }
+  return null;
+}
+
 function toWireObservation(obs: ObservationReport): WireObservation {
   return {
     mode: obs.mode,
@@ -388,9 +422,41 @@ function toWireObservation(obs: ObservationReport): WireObservation {
               ? { durationMs: entry.durationMs }
               : {}),
             ...(entry.at !== undefined ? { at: { ...entry.at } } : {}),
-            ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+            ...(entry.detail !== undefined
+              ? { detail: sanitizeWireJsonValue(entry.detail) }
+              : {}),
           })),
         }
+      : {}),
+  };
+}
+
+function toWireExplainQueryStep(q: ExplainResult["queries"][number]) {
+  return {
+    queryIndex: q.queryIndex,
+    op: q.op,
+    projectId: q.projectId,
+    provider: q.provider,
+    cacheStatus: q.cacheStatus,
+    candidateCount: q.candidateCount,
+    matchedTarget: q.matchedTarget,
+    durationMs: q.durationMs,
+    ...(q.summary !== undefined ? { summary: q.summary } : {}),
+    ...(q.detail !== undefined
+      ? { detail: sanitizeWireJsonValue(q.detail) }
+      : {}),
+  };
+}
+
+function toWireExplainCheckpoint(cp: ExplainResult["checkpoints"][number]) {
+  return {
+    name: cp.name,
+    ruleId: cp.ruleId,
+    projectId: cp.projectId,
+    outcome: cp.outcome,
+    ...(cp.at !== undefined ? { at: { ...cp.at } } : {}),
+    ...(cp.detail !== undefined
+      ? { detail: sanitizeWireJsonValue(cp.detail) }
       : {}),
   };
 }
@@ -410,26 +476,18 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
     matchingCandidates: exp.matchingCandidates.map((loc) => ({ ...loc })),
     ...(exp.excludedByQuery !== undefined
       ? {
-          excludedByQuery: {
-            ...exp.excludedByQuery,
-          },
+          excludedByQuery: toWireExplainQueryStep(exp.excludedByQuery),
         }
       : {}),
     ...(exp.excludedByCheckpoint !== undefined
       ? {
-          excludedByCheckpoint: {
-            ...exp.excludedByCheckpoint,
-            ...(exp.excludedByCheckpoint.at !== undefined
-              ? { at: { ...exp.excludedByCheckpoint.at } }
-              : {}),
-          },
+          excludedByCheckpoint: toWireExplainCheckpoint(
+            exp.excludedByCheckpoint,
+          ),
         }
       : {}),
-    queries: exp.queries.map((q) => ({ ...q })),
-    checkpoints: exp.checkpoints.map((cp) => ({
-      ...cp,
-      ...(cp.at !== undefined ? { at: { ...cp.at } } : {}),
-    })),
+    queries: exp.queries.map(toWireExplainQueryStep),
+    checkpoints: exp.checkpoints.map(toWireExplainCheckpoint),
     gaps: exp.gaps.map((g) => ({
       kind: g.kind,
       message: g.message,
