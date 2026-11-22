@@ -3,6 +3,21 @@ import type {
   BranchCoverageOptions,
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
+import type {
+  AssignabilityPair,
+  AssignabilityResult,
+  CallProjectionSelection,
+  DeclarationProjectionSelection,
+  ProjectedCallResolutionRow,
+  ProjectedCallRow,
+  ProjectedDeclarationRow,
+  ProjectedSignatureRow,
+  ProjectedSyntaxLookupRow,
+  ProjectedTypeRow,
+  SignatureProjectionSelection,
+  SyntaxLookupSelection,
+  TypeProjectionSelection,
+} from "./projection.ts";
 
 export const REPORT_SCHEMA_VERSION = "1" as const;
 
@@ -52,6 +67,7 @@ export type CheckpointOutcome = "pass" | "exclude" | "info";
 export type SyntaxKind =
   | "Identifier"
   | "CallExpression"
+  | "NewExpression"
   | "ReturnStatement"
   | "VariableDeclaration"
   | "BinaryExpression"
@@ -61,24 +77,44 @@ export type SyntaxKind =
   | "ArrowFunction"
   | "FunctionExpression"
   | "MethodDeclaration"
+  | "MethodSignature"
+  | "CallSignature"
+  | "Constructor"
+  | "FunctionType"
   | "StringLiteral"
   | "NumericLiteral"
   | "Parameter"
-  | "NewExpression"
+  | "PropertyAssignment"
+  | "ShorthandPropertyAssignment"
+  | "PropertyDeclaration"
+  | "PropertySignature"
+  | "ClassDeclaration"
+  | "InterfaceDeclaration"
+  | "TypeAliasDeclaration"
+  | "ImportDeclaration"
+  | "ImportSpecifier"
+  | "ExportSpecifier"
+  | "Block"
+  | "TypeReference"
   | "SwitchStatement"
   | "CaseClause"
   | "DefaultClause"
   | "ConditionalExpression"
   | "ThrowStatement"
   | "TryStatement"
-  | "Block"
   | "ExpressionStatement"
   | "VariableStatement";
 
 declare const objectKindBrand: unique symbol;
 declare const sessionBrand: unique symbol;
 
-export type ProgramObjectKind = "syntax" | "type" | "branch";
+export type ProgramObjectKind =
+  | "syntax"
+  | "declaration"
+  | "call"
+  | "signature"
+  | "type"
+  | "branch";
 
 export interface ProgramRef<K extends ProgramObjectKind = ProgramObjectKind> {
   readonly [objectKindBrand]: K;
@@ -89,6 +125,9 @@ export interface ProgramRef<K extends ProgramObjectKind = ProgramObjectKind> {
 }
 
 export type SyntaxRef = ProgramRef<"syntax">;
+export type DeclarationRef = ProgramRef<"declaration">;
+export type CallRef = ProgramRef<"call">;
+export type SignatureRef = ProgramRef<"signature">;
 export type TypeRef = ProgramRef<"type">;
 export type BranchRef = ProgramRef<"branch">;
 
@@ -316,9 +355,21 @@ export type ExplainReport = CheckReport & {
   readonly explanation: ExplainResult;
 };
 
+export type SourceRange = {
+  readonly file: string;
+  readonly startLine?: number;
+  readonly startColumn?: number;
+  readonly endLine?: number;
+  readonly endColumn?: number;
+  readonly start?: number;
+  readonly end?: number;
+  readonly match?: "within" | "intersects";
+};
+
 export type FindSyntaxOptions = {
-  readonly kinds: readonly SyntaxKind[];
+  readonly kinds?: readonly SyntaxKind[];
   readonly files?: readonly string[];
+  readonly range?: SourceRange;
 };
 
 export type SyntaxNodeResult = {
@@ -330,6 +381,8 @@ export type SyntaxNodeResult = {
   readonly arguments?: readonly SyntaxRef[];
   readonly name?: SyntaxRef;
   readonly initializer?: SyntaxRef;
+  readonly body?: SyntaxRef;
+  readonly parameters?: readonly SyntaxRef[];
 };
 
 export type TypeAtResult = {
@@ -355,6 +408,37 @@ export type RuleContext = {
   branchCoverage: (
     options: BranchCoverageOptions,
   ) => Promise<readonly BranchCoverageItem[]>;
+  resolveDeclarations: <
+    const S extends DeclarationProjectionSelection = Record<never, never>,
+  >(
+    targets: readonly (SyntaxRef | CallRef | SignatureRef)[],
+    options?: { readonly select?: S },
+  ) => Promise<readonly ProjectedDeclarationRow<S>[]>;
+  resolveCalls: <
+    const S extends CallProjectionSelection = Record<never, never>,
+  >(
+    targets: readonly SyntaxRef[],
+    options?: { readonly select?: S },
+  ) => Promise<readonly ProjectedCallResolutionRow<S>[]>;
+  projectCalls: <const S extends CallProjectionSelection>(
+    calls: readonly CallRef[],
+    options: { readonly select: S },
+  ) => Promise<readonly ProjectedCallRow<S>[]>;
+  projectSignatures: <const S extends SignatureProjectionSelection>(
+    signatures: readonly SignatureRef[],
+    options: { readonly select: S },
+  ) => Promise<readonly ProjectedSignatureRow<S>[]>;
+  projectTypes: <const S extends TypeProjectionSelection>(
+    types: readonly TypeRef[],
+    options: { readonly select: S },
+  ) => Promise<readonly ProjectedTypeRow<S>[]>;
+  isAssignableTo: (
+    pairs: readonly AssignabilityPair[],
+  ) => Promise<readonly AssignabilityResult[]>;
+  syntaxOf: <const S extends SyntaxLookupSelection = Record<never, never>>(
+    targets: readonly (DeclarationRef | CallRef | SignatureRef)[],
+    options?: { readonly select?: S },
+  ) => Promise<readonly ProjectedSyntaxLookupRow<S>[]>;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.

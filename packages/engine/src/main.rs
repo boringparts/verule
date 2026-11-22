@@ -1,5 +1,6 @@
 mod cfg;
 mod observe;
+mod projection;
 mod projects;
 mod serve;
 

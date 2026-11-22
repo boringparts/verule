@@ -19,6 +19,7 @@ import {
   normalizeTargetSpec,
   type EngineCallIoMetrics,
 } from "./observation.ts";
+import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
 import {
   buildDiagnostics,
   buildFileOrigins,
@@ -69,6 +70,8 @@ type EngineSyntaxItem = {
   readonly arguments?: readonly string[];
   readonly name?: string;
   readonly initializer?: string;
+  readonly body?: string;
+  readonly parameters?: readonly string[];
 };
 
 type EngineTypeItem = {
@@ -80,6 +83,7 @@ type EngineTypeItem = {
   readonly isLiteral: boolean;
   readonly literalValue?: string | number | boolean;
   readonly unionMembers?: readonly string[];
+  readonly gaps?: readonly Gap[];
 };
 
 type EngineBatchResult = {
@@ -248,6 +252,30 @@ function toSyntaxNodeResult(
           ),
         }
       : {}),
+    ...(item.body !== undefined
+      ? {
+          body: makeProgramRef(
+            "syntax",
+            sessionToken,
+            projectId,
+            snapshotId,
+            item.body,
+          ),
+        }
+      : {}),
+    ...(item.parameters !== undefined
+      ? {
+          parameters: item.parameters.map((paramId) =>
+            makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              paramId,
+            ),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -408,14 +436,50 @@ export async function openSession(
     collector: ObservationCollector,
     recordRuleEngineMs: (ms: number) => void,
   ): RuleContext {
+    const recordGaps = (gaps: readonly Gap[]): void => {
+      for (const gap of gaps) {
+        collectedGaps.push(gap);
+      }
+    };
+
+    const projectionQueries = createProjectionQueries({
+      client,
+      sessionToken,
+      snapshotId,
+      projectId: project.projectId,
+      assertOpen,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, candidateCount, durationMs) => {
+              collector.addEngineQueryMs(durationMs);
+              recordRuleEngineMs(durationMs);
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus: "computed",
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
     return {
       project,
+      ...projectionQueries,
       findSyntax: async (query: FindSyntaxOptions) => {
         assertOpen();
         const cacheKey = JSON.stringify([
           project.projectId,
-          query.kinds.toSorted(),
+          query.kinds ? query.kinds.toSorted() : null,
           query.files ? query.files.toSorted() : null,
+          query.range ?? null,
         ]);
         const cached = syntaxCache.get(cacheKey);
         const queryStart = collector.isActive() ? performance.now() : 0;
@@ -436,9 +500,14 @@ export async function openSession(
                 steps: [
                   {
                     op: "findSyntax",
-                    kinds: query.kinds,
+                    ...(query.kinds !== undefined
+                      ? { kinds: query.kinds }
+                      : {}),
                     ...(query.files !== undefined
                       ? { files: query.files }
+                      : {}),
+                    ...(query.range !== undefined
+                      ? { range: query.range }
                       : {}),
                   },
                 ],
@@ -479,6 +548,7 @@ export async function openSession(
                 )
                 .map((item) => item.location)
             : undefined;
+          const kindsLabel = query.kinds ? query.kinds.join(", ") : "range";
           collector.recordQuery({
             ruleId,
             op: "findSyntax",
@@ -487,14 +557,19 @@ export async function openSession(
             cacheStatus,
             candidateCount: items.length,
             durationMs,
-            summary: `findSyntax(${query.kinds.join(", ")}) -> ${items.length} candidate(s)`,
+            summary: `findSyntax(${kindsLabel}) -> ${items.length} candidate(s)`,
             ...(matchedLocations !== undefined ? { matchedLocations } : {}),
             ...(collector.mode === "detail" || collector.isExplainEnabled()
               ? {
                   detail: {
-                    kinds: query.kinds,
+                    ...(query.kinds !== undefined
+                      ? { kinds: query.kinds }
+                      : {}),
                     ...(query.files !== undefined
                       ? { files: query.files }
+                      : {}),
+                    ...(query.range !== undefined
+                      ? { range: query.range }
                       : {}),
                   },
                 }
@@ -507,15 +582,12 @@ export async function openSession(
       typeAt: async (targets: readonly SyntaxRef[]) => {
         assertOpen();
         if (targets.length === 0) return [];
-
-        for (const target of targets) {
-          assertValidProgramRef(
-            target,
-            sessionToken,
-            snapshotId,
-            project.projectId,
-          );
-        }
+        validateProgramRefs(
+          targets,
+          sessionToken,
+          snapshotId,
+          project.projectId,
+        );
 
         const missingTargets: SyntaxRef[] = [];
         for (const target of targets) {
@@ -556,6 +628,9 @@ export async function openSession(
                   "ENGINE_ERROR",
                   `Engine omitted type result for target "${target.handleId}".`,
                 );
+              }
+              if (raw.gaps) {
+                recordGaps(raw.gaps);
               }
               return toTypeAtResult(
                 raw,

@@ -486,6 +486,155 @@ fn serves_list_branches_and_branch_coverage_statuses() {
     );
 }
 
+fn write_projection_fixture(root: &Path) -> (String, String) {
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    let tsconfig_path = root.join("tsconfig.json");
+    fs::write(
+        &tsconfig_path,
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*.ts"]
+}
+"#,
+    )
+    .expect("write tsconfig");
+
+    let source = [
+        "export function id<T>(x: T): T { return x; }",
+        "export function empty(): void {}",
+        "declare const dyn: any;",
+        "export function run(s: string, u: string | number) {",
+        "  const a = id(s);",
+        "  const b = empty();",
+        "  const c = dyn(u);",
+        "  return { a, b, c };",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(src_dir.join("mod.ts"), &source).expect("write mod.ts");
+    (normalized(root), normalized(&tsconfig_path))
+}
+
+#[test]
+fn projects_overloads_generics_assignability_and_three_state_fields() {
+    let temp = TempDirGuard::new("verule-engine-serve-projection");
+    let (cwd_str, tsconfig_str) = write_projection_fixture(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+    let (snapshot_id, project_id, _) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+
+    // Range-scoped findSyntax on lines 5-7 of src/mod.ts
+    let syntax_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{
+                    "op": "findSyntax",
+                    "kinds": ["CallExpression"],
+                    "range": { "file": "src/mod.ts", "startLine": 5, "endLine": 7 }
+                }]
+            }
+        }),
+    );
+    assert_eq!(syntax_resp["ok"], json!(true), "{syntax_resp}");
+    let call_items = syntax_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("items");
+    assert_eq!(call_items.len(), 3);
+
+    let resolve_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{
+                    "op": "resolveCalls",
+                    "targets": [
+                        call_items[0]["ref"],
+                        call_items[1]["ref"],
+                        call_items[2]["ref"]
+                    ],
+                    "select": {
+                        "signature": true,
+                        "arguments": true,
+                        "instantiatedParameterTypes": true,
+                        "returnType": true
+                    }
+                }]
+            }
+        }),
+    );
+    assert_eq!(resolve_resp["ok"], json!(true), "{resolve_resp}");
+    let rows = resolve_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("resolved call rows");
+    assert_eq!(rows.len(), 3);
+
+    // Unrequested field `callee` must not be serialized; requested fields must exist.
+    assert!(rows[0].get("callee").is_none());
+    assert_eq!(
+        rows[0]["instantiatedParameterTypes"][0]["type"]["typeText"],
+        json!("string")
+    );
+    assert_eq!(rows[0]["returnType"]["typeText"], json!("string"));
+    assert_eq!(rows[0]["gaps"], json!([]));
+
+    // Empty 0-arg call: `arguments: []`, `instantiatedParameterTypes: []`, `gaps: []`.
+    assert_eq!(rows[1]["arguments"], json!([]));
+    assert_eq!(rows[1]["instantiatedParameterTypes"], json!([]));
+    assert_eq!(rows[1]["returnType"]["typeText"], json!("void"));
+    assert_eq!(rows[1]["gaps"], json!([]));
+
+    // Indeterminate call on `any`: signature & returnType are explicit null, gaps non-empty.
+    assert_eq!(rows[2]["signature"], json!(null));
+    assert_eq!(rows[2]["returnType"], json!(null));
+    assert_eq!(rows[2]["gaps"][0]["kind"], json!("unresolved-signature"));
+
+    // Mismatched handle kind rejected with INVALID_REFERENCE_KIND.
+    let bad_kind_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 4,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "projectCalls", "targets": [call_items[0]["ref"]], "select": { "location": true } }]
+            }
+        }),
+    );
+    assert_eq!(bad_kind_resp["ok"], json!(false));
+    assert_eq!(
+        bad_kind_resp["error"]["code"],
+        json!("INVALID_REFERENCE_KIND")
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn emits_observation_metrics_in_summary_and_omits_when_off() {
     let temp = TempDirGuard::new("verule-engine-serve-observe-summary");

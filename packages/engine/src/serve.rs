@@ -9,26 +9,20 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tsrs_api::{Session, SessionOptions, session::SnapshotData};
-use tsrs_ast::{Kind, Node, SourceFile, get_source_file_of_node};
-use tsrs_checker::{LiteralValue, Type, TypeFlags, TypeFormatFlags};
-use tsrs_compiler::Program;
-use tsrs_core::{
-    P,
-    context::{CheckerLifetime, Context, with_checker_lifetime},
-};
+use tsrs_ast::{Node, Symbol, get_source_file_of_node};
+use tsrs_checker::{Signature, Type};
+use tsrs_core::P;
 use tsrs_project::ID as ProjectId;
-use tsrs_scanner::{get_ecma_line_and_utf16_character_of_position, get_token_pos_of_node};
 use tsrs_vfs::{FS, bundled, osvfs};
 
 use crate::cfg::{
     EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
 };
-use crate::observe::{
-    EngineRpcMetrics, EngineStepDetail, ObserveCollector, ObserveRequestConfig, elapsed_ms,
-};
+use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
+use crate::projection::{QueryStep, execute_query_batch};
+pub use crate::projection::{SourceLocation, node_location, slice_source_text};
 use crate::projects::{
-    ProjectSummary, is_project_source_file, normalize_path, open_projects_snapshot,
-    relative_to_cwd, release_tsrs_snapshot, resolve_against_cwd,
+    ProjectSummary, normalize_path, open_projects_snapshot, relative_to_cwd, release_tsrs_snapshot,
 };
 
 #[derive(Deserialize)]
@@ -63,13 +57,13 @@ struct RpcErrorResponse<'a> {
     error: RpcErrorPayload<'a>,
 }
 
-struct RpcErr {
-    code: &'static str,
-    message: String,
+pub struct RpcErr {
+    pub code: &'static str,
+    pub message: String,
 }
 
 impl RpcErr {
-    const fn new(code: &'static str, message: String) -> Self {
+    pub const fn new(code: &'static str, message: String) -> Self {
         Self { code, message }
     }
 }
@@ -94,28 +88,6 @@ struct QueryBatchParams {
     steps: Vec<QueryStep>,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "op", rename_all = "camelCase")]
-enum QueryStep {
-    FindSyntax {
-        #[serde(default)]
-        files: Option<Vec<String>>,
-        kinds: Vec<String>,
-    },
-    TypeAtLocation {
-        targets: Vec<String>,
-    },
-    ListBranches {
-        targets: Vec<String>,
-    },
-    BranchCoverage {
-        #[serde(default)]
-        function: Option<String>,
-        branches: Vec<String>,
-        targets: Vec<String>,
-    },
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotOpenResult {
@@ -130,67 +102,7 @@ struct SnapshotReleaseResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct QueryBatchResult {
-    results: Vec<StepResult>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum StepResult {
-    FindSyntax { items: Vec<SyntaxItem> },
-    TypeAtLocation { items: Vec<TypeItem> },
-    ListBranches { items: Vec<FunctionBranchesItem> },
-    BranchCoverage { items: Vec<BranchCoverageItem> },
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceLocation {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub end_line: u32,
-    pub end_column: u32,
-    pub start: u32,
-    pub end: u32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SyntaxItem {
-    #[serde(rename = "ref")]
-    node_ref: String,
-    kind: String,
-    text: String,
-    location: SourceLocation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expression: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    arguments: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    initializer: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TypeItem {
-    target: String,
-    type_ref: String,
-    type_text: String,
-    is_union: bool,
-    is_intersection: bool,
-    is_literal: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    literal_value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    union_members: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BranchEdgeItem {
+pub struct BranchEdgeItem {
     #[serde(rename = "ref")]
     branch_ref: String,
     kind: &'static str,
@@ -203,88 +115,205 @@ struct BranchEdgeItem {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FunctionBranchesItem {
-    target: String,
-    branches: Vec<BranchEdgeItem>,
-    gaps: Vec<GapItem>,
+pub struct FunctionBranchesItem {
+    pub target: String,
+    pub branches: Vec<BranchEdgeItem>,
+    pub gaps: Vec<GapItem>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BranchCoverageItem {
-    target: String,
-    status: &'static str,
-    evidence: Vec<EvidenceItem>,
-    gaps: Vec<GapItem>,
+pub struct BranchCoverageItem {
+    pub target: String,
+    pub status: &'static str,
+    pub evidence: Vec<EvidenceItem>,
+    pub gaps: Vec<GapItem>,
 }
 
 #[derive(Clone, Copy)]
-struct BranchHandle {
-    function_node: P<Node>,
-    edge_index: usize,
+pub struct BranchHandle {
+    pub function_node: P<Node>,
+    pub edge_index: usize,
 }
-enum HandlePayload {
+
+#[derive(Clone, Copy)]
+pub enum HandlePayload {
     Syntax(P<Node>),
-    Type(#[expect(dead_code, reason = "Retained for upcoming TypeRef follow-up queries.")] P<Type>),
+    Declaration {
+        node: P<Node>,
+        symbol: Option<P<Symbol>>,
+    },
+    Call(P<Node>),
+    Signature {
+        sig: P<Signature>,
+        call_node: Option<P<Node>>,
+    },
+    Type {
+        ty: P<Type>,
+        enclosing: Option<P<Node>>,
+    },
     Branch(BranchHandle),
 }
 
-struct HandleEntry {
-    project_id: String,
-    payload: HandlePayload,
+pub struct HandleEntry {
+    pub project_id: String,
+    pub payload: HandlePayload,
 }
 
-struct SnapshotState {
-    tsrs_snapshot_id: u64,
-    cwd: String,
-    snapshot_data: Arc<SnapshotData>,
-    project_ids: BTreeMap<String, ProjectId>,
-    handles: FxHashMap<String, HandleEntry>,
-    cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
-    next_handle_id: u64,
+pub struct SnapshotState {
+    pub tsrs_snapshot_id: u64,
+    pub cwd: String,
+    pub snapshot_data: Arc<SnapshotData>,
+    pub project_ids: BTreeMap<String, ProjectId>,
+    pub handles: FxHashMap<String, HandleEntry>,
+    pub cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
+    pub next_handle_id: u64,
 }
 
 impl SnapshotState {
-    fn alloc_syntax(&mut self, project_id: &str, node: P<Node>) -> String {
+    fn alloc_handle(&mut self, prefix: &str, project_id: &str, payload: HandlePayload) -> String {
         self.next_handle_id += 1;
-        let id = format!("syn:{}", self.next_handle_id);
+        let id = format!("{prefix}:{}", self.next_handle_id);
         self.handles.insert(
             id.clone(),
             HandleEntry {
                 project_id: project_id.to_string(),
-                payload: HandlePayload::Syntax(node),
+                payload,
             },
         );
         id
     }
 
-    fn alloc_type(&mut self, project_id: &str, ty: P<Type>) -> String {
-        self.next_handle_id += 1;
-        let id = format!("typ:{}", self.next_handle_id);
-        self.handles.insert(
-            id.clone(),
-            HandleEntry {
-                project_id: project_id.to_string(),
-                payload: HandlePayload::Type(ty),
-            },
-        );
-        id
+    pub fn alloc_syntax(&mut self, project_id: &str, node: P<Node>) -> String {
+        self.alloc_handle("syn", project_id, HandlePayload::Syntax(node))
     }
 
-    fn alloc_branch(&mut self, project_id: &str, branch: BranchHandle) -> String {
-        self.next_handle_id += 1;
-        let id = format!("brn:{}", self.next_handle_id);
-        self.handles.insert(
-            id.clone(),
-            HandleEntry {
-                project_id: project_id.to_string(),
-                payload: HandlePayload::Branch(branch),
-            },
-        );
-        id
+    pub fn alloc_declaration(
+        &mut self,
+        project_id: &str,
+        node: P<Node>,
+        symbol: Option<P<Symbol>>,
+    ) -> String {
+        self.alloc_handle(
+            "dec",
+            project_id,
+            HandlePayload::Declaration { node, symbol },
+        )
     }
 
-    fn get_or_build_cfg(
+    pub fn alloc_call(&mut self, project_id: &str, node: P<Node>) -> String {
+        self.alloc_handle("cal", project_id, HandlePayload::Call(node))
+    }
+
+    pub fn alloc_signature(
+        &mut self,
+        project_id: &str,
+        sig: P<Signature>,
+        call_node: Option<P<Node>>,
+    ) -> String {
+        self.alloc_handle(
+            "sig",
+            project_id,
+            HandlePayload::Signature { sig, call_node },
+        )
+    }
+
+    pub fn alloc_type(
+        &mut self,
+        project_id: &str,
+        ty: P<Type>,
+        enclosing: Option<P<Node>>,
+    ) -> String {
+        self.alloc_handle("typ", project_id, HandlePayload::Type { ty, enclosing })
+    }
+
+    pub fn alloc_branch(&mut self, project_id: &str, branch: BranchHandle) -> String {
+        self.alloc_handle("brn", project_id, HandlePayload::Branch(branch))
+    }
+
+    pub fn get_entry(&self, project_id: &str, handle_id: &str) -> Result<&HandleEntry, RpcErr> {
+        let Some(entry) = self.handles.get(handle_id) else {
+            return Err(RpcErr::new(
+                "STALE_REFERENCE",
+                format!("Program reference {handle_id} is expired or unknown."),
+            ));
+        };
+        if entry.project_id != project_id {
+            return Err(RpcErr::new(
+                "CROSS_PROJECT_REFERENCE",
+                format!(
+                    "Program reference {handle_id} belongs to project {}, not {project_id}.",
+                    entry.project_id
+                ),
+            ));
+        }
+        Ok(entry)
+    }
+
+    pub fn get_syntax_node(&self, project_id: &str, handle_id: &str) -> Result<P<Node>, RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Syntax(node) = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a syntax reference."),
+            ));
+        };
+        Ok(node)
+    }
+
+    pub fn get_call_node(&self, project_id: &str, handle_id: &str) -> Result<P<Node>, RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Call(node) = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a call reference."),
+            ));
+        };
+        Ok(node)
+    }
+
+    pub fn get_signature(
+        &self,
+        project_id: &str,
+        handle_id: &str,
+    ) -> Result<(P<Signature>, Option<P<Node>>), RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Signature { sig, call_node } = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a signature reference."),
+            ));
+        };
+        Ok((sig, call_node))
+    }
+
+    pub fn get_type_entry(
+        &self,
+        project_id: &str,
+        handle_id: &str,
+    ) -> Result<(P<Type>, Option<P<Node>>), RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Type { ty, enclosing } = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a type reference."),
+            ));
+        };
+        Ok((ty, enclosing))
+    }
+
+    pub fn get_branch(&self, project_id: &str, handle_id: &str) -> Result<BranchHandle, RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Branch(branch) = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a branch reference."),
+            ));
+        };
+        Ok(branch)
+    }
+
+    pub fn get_or_build_cfg(
         &mut self,
         project_id: &str,
         fn_node: P<Node>,
@@ -409,9 +438,7 @@ impl EngineServer {
             "query.batch" => {
                 let parsed: QueryBatchParams = serde_json::from_value(params)
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
-                let result = self.query_batch(parsed, observer)?;
-                serde_json::to_value(result)
-                    .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
+                self.query_batch(parsed, observer)
             }
             _ => Err(RpcErr::new(
                 "METHOD_NOT_FOUND",
@@ -466,7 +493,7 @@ impl EngineServer {
         &mut self,
         params: QueryBatchParams,
         observer: &mut ObserveCollector,
-    ) -> Result<QueryBatchResult, RpcErr> {
+    ) -> Result<Value, RpcErr> {
         let Some(snapshot) = self.snapshots.get_mut(&params.snapshot_id) else {
             return Err(RpcErr::new(
                 "STALE_SNAPSHOT",
@@ -489,18 +516,15 @@ impl EngineServer {
             .get_program(&pid)
             .map_err(|err| RpcErr::new("ENGINE_ERROR", err.to_string()))?;
 
-        let mut results = Vec::with_capacity(params.steps.len());
-        for step in params.steps {
-            results.push(execute_query_step(
-                snapshot,
-                &params.project_id,
-                program,
-                step,
-                observer,
-            )?);
-        }
-
-        Ok(QueryBatchResult { results })
+        let result = execute_query_batch(
+            snapshot,
+            &params.project_id,
+            program,
+            params.steps,
+            observer,
+        )?;
+        serde_json::to_value(result)
+            .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
     }
 
     fn shutdown(mut self) {
@@ -516,428 +540,14 @@ impl EngineServer {
     }
 }
 
-fn execute_query_step(
-    snapshot: &mut SnapshotState,
-    project_id: &str,
-    program: &'static Program,
-    step: QueryStep,
-    observer: &mut ObserveCollector,
-) -> Result<StepResult, RpcErr> {
-    let step_start = observer.start_step();
-    match step {
-        QueryStep::FindSyntax { files, kinds } => {
-            let items = run_find_syntax(snapshot, project_id, program, files.as_deref(), &kinds)?;
-            let raw_details = if observer.is_detail() {
-                items
-                    .iter()
-                    .map(|item| EngineStepDetail {
-                        kind: "candidate",
-                        file: Some(item.location.file.clone()),
-                        line: Some(item.location.line),
-                        column: Some(item.location.column),
-                        summary: format!("{} {}", item.kind, item.text),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            observer.record_step("findSyntax", step_start, items.len(), raw_details);
-            Ok(StepResult::FindSyntax { items })
-        }
-        QueryStep::TypeAtLocation { targets } => {
-            let items = run_type_at_location(snapshot, project_id, program, &targets)?;
-            let raw_details = if observer.is_detail() {
-                items
-                    .iter()
-                    .map(|item| EngineStepDetail {
-                        kind: "typeAtLocation",
-                        file: None,
-                        line: None,
-                        column: None,
-                        summary: format!("{} -> {}", item.target, item.type_text),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            observer.record_step("typeAtLocation", step_start, items.len(), raw_details);
-            Ok(StepResult::TypeAtLocation { items })
-        }
-        QueryStep::ListBranches { targets } => {
-            let items = run_list_branches(snapshot, project_id, &targets)?;
-            let raw_details = if observer.is_detail() {
-                items
-                    .iter()
-                    .map(|item| EngineStepDetail {
-                        kind: "listBranches",
-                        file: None,
-                        line: None,
-                        column: None,
-                        summary: format!(
-                            "{} -> {} branch(es), {} gap(s)",
-                            item.target,
-                            item.branches.len(),
-                            item.gaps.len()
-                        ),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            observer.record_step("listBranches", step_start, items.len(), raw_details);
-            Ok(StepResult::ListBranches { items })
-        }
-        QueryStep::BranchCoverage {
-            function,
-            branches,
-            targets,
-        } => {
-            let items = run_branch_coverage(
-                snapshot,
-                project_id,
-                function.as_deref(),
-                &branches,
-                &targets,
-            )?;
-            let raw_details = if observer.is_detail() {
-                items
-                    .iter()
-                    .map(|item| EngineStepDetail {
-                        kind: "branchCoverage",
-                        file: None,
-                        line: None,
-                        column: None,
-                        summary: format!("{} -> {}", item.target, item.status),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            observer.record_step("branchCoverage", step_start, items.len(), raw_details);
-            Ok(StepResult::BranchCoverage { items })
-        }
-    }
-}
-fn run_find_syntax(
-    snapshot: &mut SnapshotState,
-    project_id: &str,
-    program: &'static Program,
-    files: Option<&[String]>,
-    kinds: &[String],
-) -> Result<Vec<SyntaxItem>, RpcErr> {
-    if kinds.is_empty() {
-        return Err(RpcErr::new(
-            "INVALID_PARAMS",
-            "findSyntax requires at least one syntax kind.".to_string(),
-        ));
-    }
-
-    let mut target_kinds = Vec::with_capacity(kinds.len());
-    for kind_name in kinds {
-        let Some(kind) = parse_syntax_kind(kind_name) else {
-            return Err(RpcErr::new(
-                "INVALID_PARAMS",
-                format!("Unsupported syntax kind: {kind_name}"),
-            ));
-        };
-        target_kinds.push((kind, kind_name.as_str()));
-    }
-
-    let file_filter: Option<Vec<String>> = files.map(|list| {
-        list.iter()
-            .map(|f| relative_to_cwd(&snapshot.cwd, &resolve_against_cwd(&snapshot.cwd, f)))
-            .collect()
-    });
-
-    let mut source_files: Vec<(String, P<SourceFile>)> = program
-        .get_source_files()
-        .iter()
-        .copied()
-        .filter(|&sf| is_project_source_file(program, sf))
-        .filter_map(|sf| {
-            let rel = relative_to_cwd(&snapshot.cwd, sf.file_name());
-            if let Some(filter) = &file_filter
-                && !filter.iter().any(|item| item == &rel)
-            {
-                return None;
-            }
-            Some((rel, sf))
-        })
-        .collect();
-    source_files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut items = Vec::new();
-    for (rel_file, sf) in source_files {
-        collect_matching_nodes(
-            snapshot,
-            project_id,
-            sf,
-            &rel_file,
-            sf.as_node(),
-            &target_kinds,
-            &mut items,
-        );
-    }
-    Ok(items)
-}
-
-fn node_expression(node: P<Node>) -> Option<P<Node>> {
-    match node.kind() {
-        Kind::PropertyAccessExpression
-        | Kind::ElementAccessExpression
-        | Kind::ParenthesizedExpression
-        | Kind::CallExpression
-        | Kind::NewExpression
-        | Kind::AsExpression
-        | Kind::NonNullExpression
-        | Kind::SatisfiesExpression
-        | Kind::AwaitExpression
-        | Kind::IfStatement
-        | Kind::SwitchStatement
-        | Kind::ExpressionStatement
-        | Kind::ReturnStatement
-        | Kind::ThrowStatement
-        | Kind::CaseClause => node.expression(),
-        _ => None,
-    }
-}
-
-fn collect_matching_nodes(
-    snapshot: &mut SnapshotState,
-    project_id: &str,
-    sf: P<SourceFile>,
-    rel_file: &str,
-    node: P<Node>,
-    target_kinds: &[(Kind, &str)],
-    out: &mut Vec<SyntaxItem>,
-) {
-    if let Some((_, kind_label)) = target_kinds.iter().find(|(k, _)| *k == node.kind()) {
-        let location = node_location(sf, rel_file, node);
-        let text = slice_source_text(sf, location.start, location.end);
-        let node_ref = snapshot.alloc_syntax(project_id, node);
-
-        let expression = node_expression(node).map(|expr| snapshot.alloc_syntax(project_id, expr));
-
-        let arguments = if node.kind() == Kind::CallExpression {
-            Some(
-                node.arguments()
-                    .iter()
-                    .map(|&arg| snapshot.alloc_syntax(project_id, arg))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
-        let name = if node.kind() == Kind::VariableDeclaration {
-            node.name()
-                .map(|name_node| snapshot.alloc_syntax(project_id, name_node))
-        } else {
-            None
-        };
-
-        let initializer = if node.kind() == Kind::VariableDeclaration {
-            node.initializer()
-                .map(|init_node| snapshot.alloc_syntax(project_id, init_node))
-        } else {
-            None
-        };
-
-        out.push(SyntaxItem {
-            node_ref,
-            kind: (*kind_label).to_string(),
-            text,
-            location,
-            expression,
-            arguments,
-            name,
-            initializer,
-        });
-    }
-
-    node.for_each_child(&mut |child| {
-        collect_matching_nodes(snapshot, project_id, sf, rel_file, child, target_kinds, out);
-        false
-    });
-}
-
-struct ComputedType {
-    target_id: String,
-    ty: P<Type>,
-    type_text: String,
-    is_union: bool,
-    is_intersection: bool,
-    is_literal: bool,
-    literal_value: Option<Value>,
-    union_members: Option<Vec<String>>,
-}
-
-fn extract_type_info(
-    checker: &mut tsrs_compiler::CheckerHandle,
-    target_id: String,
-    node: P<Node>,
-) -> ComputedType {
-    let ty = checker.get_type_at_location(node);
-    let enclosing = node.parent().or(Some(node));
-    let type_text = checker.type_to_string_ex_exported(ty, enclosing, TypeFormatFlags::None, None);
-
-    let is_union = ty.is_union();
-    let is_intersection = ty.is_intersection();
-    let is_boolean_literal = ty.flags().contains(TypeFlags::BooleanLiteral);
-    let is_literal = ty.is_string_literal() || ty.is_number_literal() || is_boolean_literal;
-
-    let literal_value = if ty.is_string_literal() || ty.is_number_literal() {
-        ty.as_literal_type().value().and_then(|val| match val {
-            LiteralValue::String(s) => Some(Value::String(s.to_string())),
-            LiteralValue::Number(num) => serde_json::Number::from_f64(num.0).map(Value::Number),
-            LiteralValue::Boolean(b) => Some(Value::Bool(b)),
-            LiteralValue::BigInt(_) => None,
-        })
-    } else if is_boolean_literal {
-        match type_text.as_str() {
-            "true" => Some(Value::Bool(true)),
-            "false" => Some(Value::Bool(false)),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    let union_members = if is_union {
-        Some(
-            ty.types()
-                .iter()
-                .map(|&member| {
-                    checker.type_to_string_ex_exported(
-                        member,
-                        enclosing,
-                        TypeFormatFlags::None,
-                        None,
-                    )
-                })
-                .collect(),
-        )
-    } else {
-        None
-    };
-
-    ComputedType {
-        target_id,
-        ty,
-        type_text,
-        is_union,
-        is_intersection,
-        is_literal,
-        literal_value,
-        union_members,
-    }
-}
-
-fn resolve_syntax_handle(
-    snapshot: &SnapshotState,
-    project_id: &str,
-    handle_id: &str,
-) -> Result<P<Node>, RpcErr> {
-    let Some(entry) = snapshot.handles.get(handle_id) else {
-        return Err(RpcErr::new(
-            "STALE_REFERENCE",
-            format!("Program reference {handle_id} is expired or unknown."),
-        ));
-    };
-    if entry.project_id != project_id {
-        return Err(RpcErr::new(
-            "CROSS_PROJECT_REFERENCE",
-            format!(
-                "Program reference {handle_id} belongs to project {}, not {project_id}.",
-                entry.project_id
-            ),
-        ));
-    }
-    let HandlePayload::Syntax(node) = entry.payload else {
-        return Err(RpcErr::new(
-            "INVALID_REFERENCE_KIND",
-            format!("Program reference {handle_id} is not a syntax reference."),
-        ));
-    };
-    Ok(node)
-}
-
-fn resolve_branch_handle(
-    snapshot: &SnapshotState,
-    project_id: &str,
-    handle_id: &str,
-) -> Result<BranchHandle, RpcErr> {
-    let Some(entry) = snapshot.handles.get(handle_id) else {
-        return Err(RpcErr::new(
-            "STALE_REFERENCE",
-            format!("Program reference {handle_id} is expired or unknown."),
-        ));
-    };
-    if entry.project_id != project_id {
-        return Err(RpcErr::new(
-            "CROSS_PROJECT_REFERENCE",
-            format!(
-                "Program reference {handle_id} belongs to project {}, not {project_id}.",
-                entry.project_id
-            ),
-        ));
-    }
-    let HandlePayload::Branch(branch) = entry.payload else {
-        return Err(RpcErr::new(
-            "INVALID_REFERENCE_KIND",
-            format!("Program reference {handle_id} is not a branch reference."),
-        ));
-    };
-    Ok(branch)
-}
-
-fn run_type_at_location(
-    snapshot: &mut SnapshotState,
-    project_id: &str,
-    program: &'static Program,
-    targets: &[String],
-) -> Result<Vec<TypeItem>, RpcErr> {
-    let mut nodes = Vec::with_capacity(targets.len());
-    for handle_id in targets {
-        let node = resolve_syntax_handle(snapshot, project_id, handle_id)?;
-        nodes.push((handle_id.clone(), node));
-    }
-
-    let computed: Vec<ComputedType> = {
-        let ctx = with_checker_lifetime(&Context::background(), CheckerLifetime::API);
-        let mut checker = program.get_type_checker(&ctx);
-        nodes
-            .into_iter()
-            .map(|(target_id, node)| extract_type_info(&mut checker, target_id, node))
-            .collect()
-    };
-
-    let mut items = Vec::with_capacity(computed.len());
-    for entry in computed {
-        let type_ref = snapshot.alloc_type(project_id, entry.ty);
-        items.push(TypeItem {
-            target: entry.target_id,
-            type_ref,
-            type_text: entry.type_text,
-            is_union: entry.is_union,
-            is_intersection: entry.is_intersection,
-            is_literal: entry.is_literal,
-            literal_value: entry.literal_value,
-            union_members: entry.union_members,
-        });
-    }
-
-    Ok(items)
-}
-
-fn run_list_branches(
+pub fn run_list_branches(
     snapshot: &mut SnapshotState,
     project_id: &str,
     targets: &[String],
 ) -> Result<Vec<FunctionBranchesItem>, RpcErr> {
     let mut fn_nodes = Vec::with_capacity(targets.len());
     for handle_id in targets {
-        let node = resolve_syntax_handle(snapshot, project_id, handle_id)?;
+        let node = snapshot.get_syntax_node(project_id, handle_id)?;
         let Some(fn_node) = normalize_function_node(node) else {
             return Err(RpcErr::new(
                 "INVALID_REFERENCE_KIND",
@@ -990,7 +600,7 @@ fn run_list_branches(
     Ok(items)
 }
 
-fn run_branch_coverage(
+pub fn run_branch_coverage(
     snapshot: &mut SnapshotState,
     project_id: &str,
     function_handle: Option<&str>,
@@ -998,7 +608,7 @@ fn run_branch_coverage(
     target_handles: &[String],
 ) -> Result<Vec<BranchCoverageItem>, RpcErr> {
     let explicit_fn = if let Some(fn_id) = function_handle {
-        let node = resolve_syntax_handle(snapshot, project_id, fn_id)?;
+        let node = snapshot.get_syntax_node(project_id, fn_id)?;
         let Some(fn_node) = normalize_function_node(node) else {
             return Err(RpcErr::new(
                 "INVALID_REFERENCE_KIND",
@@ -1012,12 +622,12 @@ fn run_branch_coverage(
 
     let mut resolved_branches = Vec::with_capacity(branch_handles.len());
     for branch_id in branch_handles {
-        resolved_branches.push(resolve_branch_handle(snapshot, project_id, branch_id)?);
+        resolved_branches.push(snapshot.get_branch(project_id, branch_id)?);
     }
 
     let mut resolved_targets = Vec::with_capacity(target_handles.len());
     for target_id in target_handles {
-        let node = resolve_syntax_handle(snapshot, project_id, target_id)?;
+        let node = snapshot.get_syntax_node(project_id, target_id)?;
         let Some(sf) = get_source_file_of_node(node) else {
             return Err(RpcErr::new(
                 "ENGINE_ERROR",
@@ -1085,65 +695,6 @@ fn run_branch_coverage(
     }
 
     Ok(items)
-}
-
-pub fn node_location(sf: P<SourceFile>, rel_file: &str, node: P<Node>) -> SourceLocation {
-    let start = get_token_pos_of_node(node, sf, false);
-    let end = node.end().source_offset().unwrap_or(start).max(start);
-
-    let (start_line0, start_col0) = get_ecma_line_and_utf16_character_of_position(sf.get(), start);
-    let (end_line0, end_col0) = get_ecma_line_and_utf16_character_of_position(sf.get(), end);
-
-    SourceLocation {
-        file: rel_file.to_string(),
-        line: u32::try_from(start_line0).unwrap_or(u32::MAX - 1) + 1,
-        column: start_col0 + 1,
-        end_line: u32::try_from(end_line0).unwrap_or(u32::MAX - 1) + 1,
-        end_column: end_col0 + 1,
-        start,
-        end,
-    }
-}
-
-pub fn slice_source_text(sf: P<SourceFile>, start: u32, end: u32) -> String {
-    let text = sf.text();
-    let start_idx = usize::try_from(start).unwrap_or(0);
-    let end_idx = usize::try_from(end).unwrap_or(start_idx);
-    if start_idx <= end_idx && end_idx <= text.len() {
-        text.get(start_idx..end_idx).unwrap_or("").to_string()
-    } else {
-        String::new()
-    }
-}
-
-fn parse_syntax_kind(name: &str) -> Option<Kind> {
-    match name {
-        "Identifier" => Some(Kind::Identifier),
-        "CallExpression" => Some(Kind::CallExpression),
-        "ReturnStatement" => Some(Kind::ReturnStatement),
-        "VariableDeclaration" => Some(Kind::VariableDeclaration),
-        "BinaryExpression" => Some(Kind::BinaryExpression),
-        "PropertyAccessExpression" => Some(Kind::PropertyAccessExpression),
-        "IfStatement" => Some(Kind::IfStatement),
-        "FunctionDeclaration" => Some(Kind::FunctionDeclaration),
-        "ArrowFunction" => Some(Kind::ArrowFunction),
-        "FunctionExpression" => Some(Kind::FunctionExpression),
-        "MethodDeclaration" => Some(Kind::MethodDeclaration),
-        "StringLiteral" => Some(Kind::StringLiteral),
-        "NumericLiteral" => Some(Kind::NumericLiteral),
-        "Parameter" => Some(Kind::Parameter),
-        "NewExpression" => Some(Kind::NewExpression),
-        "SwitchStatement" => Some(Kind::SwitchStatement),
-        "CaseClause" => Some(Kind::CaseClause),
-        "DefaultClause" => Some(Kind::DefaultClause),
-        "ConditionalExpression" => Some(Kind::ConditionalExpression),
-        "ThrowStatement" => Some(Kind::ThrowStatement),
-        "TryStatement" => Some(Kind::TryStatement),
-        "Block" => Some(Kind::Block),
-        "ExpressionStatement" => Some(Kind::ExpressionStatement),
-        "VariableStatement" => Some(Kind::VariableStatement),
-        _ => None,
-    }
 }
 
 fn serialize_error(id: &Value, code: &str, message: String) -> String {
