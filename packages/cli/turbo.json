@@ -46,6 +46,14 @@
     },
     "test:e2e": {
       "dependsOn": ["build"],
+      "passThroughEnv": [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy"
+      ],
       "inputs": [],
       "outputs": [],
       "cache": false,

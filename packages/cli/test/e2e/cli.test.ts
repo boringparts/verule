@@ -15,7 +15,7 @@ void test("runs the independently deployed CLI with its production SDK and engin
       "@verule/cli",
       "deploy",
       "--prod",
-      "--offline",
+      "--frozen-lockfile",
       deployment.path,
     ],
     { cwd: new URL("../../", import.meta.url), stdio: "pipe" },
