@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempDisposableSync, realpathSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempDisposableSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
-void test("runs the independently deployed CLI with its production SDK and engine", async () => {
+function createDeployedRequire(deploymentPath: string) {
+  return createRequire(join(deploymentPath, "package.json"));
+}
+
+void test("runs the independently deployed CLI with its production SDK and engine", async (t) => {
   using deployment = mkdtempDisposableSync(join(tmpdir(), "verule-cli-"));
   execFileSync(
     "pnpm",
@@ -20,20 +32,17 @@ void test("runs the independently deployed CLI with its production SDK and engin
     ],
     { cwd: new URL("../../", import.meta.url), stdio: "pipe" },
   );
-  const deployed = createRequire(join(deployment.path, "package.json"));
+  const deployed = createDeployedRequire(deployment.path);
   const manifest: { bin: { verule: string }; version: string } =
     deployed("./package.json");
-  assert.ok(
-    deployed
-      .resolve("@verule/sdk")
-      .startsWith(realpathSync(deployment.path) + sep),
-  );
+  const deployedSdkEntry = deployed.resolve("@verule/sdk");
+  assert.ok(deployedSdkEntry.startsWith(realpathSync(deployment.path) + sep));
   const sdk: typeof import("@verule/sdk") = deployed("@verule/sdk");
   const entry = join(deployment.path, manifest.bin.verule);
 
-  function invoke(...args: string[]) {
+  function invoke(cwd: string, ...args: string[]) {
     const result = spawnSync(process.execPath, [entry, ...args], {
-      cwd: tmpdir(),
+      cwd,
       encoding: "utf8",
       timeout: 15_000,
     });
@@ -41,7 +50,8 @@ void test("runs the independently deployed CLI with its production SDK and engin
     return result;
   }
 
-  const result = invoke();
+  // Root command & contract discovery behavior
+  const result = invoke(tmpdir());
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
   assert.equal(
@@ -49,22 +59,258 @@ void test("runs the independently deployed CLI with its production SDK and engin
     `verule ${manifest.version} (engine ${await sdk.getEngineVersion()})\n`,
   );
 
-  const version = invoke("--version");
+  const version = invoke(tmpdir(), "--version");
   assert.equal(version.status, 0, version.stderr);
   assert.equal(version.stdout, `verule ${manifest.version}\n`);
 
-  const help = invoke("--help");
+  const help = invoke(tmpdir(), "--help");
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /--schema/u);
+  assert.match(help.stdout, /check/u);
 
-  const schema = invoke("--schema");
+  const schema = invoke(tmpdir(), "--schema");
   assert.equal(schema.status, 0, schema.stderr);
   assert.partialDeepStrictEqual(JSON.parse(schema.stdout), {
     command: "verule",
   });
 
-  const invalid = invoke("--unknown");
+  const invalid = invoke(tmpdir(), "--unknown");
   assert.equal(invalid.status, 2);
   assert.equal(invalid.stdout, "");
   assert.match(invalid.stderr, /--unknown/u);
+
+  // External temporary TS host project using the deployed @verule/sdk
+  using host = mkdtempDisposableSync(join(tmpdir(), "verule-host-"));
+  mkdirSync(join(host.path, "src"), { recursive: true });
+  mkdirSync(join(host.path, "node_modules", "@verule"), { recursive: true });
+  const deployedSdkPackageDir = dirname(dirname(deployedSdkEntry));
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(host.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+
+  writeFileSync(
+    join(host.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const hostSource = [
+    "function sink(_mode: string, value: string | number): string {",
+    "  return String(value);",
+    "}",
+    "",
+    'export function processValue(input: string | number, mode: "fast" | "safe"): string {',
+    '  if (typeof input === "string") {',
+    '    const _label = "中文😀"; return sink(mode, input);',
+    "  }",
+    '  if (mode === "fast") {',
+    "    return sink(mode, input);",
+    "  }",
+    "  return String(input);",
+    "}",
+    "",
+  ].join("\n");
+  writeFileSync(join(host.path, "src", "handlers.ts"), hostSource, "utf8");
+
+  // 1. Default zero rules
+  writeFileSync(
+    join(host.path, "verule.config.ts"),
+    [
+      'import { defineConfig } from "@verule/sdk";',
+      'export default defineConfig({ tsconfig: "tsconfig.json" });',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const cleanText = invoke(host.path, "check");
+  assert.equal(cleanText.status, 0, cleanText.stderr);
+  assert.match(cleanText.stdout, /No violations found/u);
+
+  const cleanJson = invoke(host.path, "check", "--output", "json");
+  assert.equal(cleanJson.status, 0, cleanJson.stderr);
+  const cleanEnvelope = JSON.parse(cleanJson.stdout) as {
+    kind: string;
+    variant: string;
+    data: {
+      reportVersion: string;
+      status: string;
+      diagnostics: unknown[];
+      observation?: unknown;
+      metrics?: unknown;
+    };
+  };
+  assert.equal(cleanEnvelope.kind, "data");
+  assert.equal(cleanEnvelope.variant, "clean");
+  assert.equal(cleanEnvelope.data.reportVersion, "1");
+  assert.equal(cleanEnvelope.data.status, "clean");
+  assert.deepEqual(cleanEnvelope.data.diagnostics, []);
+  assert.equal("observation" in cleanEnvelope.data, false);
+  assert.equal("metrics" in cleanEnvelope.data, false);
+
+  // 2. Two rules sharing one session + cold check E2E timing + SDK/CLI parity
+  const rulesConfigPath = join(host.path, "verule.rules.config.ts");
+  writeFileSync(
+    rulesConfigPath,
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "",
+      "const narrowedStringRule = defineRule({",
+      '  id: "host-narrowed-string",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      '    const sinks = calls.filter((c) => c.text.startsWith("sink("));',
+      "    const targets = sinks.map((c) => c.arguments?.[1]).filter((x) => x !== undefined);",
+      "    if (targets.length === 0) return;",
+      "    const types = await ctx.typeAt(targets);",
+      "    for (const [i, ty] of types.entries()) {",
+      '      if (ty.typeText === "string") {',
+      "        ctx.report({",
+      "          at: sinks[i]!.location,",
+      '          message: "sink() received narrowed string",',
+      '          findingKey: "narrowed-string",',
+      '          evidence: [{ kind: "type", message: `Narrowed type: ${ty.typeText}`, at: sinks[i]!.location }],',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "const fastModeRule = defineRule({",
+      '  id: "host-fast-mode",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      '    const sinks = calls.filter((c) => c.text.startsWith("sink("));',
+      "    const targets = sinks.map((c) => c.arguments?.[0]).filter((x) => x !== undefined);",
+      "    if (targets.length === 0) return;",
+      "    const types = await ctx.typeAt(targets);",
+      "    for (const [i, ty] of types.entries()) {",
+      '      if (ty.isLiteral && ty.literalValue === "fast") {',
+      "        ctx.report({",
+      "          at: sinks[i]!.location,",
+      '          message: "sink() called in fast mode",',
+      '          findingKey: "fast-mode",',
+      '          evidence: [{ kind: "type", message: `Literal mode: ${ty.typeText}`, at: sinks[i]!.location }],',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [narrowedStringRule, fastModeRule],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const coldStartMs = performance.now();
+  const findingsJson = invoke(
+    host.path,
+    "check",
+    "--config",
+    rulesConfigPath,
+    "--output",
+    "json",
+  );
+  const coldDurationMs = performance.now() - coldStartMs;
+  t.diagnostic(
+    `Cold check E2E (deployed CLI + fresh engine + 2 rules): ${coldDurationMs.toFixed(2)} ms`,
+  );
+
+  assert.equal(findingsJson.status, 1, findingsJson.stderr);
+  const findingsEnvelope = JSON.parse(findingsJson.stdout) as {
+    kind: string;
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(findingsEnvelope.kind, "data");
+  assert.equal(findingsEnvelope.variant, "findings");
+  assert.equal(findingsEnvelope.data.diagnostics.length, 2);
+
+  const findingsText = invoke(host.path, "check", "--config", rulesConfigPath);
+  assert.equal(findingsText.status, 1);
+  assert.match(findingsText.stdout, /host-narrowed-string/u);
+  assert.match(findingsText.stdout, /host-fast-mode/u);
+
+  const loadedConfigModule = (await import(
+    pathToFileURL(rulesConfigPath).href
+  )) as {
+    default: import("@verule/sdk").VeruleConfig;
+  };
+  const sdkReport = await sdk.runCheck({
+    cwd: host.path,
+    config: loadedConfigModule.default,
+  });
+  assert.deepEqual(findingsEnvelope.data, sdkReport);
+
+  // 3. Failure paths -> exit 2 in text and json modes
+  const missingConfig = invoke(
+    host.path,
+    "check",
+    "--config",
+    "does-not-exist.ts",
+  );
+  assert.equal(missingConfig.status, 2);
+  assert.match(missingConfig.stderr, /Check failed/u);
+
+  const throwingConfigPath = join(host.path, "verule.throwing.config.ts");
+  writeFileSync(
+    throwingConfigPath,
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      '  rules: [defineRule({ id: "fail-rule", run: () => { throw new Error("boom"); } })],',
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const failedJson = invoke(
+    host.path,
+    "check",
+    "--config",
+    throwingConfigPath,
+    "--output",
+    "json",
+  );
+  assert.equal(failedJson.status, 2);
+  const failedEnvelope = JSON.parse(failedJson.stderr) as {
+    kind: string;
+    variant: string;
+    data: { code: string; message: string };
+  };
+  assert.equal(failedEnvelope.kind, "failure");
+  assert.equal(failedEnvelope.variant, "failed");
+  assert.equal(failedEnvelope.data.code, "RULE_EXECUTION_ERROR");
+
+  // Broken tsconfig.json -> exit 2
+  writeFileSync(join(host.path, "tsconfig.json"), "{ invalid json", "utf8");
+  const brokenTsconfigJson = invoke(host.path, "check", "--output", "json");
+  assert.equal(brokenTsconfigJson.status, 2);
+  const brokenEnvelope = JSON.parse(brokenTsconfigJson.stderr) as {
+    kind: string;
+    variant: string;
+    data: { code: string };
+  };
+  assert.equal(brokenEnvelope.kind, "failure");
+  assert.equal(brokenEnvelope.variant, "failed");
+  assert.equal(brokenEnvelope.data.code, "PROJECT_LOAD_ERROR");
 });
