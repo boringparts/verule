@@ -3,6 +3,14 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
+  createAdditionalInputRegistry,
+  createScopedAdditionalInputRegistrar,
+  validateAdditionalInputPaths,
+  type AdditionalInputEntry,
+  type AdditionalInputRegistrar,
+  type AdditionalInputSource,
+} from "./additional-inputs.ts";
+import {
   assertValidProgramRef,
   toBranchCoverageItem,
   toFunctionBranchesResult,
@@ -254,6 +262,9 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
   }
   const rules = validateRules(config.rules ?? []);
   const models = validateModels(config.models ?? []);
+  const additionalInputs = validateAdditionalInputPaths(
+    config.additionalInputs,
+  );
   return {
     ...(config.tsconfig !== undefined ? { tsconfig: config.tsconfig } : {}),
     ...(config.projects !== undefined
@@ -261,6 +272,7 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
       : {}),
     rules,
     models,
+    additionalInputs,
   };
 }
 
@@ -316,6 +328,7 @@ function computeReportIdentity(
   entries: readonly string[],
   rules: readonly Rule[],
   models: readonly Model[],
+  additionalInputs: readonly string[] = [],
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
   const modelSummaries = models.map(summarizeModel);
@@ -324,6 +337,7 @@ function computeReportIdentity(
       entries,
       rules: ruleSummaries,
       models: modelSummaries,
+      ...(additionalInputs.length > 0 ? { additionalInputs } : {}),
     }),
   );
   return {
@@ -481,6 +495,10 @@ function resolveNextConfig(
   const models = options?.models
     ? validateModels(options.models)
     : current.models;
+  const additionalInputs =
+    options?.additionalInputs !== undefined
+      ? validateAdditionalInputPaths(options.additionalInputs)
+      : current.additionalInputs;
   if (options?.entries !== undefined) {
     if (options.entries.length === 0) {
       throw new VeruleExecutionError(
@@ -492,6 +510,7 @@ function resolveNextConfig(
       projects: [...options.entries],
       rules,
       models,
+      additionalInputs,
     };
   }
   return {
@@ -499,6 +518,7 @@ function resolveNextConfig(
     ...(current.projects !== undefined ? { projects: current.projects } : {}),
     rules,
     models,
+    additionalInputs,
   };
 }
 
@@ -506,11 +526,18 @@ function collectInvalidatedBy(
   prevConfig: NormalizedVeruleConfig,
   nextConfig: NormalizedVeruleConfig,
   options?: SessionUpdateOptions,
+  changedAdditionalFiles: readonly string[] = [],
 ): readonly string[] {
   const reasons: string[] = [];
+  const changedSet = new Set<string>(options?.changed ?? []);
   for (const file of options?.changed ?? []) reasons.push(`changed:${file}`);
   for (const file of options?.created ?? []) reasons.push(`created:${file}`);
   for (const file of options?.deleted ?? []) reasons.push(`deleted:${file}`);
+  for (const file of changedAdditionalFiles) {
+    if (!changedSet.has(file)) {
+      reasons.push(`additional-input:${file}`);
+    }
+  }
 
   const prevEntries = resolveProjectEntries(prevConfig);
   const nextEntries = resolveProjectEntries(nextConfig);
@@ -519,12 +546,14 @@ function collectInvalidatedBy(
     prevEntries,
     prevConfig.rules,
     prevConfig.models,
+    prevConfig.additionalInputs,
   );
   const nextIdentity = computeReportIdentity(
     "",
     nextEntries,
     nextConfig.rules,
     nextConfig.models,
+    nextConfig.additionalInputs,
   );
   if (stableSerialize(prevEntries) !== stableSerialize(nextEntries)) {
     reasons.push("entries");
@@ -539,6 +568,12 @@ function collectInvalidatedBy(
     stableSerialize(nextIdentity.models)
   ) {
     reasons.push("models");
+  }
+  if (
+    stableSerialize(prevConfig.additionalInputs) !==
+    stableSerialize(nextConfig.additionalInputs)
+  ) {
+    reasons.push("additionalInputs");
   }
   if (options?.config !== undefined && reasons.length === 0) {
     reasons.push("config");
@@ -679,6 +714,45 @@ export async function openSession(
     return promise;
   }
 
+  const explicitRegistrations: {
+    readonly filePath: string;
+    readonly source: AdditionalInputSource;
+  }[] = [];
+  let lastRuleRegistrations: {
+    readonly filePath: string;
+    readonly source: AdditionalInputSource;
+  }[] = [];
+
+  function buildSessionRegistry(
+    configInputs: readonly string[],
+    explicit: readonly {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[],
+    dynamic: readonly {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[],
+  ) {
+    const registry = createAdditionalInputRegistry({ cwd: absCwd });
+    for (const filePath of configInputs) {
+      registry.registerAdditionalInput(filePath, { kind: "config" });
+    }
+    for (const item of explicit) {
+      registry.registerAdditionalInput(item.filePath, item.source);
+    }
+    for (const item of dynamic) {
+      registry.registerAdditionalInput(item.filePath, item.source);
+    }
+    return registry;
+  }
+
+  let sessionRegistry = buildSessionRegistry(
+    normalizedConfig.additionalInputs,
+    explicitRegistrations,
+    lastRuleRegistrations,
+  );
+
   function assertOpen(): void {
     if (closed) {
       throw new VeruleExecutionError(
@@ -696,8 +770,13 @@ export async function openSession(
     collectedGaps: Gap[],
     collector: ObservationCollector,
     recordRuleEngineMs: (ms: number) => void,
+    additionalInputRegistrar: AdditionalInputRegistrar,
   ): RuleContext {
     const activeSnapshotId = currentSnapshotId;
+    const scopedAdditionalInputs = createScopedAdditionalInputRegistrar(
+      additionalInputRegistrar,
+      { kind: "rule", id: ruleId },
+    );
 
     const assertActiveSnapshot = (): void => {
       assertOpen();
@@ -1182,6 +1261,14 @@ export async function openSession(
 
         return results;
       },
+      registerAdditionalInput: (filePath: string) => {
+        assertActiveSnapshot();
+        return scopedAdditionalInputs.registerAdditionalInput(filePath);
+      },
+      readAdditionalInput: (filePath: string) => {
+        assertActiveSnapshot();
+        return scopedAdditionalInputs.readAdditionalInput(filePath);
+      },
       report: (input: DiagnosticInput) => {
         assertActiveSnapshot();
         collected.push({
@@ -1267,6 +1354,31 @@ export async function openSession(
 
     const collected: CollectedDiagnostic[] = [];
     const collectedGaps: Gap[] = [];
+    const runRegistry = buildSessionRegistry(
+      normalizedConfig.additionalInputs,
+      explicitRegistrations,
+      [],
+    );
+    const runRuleRegistrations: {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[] = [];
+    const runRegistrar: AdditionalInputRegistrar = {
+      cwd: runRegistry.cwd,
+      registerAdditionalInput: (filePath, source) => {
+        sessionRegistry.registerAdditionalInput(filePath, source);
+        runRuleRegistrations.push({ filePath, source });
+        return runRegistry.registerAdditionalInput(filePath, source);
+      },
+      readAdditionalInput: (filePath, source) => {
+        sessionRegistry.registerAdditionalInput(filePath, source);
+        runRuleRegistrations.push({ filePath, source });
+        return runRegistry.readAdditionalInput(filePath, source);
+      },
+      listAdditionalInputs: () => runRegistry.listAdditionalInputs(),
+      getTrackedAbsolutePaths: () => runRegistry.getTrackedAbsolutePaths(),
+    };
+
     for (const project of currentProjects) {
       for (const rule of rules) {
         let ruleEngineMs = 0;
@@ -1281,6 +1393,7 @@ export async function openSession(
           (ms) => {
             ruleEngineMs += ms;
           },
+          runRegistrar,
         );
         try {
           await rule.run(ctx);
@@ -1321,6 +1434,15 @@ export async function openSession(
 
     const diagnostics = buildDiagnostics(settlement.diagnostics);
     const gaps = buildGaps(collectedGaps);
+    const additionalInputs = runRegistry.listAdditionalInputs();
+    if (!runOptions?.ruleIds && !runOptions?.rulesOverride) {
+      lastRuleRegistrations = runRuleRegistrations;
+      sessionRegistry = buildSessionRegistry(
+        normalizedConfig.additionalInputs,
+        explicitRegistrations,
+        lastRuleRegistrations,
+      );
+    }
     const observation = collector.buildObservationReport();
     const explanations = explainTarget
       ? rules.map((rule) =>
@@ -1338,6 +1460,7 @@ export async function openSession(
       status: diagnostics.length > 0 ? "findings" : "clean",
       projects: currentProjects,
       fileOrigins: currentFileOrigins,
+      additionalInputs,
       diagnostics,
       gaps,
       identity: computeReportIdentity(
@@ -1345,6 +1468,7 @@ export async function openSession(
         resolveProjectEntries(normalizedConfig),
         rules,
         normalizedConfig.models,
+        normalizedConfig.additionalInputs,
       ),
       ...(settlement.entries.length > 0
         ? { inlineIgnores: settlement.entries }
@@ -1369,8 +1493,19 @@ export async function openSession(
     get fileOrigins() {
       return currentFileOrigins;
     },
+    get additionalInputs(): readonly AdditionalInputEntry[] {
+      return sessionRegistry.listAdditionalInputs();
+    },
     get memory() {
       return readMemoryStats(lastEngineRssBytes);
+    },
+    registerAdditionalInput: (
+      filePath: string,
+      source: AdditionalInputSource,
+    ) => {
+      assertOpen();
+      explicitRegistrations.push({ filePath, source });
+      return sessionRegistry.registerAdditionalInput(filePath, source);
     },
     check: (optionsOrRules?: readonly Rule[] | SessionCheckOptions) => {
       if (isSessionCheckOptions(optionsOrRules)) {
@@ -1384,6 +1519,7 @@ export async function openSession(
     },
     update: async (updateOptions?: SessionUpdateOptions) => {
       assertOpen();
+      const changedAdditionalFiles = sessionRegistry.refresh();
       const nextConfig = resolveNextConfig(normalizedConfig, updateOptions);
       const nextEntries = resolveProjectEntries(nextConfig);
       const previousSnapshotId = currentSnapshotId;
@@ -1403,6 +1539,7 @@ export async function openSession(
         normalizedConfig,
         nextConfig,
         updateOptions,
+        changedAdditionalFiles,
       );
       const updatedFileOrigins = buildFileOrigins(updated.projects);
 
@@ -1417,6 +1554,12 @@ export async function openSession(
       branchListCache.clear();
       callsValuesCache.clear();
       cachedDirectives = undefined;
+      sessionRegistry = buildSessionRegistry(
+        nextConfig.additionalInputs,
+        explicitRegistrations,
+        lastRuleRegistrations,
+      );
+      const updatedAdditionalInputs = sessionRegistry.listAdditionalInputs();
 
       const recomputation: RecomputationScope = {
         recomputedProjects: updated.recomputedProjects,
@@ -1432,6 +1575,7 @@ export async function openSession(
         snapshotId: updated.snapshotId,
         projects: updated.projects,
         fileOrigins: updatedFileOrigins,
+        additionalInputs: updatedAdditionalInputs,
         recomputation,
         memory: readMemoryStats(updated.engineRssBytes),
       };

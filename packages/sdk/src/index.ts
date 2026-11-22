@@ -3,6 +3,15 @@ import { promisify } from "node:util";
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
+export {
+  createAdditionalInputRegistry,
+  createScopedAdditionalInputRegistrar,
+  type AdditionalInputEntry,
+  type AdditionalInputRegistrar,
+  type AdditionalInputRegistry,
+  type AdditionalInputSource,
+  type ScopedAdditionalInputRegistrar,
+} from "./additional-inputs.ts";
 export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {

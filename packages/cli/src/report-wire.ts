@@ -74,6 +74,19 @@ export const sourceFileOriginSchema = z.object({
   projects: z.array(sourceFileProjectOriginSchema),
 });
 
+export const additionalInputSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("config") }),
+  z.object({ kind: z.literal("rule"), id: z.string() }),
+  z.object({ kind: z.literal("adapter"), id: z.string() }),
+]);
+
+export const additionalInputEntrySchema = z.object({
+  file: z.string(),
+  exists: z.boolean(),
+  digest: z.string().optional(),
+  sources: z.array(additionalInputSourceSchema),
+});
+
 export const ruleIdentitySchema = z.object({
   id: z.string(),
   digest: z.string(),
@@ -226,6 +239,7 @@ export const checkReportSchema = z.object({
   status: z.enum(["clean", "findings"]),
   projects: z.array(projectSummarySchema),
   fileOrigins: z.array(sourceFileOriginSchema),
+  additionalInputs: z.array(additionalInputEntrySchema),
   diagnostics: z.array(diagnosticSchema),
   gaps: z.array(gapSchema),
   identity: reportIdentitySchema,
@@ -417,6 +431,16 @@ export function toWireReport(report: CheckReport): WireCheckReport {
         entryChain: [...proj.entryChain],
       })),
     })),
+    additionalInputs: report.additionalInputs.map((entry) => ({
+      file: entry.file,
+      exists: entry.exists,
+      ...(entry.digest !== undefined ? { digest: entry.digest } : {}),
+      sources: entry.sources.map((src) =>
+        src.kind === "config"
+          ? { kind: "config" as const }
+          : { kind: src.kind, id: src.id },
+      ),
+    })),
     diagnostics: report.diagnostics.map((diag) => ({
       id: diag.id,
       ruleId: diag.ruleId,
@@ -537,6 +561,16 @@ export function formatScopeLines(report: WireCheckReport): string[] {
       (proj) => `${proj.projectId} (via ${proj.entryChain.join(" -> ")})`,
     );
     lines.push(`  - ${origin.file} <- ${sources.join(", ")}`);
+  }
+  if (report.additionalInputs.length > 0) {
+    lines.push(`Additional inputs (${report.additionalInputs.length}):`);
+    for (const input of report.additionalInputs) {
+      const sources = input.sources.map((src) =>
+        src.kind === "config" ? "config" : `${src.kind}:${src.id}`,
+      );
+      const statusSuffix = input.exists ? "" : " [missing]";
+      lines.push(`  - ${input.file}${statusSuffix} <- ${sources.join(", ")}`);
+    }
   }
   return lines;
 }

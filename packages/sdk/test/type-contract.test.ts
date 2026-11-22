@@ -126,11 +126,21 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
       prepareExternalConsumer(root);
 
       const validCode = [
-        'import { defineConfig, defineRule, type CallRef, type DeclarationRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        'import { createAdditionalInputRegistry, defineConfig, defineRule, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallRef, type DeclarationRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        "",
+        'const registrar: AdditionalInputRegistrar = createAdditionalInputRegistry({ cwd: "/tmp/workspace" });',
+        'const adapterSource: AdditionalInputSource = { kind: "adapter", id: "demo-adapter" };',
+        'const regEntry: AdditionalInputEntry = registrar.registerAdditionalInput("allowed-packages.json", adapterSource);',
+        "void regEntry;",
         "",
         "const validRule = defineRule({",
         '  id: "external-consumer-valid",',
         "  run: async (ctx) => {",
+        '    const inputEntry: AdditionalInputEntry = ctx.registerAdditionalInput("allowed-packages.json");',
+        "    if (inputEntry.exists) {",
+        '      const raw: string = ctx.readAdditionalInput("allowed-packages.json");',
+        "      void raw;",
+        "    }",
         "    const syntaxNodes = await ctx.findSyntax({",
         '      range: { file: "src/app.ts", startLine: 1, endLine: 20 },',
         '      kinds: ["CallExpression"],',
@@ -194,7 +204,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "  },",
         "});",
         "",
-        'export default defineConfig({ tsconfig: "tsconfig.json", rules: [validRule] });',
+        'export default defineConfig({ tsconfig: "tsconfig.json", additionalInputs: ["allowed-packages.json"], rules: [validRule] });',
         "",
       ].join("\n");
 
