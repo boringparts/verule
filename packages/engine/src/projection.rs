@@ -21,6 +21,10 @@ use crate::calls_values::{
     run_callers_of, run_value_propagation,
 };
 use crate::cfg::GapItem;
+use crate::instance_identity::{
+    InstanceModelInput, InstanceProjectionRow, InstanceResolutionRow, InstanceSelect,
+    run_project_instances, run_resolve_instances,
+};
 use crate::observe::{EngineStepDetail, ObserveCollector};
 use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
 use crate::serve::{
@@ -131,6 +135,16 @@ pub enum QueryStep {
         propagation: Option<String>,
         from: Vec<String>,
         to: Vec<String>,
+    },
+    ResolveInstances {
+        targets: Vec<String>,
+        #[serde(default)]
+        models: Vec<InstanceModelInput>,
+    },
+    ProjectInstances {
+        targets: Vec<String>,
+        #[serde(default)]
+        select: Option<InstanceSelect>,
     },
 }
 
@@ -357,6 +371,12 @@ enum StepResult {
     },
     ValuePropagation {
         items: Vec<ValuePropagationResultPayload>,
+    },
+    ResolveInstances {
+        items: Vec<InstanceResolutionRow>,
+    },
+    ProjectInstances {
+        items: Vec<InstanceProjectionRow>,
     },
 }
 
@@ -708,6 +728,18 @@ fn execute_step(
             step_start,
             observer,
         ),
+        QueryStep::ResolveInstances { targets, models } => {
+            let items =
+                run_resolve_instances(snapshot, project_id, program, checker, &targets, &models)?;
+            observer.record_step("resolveInstances", step_start, items.len(), Vec::new());
+            Ok(StepResult::ResolveInstances { items })
+        }
+        QueryStep::ProjectInstances { targets, select } => {
+            let items =
+                run_project_instances(snapshot, project_id, &targets, &select.unwrap_or_default())?;
+            observer.record_step("projectInstances", step_start, items.len(), Vec::new());
+            Ok(StepResult::ProjectInstances { items })
+        }
     }
 }
 
@@ -1619,12 +1651,10 @@ fn run_resolve_declarations(
                     ),
                 ));
             }
-            HandlePayload::Branch(_) => {
+            HandlePayload::Branch(_) | HandlePayload::Instance(_) => {
                 return Err(RpcErr::new(
                     "INVALID_REFERENCE_KIND",
-                    format!(
-                        "Program reference {handle_id} is a branch reference and cannot resolve a declaration."
-                    ),
+                    format!("Program reference {handle_id} cannot resolve a declaration."),
                 ));
             }
         };
@@ -2365,12 +2395,10 @@ fn run_syntax_of(
                     ),
                 ));
             }
-            HandlePayload::Branch(_) => {
+            HandlePayload::Branch(_) | HandlePayload::Instance(_) => {
                 return Err(RpcErr::new(
                     "INVALID_REFERENCE_KIND",
-                    format!(
-                        "Program reference {handle_id} is a branch reference and has no syntax node."
-                    ),
+                    format!("Program reference {handle_id} has no syntax node."),
                 ));
             }
         };

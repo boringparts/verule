@@ -18,9 +18,11 @@ export const locationSchema = z.object({
 });
 
 export const evidenceSchema = z.object({
-  kind: z.enum(["source", "type", "note"]),
+  kind: z.enum(["source", "type", "note", "model"]),
   message: z.string(),
   at: locationSchema.optional(),
+  modelId: z.string().optional(),
+  declaration: z.string().optional(),
 });
 
 export const gapSchema = z.object({
@@ -450,6 +452,10 @@ export function toWireReport(report: CheckReport): WireCheckReport {
         kind: item.kind,
         message: item.message,
         ...(item.at !== undefined ? { at: { ...item.at } } : {}),
+        ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
+        ...(item.declaration !== undefined
+          ? { declaration: item.declaration }
+          : {}),
       })),
       projects: [...diag.projects],
     })),
@@ -516,7 +522,13 @@ export function formatDiagnosticsLines(report: WireCheckReport): string[] {
       const locSuffix = item.at
         ? ` (${item.at.file}:${item.at.line}:${item.at.column})`
         : "";
-      lines.push(`  evidence (${item.kind}): ${item.message}${locSuffix}`);
+      const modelSuffix =
+        item.modelId !== undefined
+          ? ` [model=${item.modelId}${item.declaration !== undefined ? `:${item.declaration}` : ""}]`
+          : "";
+      lines.push(
+        `  evidence (${item.kind}): ${item.message}${modelSuffix}${locSuffix}`,
+      );
     }
   }
   return lines;

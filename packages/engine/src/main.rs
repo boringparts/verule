@@ -1,6 +1,7 @@
 mod calls_values;
 mod cfg;
 mod directives;
+mod instance_identity;
 mod observe;
 mod projection;
 mod projects;

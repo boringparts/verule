@@ -126,7 +126,22 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
       prepareExternalConsumer(root);
 
       const validCode = [
-        'import { createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineRule, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallRef, type DeclarationRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        'import { createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallRef, type DeclarationRef, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        "",
+        "const extModel = defineModel({",
+        '  id: "ext-model",',
+        "  instanceBehaviors: [",
+        "    {",
+        '      kind: "allocates-fresh-instance",',
+        '      match: { container: "IMenuService", member: "createMenu" },',
+        "    },",
+        "    {",
+        '      kind: "forwards-argument",',
+        '      match: { container: "Disposable", member: "_register" },',
+        "      argumentIndex: 0,",
+        "    },",
+        "  ],",
+        "});",
         "",
         'const registrar: AdditionalInputRegistrar = createAdditionalInputRegistry({ cwd: "/tmp/workspace" });',
         'const adapterSource: AdditionalInputSource = { kind: "adapter", id: "demo-adapter" };',
@@ -179,6 +194,29 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "        callRefs.push(row.call);",
         "      }",
         "    }",
+        "    const resolvedInstances = await ctx.resolveInstances(callRefs);",
+        "    const instRefs: InstanceRef[] = [];",
+        "    for (const instRow of resolvedInstances) {",
+        "      if (instRow.instance !== null) {",
+        "        instRefs.push(instRow.instance);",
+        "      }",
+        "    }",
+        "    const projectedInstances = await ctx.projectInstances(instRefs, {",
+        "      select: {",
+        "        instanceKey: true,",
+        "        originKind: true,",
+        "        allocationLocation: true,",
+        "        originSyntax: true,",
+        "        modelId: true,",
+        "        evidence: true,",
+        "      },",
+        "    });",
+        "    const firstInst = projectedInstances[0];",
+        "    if (firstInst !== undefined && firstInst.originSyntax !== null) {",
+        "      const originSyn: SyntaxRef = firstInst.originSyntax;",
+        "      void originSyn;",
+        "      void isSameInstance(firstInst.instance, instRefs[0]);",
+        "    }",
         "    const callRows = await ctx.projectCalls(callRefs, {",
         "      select: { signature: true, returnType: true },",
         "    });",
@@ -228,7 +266,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "  },",
         "});",
         "",
-        'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [sampleAdapter], additionalInputs: ["allowed-packages.json"], rules: [validRule] });',
+        'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [sampleAdapter], additionalInputs: ["allowed-packages.json"], models: [extModel], rules: [validRule] });',
         "",
       ].join("\n");
 
@@ -400,11 +438,77 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           `,
           expectedPattern: /TS2322|TS2345/u,
         },
+        {
+          name: "SyntaxRef passed to projectInstances",
+          body: `
+            const syntaxRef = undefined as unknown as SyntaxRef;
+            await ctx.projectInstances([syntaxRef], { select: { instanceKey: true } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "DeclarationRef passed to projectInstances",
+          body: `
+            const declRef = undefined as unknown as DeclarationRef;
+            await ctx.projectInstances([declRef], { select: { instanceKey: true } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "CallRef passed to projectInstances",
+          body: `
+            const callRef = undefined as unknown as CallRef;
+            await ctx.projectInstances([callRef], { select: { instanceKey: true } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "InstanceRef passed to projectCalls",
+          body: `
+            const instRef = undefined as unknown as InstanceRef;
+            await ctx.projectCalls([instRef], { select: { location: true } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "InstanceRef passed to resolveInstances",
+          body: `
+            const instRef = undefined as unknown as InstanceRef;
+            await ctx.resolveInstances([instRef]);
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "TypeRef passed to resolveInstances",
+          body: `
+            const typeRef = undefined as unknown as TypeRef;
+            await ctx.resolveInstances([typeRef]);
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "unselected allocationLocation read on projectInstances result",
+          body: `
+            const instRef = undefined as unknown as InstanceRef;
+            const [row] = await ctx.projectInstances([instRef], { select: { instanceKey: true } });
+            void row?.allocationLocation;
+          `,
+          expectedPattern: /TS2339/u,
+        },
+        {
+          name: "unselected originKind read on projectInstances without select",
+          body: `
+            const instRef = undefined as unknown as InstanceRef;
+            const [row] = await ctx.projectInstances([instRef]);
+            void row?.originKind;
+          `,
+          expectedPattern: /TS2339/u,
+        },
       ];
 
       for (const testCase of negativeCases) {
         const snippet = [
-          'import type { CallRef, DeclarationRef, FactType, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
+          'import type { CallRef, DeclarationRef, FactType, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
           "",
           "export async function checkContract(ctx: RuleContext): Promise<void> {",
           testCase.body,
