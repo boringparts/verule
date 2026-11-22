@@ -34,7 +34,7 @@
       "tags": ["work:repair"]
     },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "build"],
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]

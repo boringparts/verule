@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import { EngineClient } from "./engine-client.ts";
+import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
-  getRefSessionToken,
   makeProgramRef,
   type AnalysisSession,
   type CheckReport,
@@ -14,6 +14,7 @@ import {
   type DiagnosticLocation,
   type Evidence,
   type FindSyntaxOptions,
+  type Gap,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProjectSummary,
@@ -41,6 +42,8 @@ type EngineSyntaxItem = {
   readonly arguments?: readonly string[];
   readonly name?: string;
   readonly initializer?: string;
+  readonly body?: string;
+  readonly parameters?: readonly string[];
 };
 
 type EngineTypeItem = {
@@ -52,6 +55,7 @@ type EngineTypeItem = {
   readonly isLiteral: boolean;
   readonly literalValue?: string | number | boolean;
   readonly unionMembers?: readonly string[];
+  readonly gaps?: readonly Gap[];
 };
 
 type EngineBatchResult = {
@@ -215,6 +219,30 @@ function toSyntaxNodeResult(
             projectId,
             snapshotId,
             item.initializer,
+          ),
+        }
+      : {}),
+    ...(item.body !== undefined
+      ? {
+          body: makeProgramRef(
+            "syntax",
+            sessionToken,
+            projectId,
+            snapshotId,
+            item.body,
+          ),
+        }
+      : {}),
+    ...(item.parameters !== undefined
+      ? {
+          parameters: item.parameters.map((paramId) =>
+            makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              paramId,
+            ),
           ),
         }
       : {}),
@@ -401,19 +429,54 @@ export async function openSession(
     }
   }
 
+  function buildGaps(collectedGaps: readonly Gap[]): readonly Gap[] {
+    const seen = new Set<string>();
+    const unique: Gap[] = [];
+    for (const gap of collectedGaps) {
+      const key = JSON.stringify([
+        gap.kind,
+        gap.message,
+        gap.at !== undefined ? canonicalLocationKey(gap.at) : null,
+      ]);
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(gap);
+      }
+    }
+    return unique;
+  }
+
   function createRuleContext(
     ruleId: string,
     project: ProjectSummary,
     collected: CollectedDiagnostic[],
+    collectedGaps: Gap[],
   ): RuleContext {
+    const recordGaps = (gaps: readonly Gap[]): void => {
+      for (const gap of gaps) {
+        collectedGaps.push(gap);
+      }
+    };
+
+    const projectionQueries = createProjectionQueries({
+      client,
+      sessionToken,
+      snapshotId,
+      projectId: project.projectId,
+      assertOpen,
+      recordGaps,
+    });
+
     return {
       project,
+      ...projectionQueries,
       findSyntax: (query: FindSyntaxOptions) => {
         assertOpen();
         const cacheKey = JSON.stringify([
           project.projectId,
-          query.kinds.toSorted(),
+          query.kinds ? query.kinds.toSorted() : null,
           query.files ? query.files.toSorted() : null,
+          query.range ?? null,
         ]);
         const cached = syntaxCache.get(cacheKey);
         if (cached) return cached;
@@ -425,8 +488,9 @@ export async function openSession(
             steps: [
               {
                 op: "findSyntax",
-                kinds: query.kinds,
+                ...(query.kinds !== undefined ? { kinds: query.kinds } : {}),
                 ...(query.files !== undefined ? { files: query.files } : {}),
+                ...(query.range !== undefined ? { range: query.range } : {}),
               },
             ],
           })
@@ -449,24 +513,12 @@ export async function openSession(
       typeAt: async (targets: readonly SyntaxRef[]) => {
         assertOpen();
         if (targets.length === 0) return [];
-
-        for (const target of targets) {
-          if (
-            getRefSessionToken(target) !== sessionToken ||
-            target.snapshotId !== snapshotId
-          ) {
-            throw new VeruleExecutionError(
-              "STALE_REFERENCE",
-              `Program reference "${target.handleId}" belongs to a closed or stale snapshot.`,
-            );
-          }
-          if (target.projectId !== project.projectId) {
-            throw new VeruleExecutionError(
-              "CROSS_PROJECT_REFERENCE",
-              `Program reference "${target.handleId}" belongs to project "${target.projectId}", not "${project.projectId}".`,
-            );
-          }
-        }
+        validateProgramRefs(
+          targets,
+          sessionToken,
+          snapshotId,
+          project.projectId,
+        );
 
         const missingTargets: SyntaxRef[] = [];
         for (const target of targets) {
@@ -502,6 +554,9 @@ export async function openSession(
                   "ENGINE_ERROR",
                   `Engine omitted type result for target "${target.handleId}".`,
                 );
+              }
+              if (raw.gaps) {
+                recordGaps(raw.gaps);
               }
               return toTypeAtResult(
                 raw,
@@ -546,10 +601,16 @@ export async function openSession(
         ? validateRules(rulesOverride)
         : normalizedConfig.rules;
       const collected: CollectedDiagnostic[] = [];
+      const collectedGaps: Gap[] = [];
 
       for (const project of projects) {
         for (const rule of rules) {
-          const ctx = createRuleContext(rule.id, project, collected);
+          const ctx = createRuleContext(
+            rule.id,
+            project,
+            collected,
+            collectedGaps,
+          );
           try {
             await rule.run(ctx);
           } catch (err) {
@@ -567,12 +628,13 @@ export async function openSession(
       }
 
       const diagnostics = buildDiagnostics(collected);
+      const gaps = buildGaps(collectedGaps);
       return {
         reportVersion: REPORT_SCHEMA_VERSION,
         status: diagnostics.length > 0 ? "findings" : "clean",
         projects,
         diagnostics,
-        gaps: [],
+        gaps,
       };
     },
     close: async () => {

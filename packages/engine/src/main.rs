@@ -1,3 +1,4 @@
+mod projection;
 mod serve;
 
 use std::{env, ffi::OsString, process::ExitCode, thread};
