@@ -10,6 +10,7 @@ import { dirname, resolve } from "node:path";
 import {
   VeruleExecutionError,
   type CheckReport,
+  type FactConflictDetails,
   type ObserveLimitInput,
   type ObserveMode,
   type ObserveOptions,
@@ -48,6 +49,7 @@ type SharedSessionResponse =
       readonly error: {
         readonly code: VeruleErrorCode;
         readonly message: string;
+        readonly conflict?: FactConflictDetails;
       };
     };
 
@@ -428,7 +430,13 @@ export async function requestSharedReport(
 
       if (!parsed.ok) {
         finishError(
-          new VeruleExecutionError(parsed.error.code, parsed.error.message),
+          new VeruleExecutionError(
+            parsed.error.code,
+            parsed.error.message,
+            parsed.error.conflict !== undefined
+              ? { conflict: parsed.error.conflict }
+              : undefined,
+          ),
         );
         return;
       }

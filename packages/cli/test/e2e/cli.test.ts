@@ -1767,4 +1767,245 @@ void test("runs the independently deployed CLI with its production SDK and engin
       manifestSessionChild.kill("SIGKILL");
     }
   }
+
+  // 8. Deployed CLI verification for third-party FactType, provider replacement, providerId filtering, partial merge, and order-independent FACT_CONFLICT
+  using factHost = mkdtempDisposableSync(join(tmpdir(), "verule-fact-e2e-"));
+  mkdirSync(join(factHost.path, "src"), { recursive: true });
+  mkdirSync(join(factHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(factHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(factHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(factHost.path, "src", "routes.ts"),
+    [
+      "declare function parseInput(schema: unknown, payload: unknown): unknown;",
+      "const userSchema = {};",
+      "export function handle(payload: unknown) {",
+      "  return parseInput(userSchema, payload);",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(factHost.path, "fact-contract.mjs"),
+    [
+      'import { defineFactType } from "@verule/sdk";',
+      "export const InputSpecFact = defineFactType({",
+      '  id: "e2e.validator.input-spec",',
+      '  subjectKind: "call",',
+      "  merge: (existing, incoming) => {",
+      "    const fields = { ...existing.value.fields };",
+      "    for (const [k, v] of Object.entries(incoming.value.fields)) {",
+      "      if (!fields[k]) { fields[k] = v; continue; }",
+      "      if (fields[k].requirement !== v.requirement) {",
+      "        return {",
+      "          ok: false,",
+      "          conflict: {",
+      '            message: `Conflicting requirement for "${k}": ${fields[k].requirement} vs ${v.requirement}`,',
+      "            existingConclusion: `${k}=${fields[k].requirement}`,",
+      "            incomingConclusion: `${k}=${v.requirement}`,",
+      "            existingEvidence: fields[k].evidence ?? existing.evidence,",
+      "            incomingEvidence: v.evidence ?? incoming.evidence,",
+      "          },",
+      "        };",
+      "      }",
+      "    }",
+      "    const required = Object.keys(fields).filter((k) => fields[k].requirement === 'required').toSorted();",
+      "    return { ok: true, value: { fields, required } };",
+      "  },",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(factHost.path, "business-rule.mjs"),
+    [
+      'import { defineRule } from "@verule/sdk";',
+      'import { InputSpecFact } from "./fact-contract.mjs";',
+      "export const requireAgeRule = defineRule({",
+      '  id: "e2e-require-age",',
+      "  run: async (ctx) => {",
+      "    const specs = await ctx.facts(InputSpecFact);",
+      "    for (const spec of specs) {",
+      '      if (!spec.value.required.includes("age")) {',
+      "        const rows = await ctx.syntaxOf([spec.subject], { select: { location: true } });",
+      "        const at = rows[0]?.location ?? spec.evidence[0]?.at;",
+      "        if (!at) continue;",
+      "        ctx.report({",
+      "          at,",
+      '          message: `Missing required field "age" [${spec.providers.join(", ")}]`,',
+      '          findingKey: "missing-age",',
+      "          evidence: spec.evidence,",
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(factHost.path, "providers.mjs"),
+    [
+      'import { defineAdapter, defineFactProvider } from "@verule/sdk";',
+      'import { InputSpecFact } from "./fact-contract.mjs";',
+      "async function firstCall(ctx) {",
+      '  const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "  const resolved = await ctx.resolveCalls(calls.map((c) => c.ref));",
+      "  return { call: resolved[0].call, at: calls[0].location };",
+      "}",
+      "export const providerA = defineAdapter({",
+      '  id: "provider-a",',
+      "  provides: [defineFactProvider(InputSpecFact, async (ctx) => {",
+      "    const { call, at } = await firstCall(ctx);",
+      '    return [{ subject: call, value: { fields: { id: { requirement: "required", evidence: [{ kind: "source", message: "provider-a id=required", at }] } }, required: ["id"] }, evidence: [{ kind: "source", message: "provider-a extracted id", at }], gaps: [{ kind: "dynamic-spread", message: "provider-a saw dynamic spread", at }] }];',
+      "  })],",
+      "});",
+      "export const providerB = defineAdapter({",
+      '  id: "provider-b",',
+      "  provides: [defineFactProvider(InputSpecFact, async (ctx) => {",
+      "    const { call, at } = await firstCall(ctx);",
+      '    return [{ subject: call, value: { fields: { name: { requirement: "required", evidence: [{ kind: "source", message: "provider-b name=required", at }] } }, required: ["name"] }, evidence: [{ kind: "source", message: "provider-b extracted name", at }] }];',
+      "  })],",
+      "});",
+      "export const providerConflict = defineAdapter({",
+      '  id: "provider-conflict",',
+      "  provides: [defineFactProvider(InputSpecFact, async (ctx) => {",
+      "    const { call, at } = await firstCall(ctx);",
+      '    return [{ subject: call, value: { fields: { id: { requirement: "optional", evidence: [{ kind: "source", message: "provider-conflict id=optional", at }] } }, required: [] }, evidence: [{ kind: "source", message: "provider-conflict id=optional", at }] }];',
+      "  })],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  for (const [name, expr] of [
+    ["verule.a.mjs", "[providerA]"],
+    ["verule.b.mjs", "[providerB]"],
+    ["verule.ab.mjs", "[providerA, providerB]"],
+    ["verule.ba.mjs", "[providerB, providerA]"],
+    ["verule.conflict.ac.mjs", "[providerA, providerConflict]"],
+    ["verule.conflict.ca.mjs", "[providerConflict, providerA]"],
+  ] as const) {
+    writeFileSync(
+      join(factHost.path, name),
+      [
+        'import { defineConfig } from "@verule/sdk";',
+        'import { providerA, providerB, providerConflict } from "./providers.mjs";',
+        'import { requireAgeRule } from "./business-rule.mjs";',
+        `export default defineConfig({ tsconfig: "tsconfig.json", adapters: ${expr}, rules: [requireAgeRule] });`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  const swapA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.a.mjs",
+    "--output",
+    "json",
+  );
+  const swapB = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.b.mjs",
+    "--output",
+    "json",
+  );
+  assert.equal(swapA.status, 1, swapA.stderr);
+  assert.equal(swapB.status, 1, swapB.stderr);
+  assert.match(swapA.stdout, /\[provider-a\]/u);
+  assert.match(swapB.stdout, /\[provider-b\]/u);
+
+  const mergeAB = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.ab.mjs",
+    "--output",
+    "json",
+  );
+  const mergeBA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.ba.mjs",
+    "--output",
+    "json",
+  );
+  assert.equal(mergeAB.status, 1, mergeAB.stderr);
+  assert.equal(mergeBA.status, 1, mergeBA.stderr);
+  assert.equal(mergeAB.stdout, mergeBA.stdout);
+  assert.match(mergeAB.stdout, /\[provider-a, provider-b\]/u);
+
+  const conflictAC = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.conflict.ac.mjs",
+    "--output",
+    "json",
+  );
+  const conflictCA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.conflict.ca.mjs",
+    "--output",
+    "json",
+  );
+  assert.equal(conflictAC.status, 2);
+  assert.equal(conflictCA.status, 2);
+  assert.equal(conflictAC.stdout, "");
+  assert.equal(conflictAC.stderr, conflictCA.stderr);
+  const conflictEnv = JSON.parse(conflictAC.stderr) as {
+    kind: string;
+    data: {
+      code: string;
+      conflict: {
+        parties: { providerId: string; conclusionSummary: string }[];
+      };
+    };
+  };
+  assert.equal(conflictEnv.kind, "failure");
+  assert.equal(conflictEnv.data.code, "FACT_CONFLICT");
+  assert.deepEqual(
+    conflictEnv.data.conflict.parties.map((p) => [
+      p.providerId,
+      p.conclusionSummary,
+    ]),
+    [
+      ["provider-a", "id=required"],
+      ["provider-conflict", "id=optional"],
+    ],
+  );
 });

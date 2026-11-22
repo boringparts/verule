@@ -2365,7 +2365,7 @@ async function collectSites(
             sites.push({
               subject: targetRef as SyntaxRef,
               siteKind: "call",
-              validatorMethod: methodName as ValidatorMethodName,
+              validatorMethod: methodName,
               ...(schemaName !== undefined ? { schemaName } : {}),
               schema,
             });
@@ -2492,7 +2492,7 @@ async function collectSites(
       sites.push({
         subject: call.ref,
         siteKind: "call",
-        validatorMethod: methodName as ValidatorMethodName,
+        validatorMethod: methodName,
         ...(schemaName !== undefined ? { schemaName } : {}),
         schema: {
           ...schema,

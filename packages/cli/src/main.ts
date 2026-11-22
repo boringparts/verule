@@ -30,9 +30,11 @@ import {
   checkReportSchema,
   formatDiagnosticsLines,
   formatScopeLines,
+  toWireFactConflict,
   toWireReport,
   type WireCheckReport,
   type WireExplainResult,
+  type WireFactConflictDetails,
   type WireObservation,
 } from "./report-wire.ts";
 import {
@@ -221,6 +223,7 @@ function createCliContract(
           readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
           readonly code: string;
           readonly message: string;
+          readonly conflict?: WireFactConflictDetails;
         };
       }
   > {
@@ -270,6 +273,9 @@ function createCliContract(
             reportVersion: REPORT_SCHEMA_VERSION,
             code: err.code,
             message: err.message,
+            ...(err.conflict !== undefined
+              ? { conflict: toWireFactConflict(err.conflict) }
+              : {}),
           },
         };
       }
@@ -424,8 +430,33 @@ function createCliContract(
                     "Configuration, project loading, rule execution, or engine failure.",
                   schema: checkFailureSchema,
                   exitCode: 2,
-                  text: ({ code, message }) =>
-                    text.line(`Check failed [${code}]: ${message}`),
+                  text: ({ code, message, conflict }) => {
+                    if (!conflict) {
+                      return text.line(`Check failed [${code}]: ${message}`);
+                    }
+                    const loc = conflict.subjectLocation
+                      ? ` (${conflict.subjectLocation.file}:${conflict.subjectLocation.line}:${conflict.subjectLocation.column})`
+                      : "";
+                    const head = `Check failed [${code}]: ${message}`;
+                    const tail = [
+                      `  factType: ${conflict.factTypeId}`,
+                      `  subject: ${conflict.subjectHandleId}${loc}`,
+                    ];
+                    for (const party of conflict.parties) {
+                      tail.push(
+                        `  provider [${party.providerId}]: ${party.conclusionSummary}`,
+                      );
+                      for (const ev of party.evidence) {
+                        const evLoc = ev.at
+                          ? ` (${ev.at.file}:${ev.at.line}:${ev.at.column})`
+                          : "";
+                        tail.push(
+                          `    evidence (${ev.kind}): ${ev.message}${evLoc}`,
+                        );
+                      }
+                    }
+                    return text.lines([head, ...tail]);
+                  },
                 },
               },
               handler: async ({ input, outcome }) => {
