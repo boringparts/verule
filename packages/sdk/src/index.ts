@@ -4,7 +4,14 @@ import { promisify } from "node:util";
 import { engineExecutablePath } from "@verule/engine/binary";
 
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
-export { defineConfig, defineRule, openSession, runCheck } from "./session.ts";
+export {
+  defineConfig,
+  defineModel,
+  defineRule,
+  openSession,
+  runCheck,
+} from "./session.ts";
+export { watchProject } from "./watch.ts";
 export type {
   BranchCoverageItem,
   BranchCoverageOptions,
@@ -62,6 +69,9 @@ export {
   type ExplainStatus,
   type FindSyntaxOptions,
   type Gap,
+  type MemoryStats,
+  type Model,
+  type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type ObservationDetailEntry,
   type ObservationOverhead,
@@ -76,10 +86,15 @@ export {
   type ProgramObjectKind,
   type ProgramRef,
   type ProjectSummary,
+  type RecomputationScope,
+  type ReportIdentity,
   type Rule,
   type RuleContext,
+  type RuleIdentitySummary,
   type RunCheckOptions,
   type SessionCheckOptions,
+  type SessionUpdateOptions,
+  type SessionUpdateResult,
   type SignatureRef,
   type SourceFileOrigin,
   type SourceFileProjectOrigin,
@@ -92,6 +107,12 @@ export {
   type TypeRef,
   type VeruleConfig,
   type VeruleErrorCode,
+  type WatchConfigLoadResult,
+  type WatchEvent,
+  type WatchFailureEvent,
+  type WatchProjectOptions,
+  type WatchReportEvent,
+  type WatchTrigger,
 } from "./types.ts";
 
 const runEngine = promisify(execFile);

@@ -22,7 +22,8 @@ use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, e
 use crate::projection::{QueryStep, execute_query_batch};
 pub use crate::projection::{SourceLocation, node_location, slice_source_text};
 use crate::projects::{
-    ProjectSummary, normalize_path, open_projects_snapshot, relative_to_cwd, release_tsrs_snapshot,
+    ProjectSummary, UpdateSnapshotInput, normalize_path, open_projects_snapshot, relative_to_cwd,
+    release_tsrs_snapshot, update_projects_snapshot,
 };
 
 #[derive(Deserialize)]
@@ -76,6 +77,20 @@ struct SnapshotOpenParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SnapshotUpdateParams {
+    snapshot_id: u64,
+    #[serde(default)]
+    entries: Option<Vec<String>>,
+    #[serde(default)]
+    changed: Vec<String>,
+    #[serde(default)]
+    created: Vec<String>,
+    #[serde(default)]
+    deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotReleaseParams {
     snapshot_id: u64,
 }
@@ -92,7 +107,25 @@ struct QueryBatchParams {
 #[serde(rename_all = "camelCase")]
 struct SnapshotOpenResult {
     snapshot_id: u64,
+    snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_rss_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotUpdateResult {
+    snapshot_id: u64,
+    snapshot_digest: String,
+    projects: Vec<ProjectSummary>,
+    recomputed_projects: Vec<String>,
+    reused_projects: Vec<String>,
+    recomputed_files: Vec<String>,
+    reused_files: Vec<String>,
+    removed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_rss_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -161,8 +194,11 @@ pub struct HandleEntry {
 }
 
 pub struct SnapshotState {
+    pub snapshot_id: u64,
     pub tsrs_snapshot_id: u64,
     pub cwd: String,
+    pub entry_specs: Vec<String>,
+    pub opened_configs: Vec<String>,
     pub snapshot_data: Arc<SnapshotData>,
     pub project_ids: BTreeMap<String, ProjectId>,
     pub handles: FxHashMap<String, HandleEntry>,
@@ -173,7 +209,7 @@ pub struct SnapshotState {
 impl SnapshotState {
     fn alloc_handle(&mut self, prefix: &str, project_id: &str, payload: HandlePayload) -> String {
         self.next_handle_id += 1;
-        let id = format!("{prefix}:{}", self.next_handle_id);
+        let id = format!("{prefix}:{}:{}", self.snapshot_id, self.next_handle_id);
         self.handles.insert(
             id.clone(),
             HandleEntry {
@@ -428,6 +464,13 @@ impl EngineServer {
                 serde_json::to_value(result)
                     .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
             }
+            "snapshot.update" => {
+                let parsed: SnapshotUpdateParams = serde_json::from_value(params)
+                    .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
+                let result = self.update_snapshot(&parsed)?;
+                serde_json::to_value(result)
+                    .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
+            }
             "snapshot.release" => {
                 let parsed: SnapshotReleaseParams = serde_json::from_value(params)
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
@@ -458,8 +501,11 @@ impl EngineServer {
         self.snapshots.insert(
             snapshot_id,
             SnapshotState {
+                snapshot_id,
                 tsrs_snapshot_id: opened.tsrs_snapshot_id,
                 cwd,
+                entry_specs: opened.entry_specs,
+                opened_configs: opened.opened_configs,
                 snapshot_data: opened.snapshot_data,
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
@@ -470,7 +516,97 @@ impl EngineServer {
 
         Ok(SnapshotOpenResult {
             snapshot_id,
+            snapshot_digest: opened.snapshot_digest,
             projects: opened.summaries,
+            engine_rss_bytes: read_process_rss_bytes(),
+        })
+    }
+
+    fn update_snapshot(
+        &mut self,
+        params: &SnapshotUpdateParams,
+    ) -> Result<SnapshotUpdateResult, RpcErr> {
+        let Some(session) = self.session.as_ref().map(|(_, s)| Arc::clone(s)) else {
+            return Err(RpcErr::new(
+                "STALE_SNAPSHOT",
+                "Analysis session is not initialized.".to_string(),
+            ));
+        };
+
+        let (
+            cwd,
+            old_tsrs_snapshot_id,
+            old_entry_specs,
+            old_opened_configs,
+            old_snapshot_data,
+            old_project_ids,
+        ) = {
+            let Some(old_state) = self.snapshots.get(&params.snapshot_id) else {
+                return Err(RpcErr::new(
+                    "STALE_SNAPSHOT",
+                    format!("Snapshot {} is expired or unknown.", params.snapshot_id),
+                ));
+            };
+            (
+                old_state.cwd.clone(),
+                old_state.tsrs_snapshot_id,
+                old_state.entry_specs.clone(),
+                old_state.opened_configs.clone(),
+                Arc::clone(&old_state.snapshot_data),
+                old_state.project_ids.clone(),
+            )
+        };
+
+        let updated = update_projects_snapshot(
+            &session,
+            &UpdateSnapshotInput {
+                cwd: &cwd,
+                old_tsrs_snapshot_id,
+                old_entry_specs: &old_entry_specs,
+                old_opened_configs: &old_opened_configs,
+                old_snapshot_data: &old_snapshot_data,
+                old_project_ids: &old_project_ids,
+                entries: params.entries.as_deref(),
+                changed: &params.changed,
+                created: &params.created,
+                deleted: &params.deleted,
+            },
+        )
+        .map_err(|err| RpcErr::new(err.code, err.message))?;
+
+        drop(old_snapshot_data);
+        drop(self.snapshots.remove(&params.snapshot_id));
+        release_tsrs_snapshot(&session, old_tsrs_snapshot_id);
+
+        self.next_snapshot_id += 1;
+        let snapshot_id = self.next_snapshot_id;
+        let opened = updated.opened;
+        self.snapshots.insert(
+            snapshot_id,
+            SnapshotState {
+                snapshot_id,
+                tsrs_snapshot_id: opened.tsrs_snapshot_id,
+                cwd,
+                entry_specs: opened.entry_specs,
+                opened_configs: opened.opened_configs,
+                snapshot_data: opened.snapshot_data,
+                project_ids: opened.project_ids,
+                handles: FxHashMap::default(),
+                cfg_cache: FxHashMap::default(),
+                next_handle_id: 0,
+            },
+        );
+
+        Ok(SnapshotUpdateResult {
+            snapshot_id,
+            snapshot_digest: opened.snapshot_digest,
+            projects: opened.summaries,
+            recomputed_projects: updated.recomputed_projects,
+            reused_projects: updated.reused_projects,
+            recomputed_files: updated.recomputed_files,
+            reused_files: updated.reused_files,
+            removed_files: updated.removed_files,
+            engine_rss_bytes: read_process_rss_bytes(),
         })
     }
 
@@ -695,6 +831,18 @@ pub fn run_branch_coverage(
     }
 
     Ok(items)
+}
+
+fn read_process_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb_str = rest.split_whitespace().next()?;
+            let kb: u64 = kb_str.parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
 }
 
 fn serialize_error(id: &Value, code: &str, message: String) -> String {

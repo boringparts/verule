@@ -233,6 +233,31 @@ export type SourceFileOrigin = {
   readonly projects: readonly SourceFileProjectOrigin[];
 };
 
+export type Model = {
+  readonly id: string;
+  readonly version?: string;
+  readonly description?: string;
+  readonly facts?: Readonly<Record<string, unknown>>;
+};
+
+export type RuleIdentitySummary = {
+  readonly id: string;
+  readonly digest: string;
+};
+
+export type ModelIdentitySummary = {
+  readonly id: string;
+  readonly version?: string;
+  readonly digest: string;
+};
+
+export type ReportIdentity = {
+  readonly snapshotDigest: string;
+  readonly configDigest: string;
+  readonly rules: readonly RuleIdentitySummary[];
+  readonly models: readonly ModelIdentitySummary[];
+};
+
 export type ObservationPhases = {
   readonly configAndOpenMs: number;
   readonly engineQueryMs: number;
@@ -346,6 +371,7 @@ export type CheckReport = {
   readonly fileOrigins: readonly SourceFileOrigin[];
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
+  readonly identity: ReportIdentity;
   readonly observation?: ObservationReport;
   readonly explanation?: ExplainResult;
   readonly explanations?: readonly ExplainResult[];
@@ -398,6 +424,8 @@ export type TypeAtResult = {
 
 export type RuleContext = {
   readonly project: ProjectSummary;
+  readonly models: readonly Model[];
+  getModel: (id: string) => Model | undefined;
   findSyntax: (
     options: FindSyntaxOptions,
   ) => Promise<readonly SyntaxNodeResult[]>;
@@ -462,12 +490,14 @@ export type VeruleConfig = {
   readonly tsconfig?: string;
   readonly projects?: readonly string[];
   readonly rules?: readonly Rule[];
+  readonly models?: readonly Model[];
 };
 
 export type NormalizedVeruleConfig = {
   readonly tsconfig?: string;
   readonly projects?: readonly string[];
   readonly rules: readonly Rule[];
+  readonly models: readonly Model[];
 };
 
 export type SessionCheckOptions = {
@@ -500,13 +530,85 @@ export type RunCheckOptions = OpenSessionOptions & {
   readonly at?: string | SourceTarget;
 };
 
+export type RecomputationScope = {
+  readonly recomputedProjects: readonly string[];
+  readonly reusedProjects: readonly string[];
+  readonly recomputedFiles: readonly string[];
+  readonly reusedFiles: readonly string[];
+  readonly removedFiles: readonly string[];
+  readonly invalidatedBy: readonly string[];
+};
+
+export type MemoryStats = {
+  readonly hostRssBytes: number;
+  readonly engineRssBytes?: number;
+};
+
+export type SessionUpdateOptions = {
+  readonly changed?: readonly string[];
+  readonly created?: readonly string[];
+  readonly deleted?: readonly string[];
+  readonly config?: VeruleConfig;
+  readonly rules?: readonly Rule[];
+  readonly models?: readonly Model[];
+  readonly entries?: readonly string[];
+};
+
+export type SessionUpdateResult = {
+  readonly previousSnapshotId: number;
+  readonly snapshotId: number;
+  readonly projects: readonly ProjectSummary[];
+  readonly fileOrigins: readonly SourceFileOrigin[];
+  readonly recomputation: RecomputationScope;
+  readonly memory: MemoryStats;
+};
+
 export type AnalysisSession = {
   readonly snapshotId: number;
   readonly projects: readonly ProjectSummary[];
   readonly fileOrigins: readonly SourceFileOrigin[];
+  readonly memory: MemoryStats;
   check: (
     optionsOrRules?: readonly Rule[] | SessionCheckOptions,
   ) => Promise<CheckReport>;
+  update: (options?: SessionUpdateOptions) => Promise<SessionUpdateResult>;
   explain: (options: ExplainOptions) => Promise<ExplainReport>;
   close: () => Promise<void>;
 };
+
+export type WatchTrigger = "initial" | "change";
+
+export type WatchConfigLoadResult = {
+  readonly config: VeruleConfig;
+  readonly watchFiles?: readonly string[];
+};
+
+export type WatchProjectOptions = {
+  readonly cwd: string;
+  readonly config?: VeruleConfig;
+  readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
+  readonly watchFiles?: readonly string[];
+  readonly observe?: ObserveMode;
+  readonly debounceMs?: number;
+  readonly signal?: AbortSignal;
+};
+
+export type WatchReportEvent = {
+  readonly kind: "report";
+  readonly sequence: number;
+  readonly trigger: WatchTrigger;
+  readonly snapshotId: number;
+  readonly report: CheckReport;
+  readonly recomputation: RecomputationScope;
+  readonly memory: MemoryStats;
+};
+
+export type WatchFailureEvent = {
+  readonly kind: "failed";
+  readonly sequence: number;
+  readonly trigger: WatchTrigger;
+  readonly code: VeruleErrorCode;
+  readonly message: string;
+};
+
+export type WatchEvent = WatchReportEvent | WatchFailureEvent;
