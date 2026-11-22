@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import type { ResolvedImplementationTarget } from "./package-impl.ts";
 import { validateProgramRefs } from "./projection.ts";
 import {
   makeProgramRef,
@@ -41,6 +42,7 @@ export type CallTargetInfo = {
   readonly name: string | null;
   readonly location: DiagnosticLocation | null;
   readonly isExternal: boolean;
+  readonly implementation?: ResolvedImplementationTarget | null;
   readonly parameterBindings: readonly CallSiteParameterBinding[];
   readonly returnExpressions: readonly SyntaxRef[];
 };
@@ -138,6 +140,7 @@ type RawCallTargetInfo = {
   readonly name: string | null;
   readonly location: DiagnosticLocation | null;
   readonly isExternal: boolean;
+  readonly implementation?: ResolvedImplementationTarget | null;
   readonly parameterBindings: readonly RawParameterBinding[];
   readonly returnExpressions: readonly string[];
 };
@@ -451,6 +454,9 @@ export function createCallsValuesQueries(deps: {
                 name: target.name,
                 location: target.location,
                 isExternal: target.isExternal,
+                ...(target.implementation !== undefined
+                  ? { implementation: target.implementation }
+                  : {}),
                 parameterBindings: mapBindings(
                   target.parameterBindings,
                   sessionToken,

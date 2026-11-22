@@ -90,6 +90,13 @@ export type {
   TypeSummary,
 } from "./projection.ts";
 export type {
+  ImplementationResolutionResult,
+  ImplementationStatus,
+  ImplementationTargetRef,
+  PackageResolutionMode,
+  ResolvedImplementationTarget,
+} from "./package-impl.ts";
+export type {
   FullInstanceProjectionFields,
   InstanceModelBehavior,
   InstanceModelMatch,

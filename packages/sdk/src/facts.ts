@@ -121,6 +121,7 @@ export type AdapterContext = {
   syntaxOf: RuleContext["syntaxOf"];
   callersOf: RuleContext["callersOf"];
   calleesOf: RuleContext["calleesOf"];
+  resolveImplementations: RuleContext["resolveImplementations"];
   valuePropagation: RuleContext["valuePropagation"];
   /** Registers a local non-source file read by this adapter as an additional input. */
   registerAdditionalInput: RuleContext["registerAdditionalInput"];

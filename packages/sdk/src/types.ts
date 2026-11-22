@@ -27,6 +27,10 @@ import type {
   ProjectedInstanceRow,
 } from "./instance-identity.ts";
 import type {
+  ImplementationResolutionResult,
+  ImplementationTargetRef,
+} from "./package-impl.ts";
+import type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,
@@ -528,6 +532,9 @@ export type RuleContext = {
   calleesOf: (
     calls: readonly CallRef[],
   ) => Promise<readonly CallTargetsResult[]>;
+  resolveImplementations: (
+    targets: readonly ImplementationTargetRef[],
+  ) => Promise<readonly ImplementationResolutionResult[]>;
   valuePropagation: (
     options: ValuePropagationOptions,
   ) => Promise<ValuePropagationResult>;
