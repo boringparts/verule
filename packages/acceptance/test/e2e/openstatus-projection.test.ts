@@ -96,7 +96,7 @@ void test("replays OpenStatus whoami sequence and getGate original + manual-edit
   assert.equal(gateBaseline.exitCode, 0);
   assert.equal(gateBaseline.explainAtCheckpoints?.length, 2);
 
-  const [wsExplain, gateExplain] = gateBaseline.explainAtCheckpoints!;
+  const [wsExplain, gateExplain] = gateBaseline.explainAtCheckpoints;
   assert.ok(wsExplain && gateExplain);
   const wsLine = Number(wsExplain.at.split(":").at(-1));
   const gateLine = Number(gateExplain.at.split(":").at(-1));

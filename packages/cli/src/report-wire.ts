@@ -363,7 +363,13 @@ function sanitizeWireJsonValue(value: unknown): unknown {
     }
     return out;
   }
-  return String(value);
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value === "bigint" || typeof value === "symbol") {
+    return value.toString();
+  }
+  return null;
 }
 
 function toWireObservation(obs: ObservationReport): WireObservation {

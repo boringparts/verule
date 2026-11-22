@@ -61,7 +61,8 @@ export const OPENSTATUS_WHOAMI_STEPS: readonly OpenStatusWhoamiStep[] = [
     kind: "upstream-commit",
     label: "fix-typo",
     sha: "f04bd49aaac41f8be05eb821ec6442e763e6c86f",
-    description: "Upstream typo fix `slub -> slug`; `workspaceId` remains missing",
+    description:
+      "Upstream typo fix `slub -> slug`; `workspaceId` remains missing",
     targetFile: "apps/server/src/v1/whoami/get.ts",
     expectedMissingFields: ["workspaceId"],
     expectedDiagnosticCountAtTarget: 1,
@@ -272,7 +273,9 @@ export function parseCliCheckJson(stdout: string): CliCheckPayload {
     typeof parsed.data !== "object" ||
     parsed.data === null
   ) {
-    throw new Error(`Unexpected verule check JSON output: ${stdout.slice(0, 400)}`);
+    throw new Error(
+      `Unexpected verule check JSON output: ${stdout.slice(0, 400)}`,
+    );
   }
   return parsed as CliCheckPayload;
 }
@@ -320,7 +323,9 @@ export function findLineContaining(
   snippet: string,
   afterAnchor?: string,
 ): number {
-  const searchStart = afterAnchor ? Math.max(0, source.indexOf(afterAnchor)) : 0;
+  const searchStart = afterAnchor
+    ? Math.max(0, source.indexOf(afterAnchor))
+    : 0;
   const matchIndex = source.indexOf(snippet, searchStart);
   if (matchIndex === -1) {
     throw new Error(`Could not locate "${snippet}" in source`);
@@ -511,11 +516,11 @@ export async function runOpenStatusProjectionAcceptance(
         });
       } finally {
         prepared.cleanup();
-        if (existsSync(prepared.checkout.checkoutDir)) {
-          throw new Error(
-            `Temporary OpenStatus checkout was not cleaned up: ${prepared.checkout.checkoutDir}`,
-          );
-        }
+      }
+      if (existsSync(prepared.checkout.checkoutDir)) {
+        throw new Error(
+          `Temporary OpenStatus checkout was not cleaned up: ${prepared.checkout.checkoutDir}`,
+        );
       }
     }
 
@@ -526,9 +531,7 @@ export async function runOpenStatusProjectionAcceptance(
       ...(options.repositoryUrl === undefined
         ? {}
         : { repositoryUrl: options.repositoryUrl }),
-      ...(options.cacheDir === undefined
-        ? {}
-        : { cacheDir: options.cacheDir }),
+      ...(options.cacheDir === undefined ? {} : { cacheDir: options.cacheDir }),
       ...(options.env === undefined ? {} : { env: options.env }),
     });
 
@@ -703,14 +706,16 @@ export async function runOpenStatusProjectionAcceptance(
       });
     } finally {
       getGatePrepared.prepared.cleanup();
-      if (existsSync(getGatePrepared.prepared.checkout.checkoutDir)) {
-        throw new Error(
-          `Temporary OpenStatus checkout was not cleaned up: ${getGatePrepared.prepared.checkout.checkoutDir}`,
-        );
-      }
+    }
+    if (existsSync(getGatePrepared.prepared.checkout.checkoutDir)) {
+      throw new Error(
+        `Temporary OpenStatus checkout was not cleaned up: ${getGatePrepared.prepared.checkout.checkoutDir}`,
+      );
     }
 
-    const configText = renderOpenStatusVeruleConfig(OPENSTATUS_GET_GATE_PROJECTS);
+    const configText = renderOpenStatusVeruleConfig(
+      OPENSTATUS_GET_GATE_PROJECTS,
+    );
     const configCodeLines = configText.trimEnd().split("\n").length;
 
     return {
