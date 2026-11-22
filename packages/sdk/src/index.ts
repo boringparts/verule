@@ -29,6 +29,7 @@ export {
   type LibraryAdapter,
 } from "./facts.ts";
 export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
+export { isSameInstance } from "./instance-identity.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {
   defineConfig,
@@ -88,6 +89,17 @@ export type {
   TypePropertyInfo,
   TypeSummary,
 } from "./projection.ts";
+export type {
+  FullInstanceProjectionFields,
+  InstanceModelBehavior,
+  InstanceModelMatch,
+  InstanceOriginKind,
+  InstanceProjectionSelection,
+  InstanceResolutionResult,
+  InstanceTargetRef,
+  ProjectedInstanceRow,
+  ResolvedInstanceInfo,
+} from "./instance-identity.ts";
 export {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
@@ -115,6 +127,7 @@ export {
   type Gap,
   type InlineIgnoreEntry,
   type InlineIgnoreStatus,
+  type InstanceRef,
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
