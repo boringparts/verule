@@ -1,14 +1,13 @@
 use std::{
     collections::BTreeMap,
     io::{self, Write},
-    path::Path,
     sync::Arc,
 };
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tsrs_api::{Handler, Response, Session, SessionOptions, session::SnapshotData};
+use tsrs_api::{Session, SessionOptions, session::SnapshotData};
 use tsrs_ast::{Kind, Node, SourceFile};
 use tsrs_checker::{LiteralValue, Type, TypeFlags, TypeFormatFlags};
 use tsrs_compiler::Program;
@@ -16,10 +15,14 @@ use tsrs_core::{
     P,
     context::{CheckerLifetime, Context, with_checker_lifetime},
 };
-use tsrs_diagnostics::Category;
 use tsrs_project::ID as ProjectId;
 use tsrs_scanner::{get_ecma_line_and_utf16_character_of_position, get_token_pos_of_node};
 use tsrs_vfs::{FS, bundled, osvfs};
+
+use crate::projects::{
+    ProjectSummary, is_project_source_file, normalize_path, open_projects_snapshot,
+    relative_to_cwd, release_tsrs_snapshot, resolve_against_cwd,
+};
 
 #[derive(Deserialize)]
 struct RpcRequest {
@@ -101,14 +104,6 @@ struct SnapshotOpenResult {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectSummary {
-    project_id: String,
-    config_file: String,
-    source_files: Vec<String>,
-}
-
-#[derive(Serialize)]
 struct SnapshotReleaseResult {
     released: bool,
 }
@@ -169,20 +164,6 @@ struct TypeItem {
     literal_value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     union_members: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TsrsCreateSnapshotResponse {
-    snapshot: u64,
-    projects: Vec<TsrsProjectResponse>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TsrsProjectResponse {
-    id: String,
-    config_file_name: String,
 }
 
 enum HandlePayload {
@@ -324,102 +305,20 @@ impl EngineServer {
     }
 
     fn open_snapshot(&mut self, params: &SnapshotOpenParams) -> Result<SnapshotOpenResult, RpcErr> {
-        if params.entries.is_empty() {
-            return Err(RpcErr::new(
-                "PROJECT_LOAD_ERROR",
-                "At least one tsconfig entry is required.".to_string(),
-            ));
-        }
-
         let cwd = normalize_path(&params.cwd);
-        let mut resolved_entries = Vec::with_capacity(params.entries.len());
-        for entry in &params.entries {
-            let resolved = resolve_against_cwd(&cwd, entry);
-            if !Path::new(&resolved).is_file() {
-                return Err(RpcErr::new(
-                    "PROJECT_LOAD_ERROR",
-                    format!("Project configuration file not found: {resolved}"),
-                ));
-            }
-            resolved_entries.push(resolved);
-        }
-
         let session = self.ensure_session(&cwd);
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "openProjects": resolved_entries,
-        }))
-        .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
-
-        let response = session
-            .handle_request("createSnapshot", &payload)
-            .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
-        let Response::Json(json_text) = response else {
-            return Err(RpcErr::new(
-                "PROJECT_LOAD_ERROR",
-                "Unexpected binary response from tsrs session.".to_string(),
-            ));
-        };
-
-        let created: TsrsCreateSnapshotResponse = serde_json::from_str(&json_text)
-            .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
-        let tsrs_snapshot_id = created.snapshot;
-
-        let snapshot_data = session
-            .snapshot_data(tsrs_snapshot_id)
-            .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
-
-        let mut project_ids = BTreeMap::new();
-        let mut summaries = Vec::with_capacity(created.projects.len());
-
-        for project in created.projects {
-            let pid = ProjectId(project.id.clone());
-            let program = match snapshot_data.get_program(&pid) {
-                Ok(prog) => prog,
-                Err(err) => {
-                    release_tsrs_snapshot(&session, tsrs_snapshot_id);
-                    return Err(RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()));
-                }
-            };
-
-            if let Some(config_err) = first_config_error(program) {
-                release_tsrs_snapshot(&session, tsrs_snapshot_id);
-                return Err(RpcErr::new("PROJECT_LOAD_ERROR", config_err));
-            }
-
-            let mut source_files = Vec::new();
-            for &sf in program.get_source_files() {
-                if !is_project_source_file(program, sf) {
-                    continue;
-                }
-                source_files.push(relative_to_cwd(&cwd, sf.file_name()));
-            }
-            source_files.sort();
-
-            project_ids.insert(project.id.clone(), pid);
-            summaries.push(ProjectSummary {
-                project_id: project.id,
-                config_file: relative_to_cwd(&cwd, &project.config_file_name),
-                source_files,
-            });
-        }
-
-        if summaries.is_empty() {
-            release_tsrs_snapshot(&session, tsrs_snapshot_id);
-            return Err(RpcErr::new(
-                "PROJECT_LOAD_ERROR",
-                "No compiler projects were opened.".to_string(),
-            ));
-        }
+        let opened = open_projects_snapshot(&session, &cwd, &params.entries)
+            .map_err(|err| RpcErr::new(err.code, err.message))?;
 
         self.next_snapshot_id += 1;
         let snapshot_id = self.next_snapshot_id;
         self.snapshots.insert(
             snapshot_id,
             SnapshotState {
-                tsrs_snapshot_id,
+                tsrs_snapshot_id: opened.tsrs_snapshot_id,
                 cwd,
-                snapshot_data,
-                project_ids,
+                snapshot_data: opened.snapshot_data,
+                project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
                 next_handle_id: 0,
             },
@@ -427,7 +326,7 @@ impl EngineServer {
 
         Ok(SnapshotOpenResult {
             snapshot_id,
-            projects: summaries,
+            projects: opened.summaries,
         })
     }
 
@@ -504,43 +403,6 @@ impl EngineServer {
             session.close();
         }
     }
-}
-
-fn release_tsrs_snapshot(session: &Session, tsrs_snapshot_id: u64) {
-    if let Ok(payload) = serde_json::to_vec(&serde_json::json!({ "snapshot": tsrs_snapshot_id })) {
-        let _ = session.handle_request("release", &payload);
-    }
-}
-
-fn first_config_error(program: &Program) -> Option<String> {
-    for diag in program.get_config_file_parsing_diagnostics() {
-        if diag.category() == Category::Error {
-            return Some(format_diagnostic(&diag));
-        }
-    }
-    None
-}
-
-fn format_diagnostic(diag: &tsrs_ast::Diagnostic) -> String {
-    let text = diag.message_text();
-    if !text.is_empty() {
-        return text.to_string();
-    }
-    if let Some(msg) = diag.message() {
-        let args: Vec<&dyn std::fmt::Display> = diag
-            .message_args()
-            .iter()
-            .map(|s| s as &dyn std::fmt::Display)
-            .collect();
-        return msg.format(&args);
-    }
-    format!("TS{}", diag.code())
-}
-
-fn is_project_source_file(program: &Program, sf: P<SourceFile>) -> bool {
-    let path = sf.path();
-    !program.is_source_file_default_library(path)
-        && !program.is_source_file_from_external_library(sf)
 }
 
 fn run_find_syntax(
@@ -846,42 +708,6 @@ fn parse_syntax_kind(name: &str) -> Option<Kind> {
         "NewExpression" => Some(Kind::NewExpression),
         _ => None,
     }
-}
-
-fn normalize_path(path: &str) -> String {
-    let replaced = path.replace('\\', "/");
-    if replaced.len() > 1 {
-        replaced.trim_end_matches('/').to_string()
-    } else {
-        replaced
-    }
-}
-
-fn resolve_against_cwd(cwd: &str, candidate: &str) -> String {
-    let normalized = normalize_path(candidate);
-    if Path::new(&normalized).is_absolute() {
-        normalized
-    } else if cwd == "/" {
-        format!("/{normalized}")
-    } else {
-        format!("{cwd}/{normalized}")
-    }
-}
-
-fn relative_to_cwd(cwd: &str, file_path: &str) -> String {
-    let file_norm = normalize_path(file_path);
-    let prefix = if cwd == "/" {
-        "/".to_string()
-    } else {
-        format!("{cwd}/")
-    };
-    if let Some(stripped) = file_norm.strip_prefix(&prefix) {
-        return stripped.to_string();
-    }
-    if file_norm == cwd {
-        return ".".to_string();
-    }
-    file_norm
 }
 
 fn serialize_error(id: &Value, code: &str, message: String) -> String {

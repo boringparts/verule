@@ -1,7 +1,12 @@
-import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import { EngineClient } from "./engine-client.ts";
+import {
+  buildDiagnostics,
+  buildFileOrigins,
+  resolveProjectEntries,
+  type CollectedDiagnostic,
+} from "./projects.ts";
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
@@ -9,10 +14,8 @@ import {
   makeProgramRef,
   type AnalysisSession,
   type CheckReport,
-  type Diagnostic,
   type DiagnosticInput,
   type DiagnosticLocation,
-  type Evidence,
   type FindSyntaxOptions,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
@@ -58,15 +61,6 @@ type EngineBatchResult = {
   readonly results: readonly {
     readonly items: readonly unknown[];
   }[];
-};
-
-type CollectedDiagnostic = {
-  readonly ruleId: string;
-  readonly projectId: string;
-  readonly at: DiagnosticLocation;
-  readonly message: string;
-  readonly findingKey?: string;
-  readonly evidence: readonly Evidence[];
 };
 
 function validateRules(rules: readonly Rule[]): readonly Rule[] {
@@ -134,25 +128,6 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
       : {}),
     rules,
   };
-}
-
-function resolveEntries(config: VeruleConfig | undefined): readonly string[] {
-  if (!config) {
-    return ["tsconfig.json"];
-  }
-  if (config.projects !== undefined) {
-    if (config.projects.length === 0) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        '"projects" must contain at least one tsconfig path when specified.',
-      );
-    }
-    return config.projects;
-  }
-  if (config.tsconfig !== undefined) {
-    return [config.tsconfig];
-  }
-  return ["tsconfig.json"];
 }
 
 function toSyntaxNodeResult(
@@ -250,114 +225,6 @@ function toTypeAtResult(
   };
 }
 
-function canonicalLocationKey(loc: DiagnosticLocation): string {
-  return `${loc.file}:${loc.start}:${loc.end}:${loc.line}:${loc.column}:${loc.endLine}:${loc.endColumn}`;
-}
-
-function canonicalEvidenceKey(evidence: readonly Evidence[]): string {
-  return JSON.stringify(
-    evidence.map((item) => ({
-      kind: item.kind,
-      message: item.message,
-      ...(item.at !== undefined ? { at: canonicalLocationKey(item.at) } : {}),
-    })),
-  );
-}
-
-function compareLocations(
-  a: DiagnosticLocation,
-  b: DiagnosticLocation,
-): number {
-  const fileCmp = a.file.localeCompare(b.file);
-  if (fileCmp !== 0) return fileCmp;
-  if (a.start !== b.start) return a.start - b.start;
-  if (a.end !== b.end) return a.end - b.end;
-  if (a.line !== b.line) return a.line - b.line;
-  return a.column - b.column;
-}
-
-function buildDiagnostics(
-  collected: readonly CollectedDiagnostic[],
-): readonly Diagnostic[] {
-  const sorted = collected.toSorted((a, b) => {
-    const locCmp = compareLocations(a.at, b.at);
-    if (locCmp !== 0) return locCmp;
-    const ruleCmp = a.ruleId.localeCompare(b.ruleId);
-    if (ruleCmp !== 0) return ruleCmp;
-    return a.message.localeCompare(b.message);
-  });
-
-  type MergedEntry = {
-    readonly ruleId: string;
-    readonly at: DiagnosticLocation;
-    readonly message: string;
-    readonly findingKey?: string;
-    readonly evidence: readonly Evidence[];
-    readonly projects: string[];
-  };
-
-  const mergedMap = new Map<string, MergedEntry>();
-  const mergedList: MergedEntry[] = [];
-
-  for (const item of sorted) {
-    const mergeKey = JSON.stringify([
-      item.ruleId,
-      canonicalLocationKey(item.at),
-      item.message,
-      canonicalEvidenceKey(item.evidence),
-    ]);
-    const existing = mergedMap.get(mergeKey);
-    if (existing) {
-      if (!existing.projects.includes(item.projectId)) {
-        existing.projects.push(item.projectId);
-      }
-    } else {
-      const entry: MergedEntry = {
-        ruleId: item.ruleId,
-        at: item.at,
-        message: item.message,
-        ...(item.findingKey !== undefined
-          ? { findingKey: item.findingKey }
-          : {}),
-        evidence: item.evidence,
-        projects: [item.projectId],
-      };
-      mergedMap.set(mergeKey, entry);
-      mergedList.push(entry);
-    }
-  }
-
-  const occurrenceCounts = new Map<string, number>();
-  return mergedList.map((entry) => {
-    const anchorKey = entry.findingKey ?? entry.message;
-    const sigKey = JSON.stringify([entry.ruleId, entry.at.file, anchorKey]);
-    const occurrence = occurrenceCounts.get(sigKey) ?? 0;
-    occurrenceCounts.set(sigKey, occurrence + 1);
-
-    const id = createHash("sha256")
-      .update(
-        JSON.stringify([
-          entry.ruleId,
-          entry.at.file,
-          anchorKey,
-          `${entry.at.start}:${entry.at.end}`,
-          occurrence,
-        ]),
-      )
-      .digest("hex")
-      .slice(0, 16);
-
-    return {
-      id,
-      ruleId: entry.ruleId,
-      at: entry.at,
-      message: entry.message,
-      evidence: entry.evidence,
-      projects: entry.projects,
-    };
-  });
-}
-
 /**
  * Opens an analysis session backed by a single engine subprocess and project snapshot.
  *
@@ -369,7 +236,7 @@ export async function openSession(
   const normalizedConfig = options.config
     ? defineConfig(options.config)
     : defineConfig({});
-  const entries = resolveEntries(normalizedConfig);
+  const entries = resolveProjectEntries(normalizedConfig);
   const absCwd = resolve(options.cwd);
 
   const client = new EngineClient();
@@ -387,6 +254,7 @@ export async function openSession(
   const sessionToken = Symbol("verule-session");
   const snapshotId = openResult.snapshotId;
   const projects = openResult.projects;
+  const fileOrigins = buildFileOrigins(projects);
   let closed = false;
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
@@ -540,6 +408,7 @@ export async function openSession(
   return {
     snapshotId,
     projects,
+    fileOrigins,
     check: async (rulesOverride?: readonly Rule[]) => {
       assertOpen();
       const rules = rulesOverride
@@ -571,6 +440,7 @@ export async function openSession(
         reportVersion: REPORT_SCHEMA_VERSION,
         status: diagnostics.length > 0 ? "findings" : "clean",
         projects,
+        fileOrigins,
         diagnostics,
         gaps: [],
       };

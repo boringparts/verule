@@ -313,4 +313,158 @@ void test("runs the independently deployed CLI with its production SDK and engin
   assert.equal(brokenEnvelope.kind, "failure");
   assert.equal(brokenEnvelope.variant, "failed");
   assert.equal(brokenEnvelope.data.code, "PROJECT_LOAD_ERROR");
+
+  // 4. Multi-project aggregate + divergent @runtime resolution + merged diagnostics via deployed CLI
+  using multiHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-multiproj-host-"),
+  );
+  mkdirSync(join(multiHost.path, "packages/shared"), { recursive: true });
+  mkdirSync(join(multiHost.path, "packages/web/src"), { recursive: true });
+  mkdirSync(join(multiHost.path, "packages/node/src"), { recursive: true });
+  mkdirSync(join(multiHost.path, "node_modules/@verule"), { recursive: true });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(multiHost.path, "node_modules/@verule/sdk"),
+    "dir",
+  );
+
+  writeFileSync(
+    join(multiHost.path, "packages/shared/shared.ts"),
+    [
+      'import { mode } from "@runtime";',
+      "function sink(v: string): string { return v; }",
+      "export const out = sink(mode);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(multiHost.path, "packages/web/src/web.ts"),
+    'export const mode = "web" as const;\n',
+    "utf8",
+  );
+  writeFileSync(
+    join(multiHost.path, "packages/node/src/node.ts"),
+    'export const mode = "node" as const;\n',
+    "utf8",
+  );
+  writeFileSync(
+    join(multiHost.path, "packages/web/tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        composite: true,
+        strict: true,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        baseUrl: ".",
+        paths: { "@runtime": ["./src/web.ts"] },
+      },
+      include: ["src/**/*.ts", "../shared/shared.ts"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(multiHost.path, "packages/node/tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        composite: true,
+        strict: false,
+        allowJs: true,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        baseUrl: ".",
+        paths: { "@runtime": ["./src/node.ts"] },
+      },
+      include: ["src/**/*.ts", "../shared/shared.ts"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(multiHost.path, "tsconfig.json"),
+    JSON.stringify({
+      files: [],
+      references: [{ path: "./packages/web" }, { path: "./packages/node" }],
+    }),
+    "utf8",
+  );
+
+  const multiConfigPath = join(multiHost.path, "verule.config.ts");
+  writeFileSync(
+    multiConfigPath,
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [",
+      "    defineRule({",
+      '      id: "e2e-runtime-scope",',
+      "      run: async (ctx) => {",
+      '        const calls = await ctx.findSyntax({ files: ["packages/shared/shared.ts"], kinds: ["CallExpression"] });',
+      '        for (const call of calls.filter((c) => c.text.startsWith("sink("))) {',
+      "          const arg = call.arguments?.[0];",
+      "          if (!arg) continue;",
+      "          const [ty] = await ctx.typeAt([arg]);",
+      "          if (!ty) continue;",
+      "          ctx.report({",
+      "            at: call.location,",
+      "            message: `Runtime=${ty.typeText}`,",
+      '            findingKey: "runtime-mode",',
+      '            evidence: [{ kind: "type", message: `type=${ty.typeText}`, at: call.location }],',
+      "          });",
+      "          ctx.report({",
+      "            at: call.location,",
+      '            message: "Shared sink call",',
+      '            findingKey: "shared-call",',
+      '            evidence: [{ kind: "source", message: "shared", at: call.location }],',
+      "          });",
+      "        }",
+      "      },",
+      "    }),",
+      "  ],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const multiJson = invoke(multiHost.path, "check", "--output", "json");
+  assert.equal(multiJson.status, 1, multiJson.stderr);
+  const multiEnvelope = JSON.parse(multiJson.stdout) as {
+    kind: string;
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(multiEnvelope.kind, "data");
+  assert.equal(multiEnvelope.variant, "findings");
+  assert.equal(multiEnvelope.data.projects.length, 3);
+  assert.equal(multiEnvelope.data.diagnostics.length, 3);
+  assert.deepEqual(
+    multiEnvelope.data.diagnostics.find((d) => d.message === "Shared sink call")
+      ?.projects,
+    ["packages/node/tsconfig.json", "packages/web/tsconfig.json"],
+  );
+
+  const multiText = invoke(multiHost.path, "check");
+  assert.equal(multiText.status, 1);
+  assert.match(
+    multiText.stdout,
+    /tsconfig\.json -> packages\/web\/tsconfig\.json/u,
+  );
+  assert.match(
+    multiText.stdout,
+    /\[projects: packages\/node\/tsconfig\.json, packages\/web\/tsconfig\.json\]/u,
+  );
+
+  const multiConfigMod = (await import(
+    pathToFileURL(multiConfigPath).href
+  )) as {
+    default: import("@verule/sdk").VeruleConfig;
+  };
+  const multiSdkReport = await sdk.runCheck({
+    cwd: multiHost.path,
+    config: multiConfigMod.default,
+  });
+  assert.deepEqual(multiEnvelope.data, multiSdkReport);
 });
