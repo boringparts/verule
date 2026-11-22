@@ -208,7 +208,9 @@ void test("verule check traces ESM import vs CJS require conditional exports and
     for (const proj of report1.projects) {
       assert.ok(proj.sourceFiles.every((f) => !f.includes("node_modules/")));
     }
-    assert.ok(report1.fileOrigins.every((o) => !o.file.includes("node_modules/")));
+    assert.ok(
+      report1.fileOrigins.every((o) => !o.file.includes("node_modules/")),
+    );
 
     // Phase 2: remove `.mjs` and `.cjs` implementations, leaving only `.d.ts`
     unlinkSync(join(root, "node_modules/dual-pkg/dist/index.mjs"));

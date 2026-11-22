@@ -166,11 +166,8 @@ export function createPackageImplQueries(deps: {
       }
 
       const results = await Promise.all(
-        targets.map(
-          (target) =>
-            cache.implCache.get(
-              `${snapshotId}:${projectId}:${target.handleId}`,
-            )!,
+        targets.map((target) =>
+          cache.implCache.get(`${snapshotId}:${projectId}:${target.handleId}`)!,
         ),
       );
 

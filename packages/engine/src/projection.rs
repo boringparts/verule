@@ -784,7 +784,12 @@ fn execute_step(
         QueryStep::ResolveImplementations { targets } => {
             let items =
                 run_resolve_implementations(snapshot, project_id, program, checker, &targets)?;
-            observer.record_step("resolveImplementations", step_start, items.len(), Vec::new());
+            observer.record_step(
+                "resolveImplementations",
+                step_start,
+                items.len(),
+                Vec::new(),
+            );
             Ok(StepResult::ResolveImplementations { items })
         }
         other @ (QueryStep::CallEffects { .. } | QueryStep::InstanceCleanup { .. }) => {

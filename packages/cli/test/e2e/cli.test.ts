@@ -2178,9 +2178,7 @@ void test("runs the independently deployed CLI with its production SDK and engin
   const pkgData2 = (
     JSON.parse(pkgCheck2.stdout) as { data: import("@verule/sdk").CheckReport }
   ).data;
-  assert.ok(
-    pkgData2.gaps.some((g) => g.kind === "missing-instance-model"),
-  );
+  assert.ok(pkgData2.gaps.some((g) => g.kind === "missing-instance-model"));
   assert.ok(
     pkgData2.gaps.some((g) => g.kind === "missing-package-implementation"),
   );

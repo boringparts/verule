@@ -93,9 +93,10 @@ impl PackageImplCache {
 }
 
 fn has_ext(path: &str, exts: &[&str]) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|ext| exts.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate)))
+    Path::new(path).extension().is_some_and(|ext| {
+        exts.iter()
+            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+    })
 }
 
 fn script_kind_for_path(path: &str) -> Option<ScriptKind> {
@@ -232,7 +233,9 @@ fn determine_resolution_mode(
 ) -> PackageResolutionMode {
     if let Some(spec) = spec_node {
         if let Some(parent) = spec.parent() {
-            if parent.kind() == Kind::CallExpression && extract_require_specifier_node(parent).is_some() {
+            if parent.kind() == Kind::CallExpression
+                && extract_require_specifier_node(parent).is_some()
+            {
                 return PackageResolutionMode::Require;
             }
             if parent.kind() == Kind::ExternalModuleReference {
@@ -595,7 +598,8 @@ fn find_provenance_for_expr(
             });
         }
         if let Some(recv_sym) = checker.get_symbol_at_location_exported(pa.expression())
-            && let Some(prov) = trace_symbol_to_package_provenance(program, checker, recv_sym, prop_name)
+            && let Some(prov) =
+                trace_symbol_to_package_provenance(program, checker, recv_sym, prop_name)
         {
             return Some(prov);
         }
@@ -783,7 +787,10 @@ fn eval_exports_target(
                     ExportTargetEval::NotMatched => {}
                 }
             }
-            decl_fallback.map_or(ExportTargetEval::NotMatched, ExportTargetEval::DeclarationOnly)
+            decl_fallback.map_or(
+                ExportTargetEval::NotMatched,
+                ExportTargetEval::DeclarationOnly,
+            )
         }
         _ => ExportTargetEval::NotMatched,
     }
@@ -836,10 +843,7 @@ fn read_package_json_module_field(pkg_dir: &str) -> Option<String> {
     val.get("module")?.as_str().map(str::to_string)
 }
 
-fn probe_sibling_implementations(
-    decl_file: &str,
-    mode: PackageResolutionMode,
-) -> Vec<String> {
+fn probe_sibling_implementations(decl_file: &str, mode: PackageResolutionMode) -> Vec<String> {
     let base = if let Some(stem) = decl_file.strip_suffix(".d.ts") {
         stem
     } else if let Some(stem) = decl_file.strip_suffix(".d.mts") {
@@ -891,13 +895,8 @@ fn resolve_package_file_from_manifest(
         let fields = &contents.get().fields;
         if fields.exports.type_() != JSONValueType::NotPresent {
             if let Some((target, star_subst)) = match_exports_subpath(&fields.exports, subpath) {
-                match eval_exports_target(
-                    pkg_dir,
-                    target,
-                    star_subst.as_deref(),
-                    mode,
-                    conditions,
-                ) {
+                match eval_exports_target(pkg_dir, target, star_subst.as_deref(), mode, conditions)
+                {
                     ExportTargetEval::Matched(path) => {
                         if Path::new(&path).is_file() {
                             return ManifestFileOutcome::Unique(path);
@@ -1026,7 +1025,11 @@ fn find_local_binding_callable(
         }
         if stmt.kind() == Kind::VariableStatement {
             let decl_list = stmt.as_variable_statement().declaration_list();
-            for &decl in decl_list.as_variable_declaration_list().declarations().nodes() {
+            for &decl in decl_list
+                .as_variable_declaration_list()
+                .declarations()
+                .nodes()
+            {
                 if decl.name().and_then(node_text).as_deref() == Some(local_name)
                     && let Some(init) = decl.initializer()
                 {
@@ -1138,7 +1141,11 @@ fn find_exported_callable_in_sf(
             }
             Kind::VariableStatement if has_modifier(stmt, Kind::ExportKeyword) => {
                 let decl_list = stmt.as_variable_statement().declaration_list();
-                for &decl in decl_list.as_variable_declaration_list().declarations().nodes() {
+                for &decl in decl_list
+                    .as_variable_declaration_list()
+                    .declarations()
+                    .nodes()
+                {
                     if decl.name().and_then(node_text).as_deref() == Some(export_name)
                         && let Some(fn_node) = extract_callable_from_decl(decl)
                         && fn_node.body().is_some()
@@ -1158,15 +1165,22 @@ fn find_exported_callable_in_sf(
                         && let Some(target_name) = node_text(inner)
                     {
                         let mut seen = FxHashSet::default();
-                        if let Some(found) = find_local_binding_callable(sf, &target_name, &mut seen) {
+                        if let Some(found) =
+                            find_local_binding_callable(sf, &target_name, &mut seen)
+                        {
                             return Some(found);
                         }
                     }
                     if inner.kind() == Kind::ObjectLiteralExpression {
                         for &prop in inner.as_object_literal_expression().properties().nodes() {
-                            if let Some(found) =
-                                match_cjs_object_export_prop(cache, cwd, sf, prop, export_name, depth)
-                            {
+                            if let Some(found) = match_cjs_object_export_prop(
+                                cache,
+                                cwd,
+                                sf,
+                                prop,
+                                export_name,
+                                depth,
+                            ) {
                                 return Some(found);
                             }
                         }
@@ -1218,8 +1232,7 @@ fn find_exported_callable_in_sf(
                 } else if ed.export_clause.is_none()
                     && let Some(mod_spec) = ed.module_specifier
                     && let Some(rel_spec) = string_literal_text(mod_spec)
-                    && let Some(target_file) =
-                        resolve_relative_impl_path(sf.file_name(), &rel_spec)
+                    && let Some(target_file) = resolve_relative_impl_path(sf.file_name(), &rel_spec)
                     && let Some(target_sf) = cache.load_external_source_file(cwd, &target_file)
                     && let Some(found) = find_exported_callable_in_sf(
                         cache,
@@ -1251,9 +1264,7 @@ fn find_exported_callable_in_sf(
                     {
                         return Some(found);
                     }
-                } else if let Some(found) =
-                    match_define_property_export(sf, expr, export_name)
-                {
+                } else if let Some(found) = match_define_property_export(sf, expr, export_name) {
                     return Some(found);
                 }
             }
@@ -1575,15 +1586,7 @@ fn resolve_from_provenance_and_decl(
     {
         let is_ext = !is_project_source_file(program, sf);
         let (pkg_name, pkg_version, subpath, mode, conditions) = prov.as_ref().map_or_else(
-            || {
-                (
-                    None,
-                    None,
-                    None,
-                    PackageResolutionMode::Unknown,
-                    Vec::new(),
-                )
-            },
+            || (None, None, None, PackageResolutionMode::Unknown, Vec::new()),
             |p| {
                 let spec_str = p.specifier_text.as_deref().unwrap_or("");
                 let (pkg_n, sub) = if is_bare_package_specifier(spec_str) {
@@ -1662,14 +1665,8 @@ fn resolve_from_provenance_and_decl(
             let conditions = collect_active_conditions(program, p.resolution_mode);
             if let Some(sf) = cache.load_external_source_file(cwd, resolved.resolved_file_name)
                 && let Some(exp) = export_name.as_deref()
-                && let Some((_impl_decl, impl_fn)) = find_exported_callable_in_sf(
-                    cache,
-                    cwd,
-                    sf,
-                    exp,
-                    container_name.as_deref(),
-                    0,
-                )
+                && let Some((_impl_decl, impl_fn)) =
+                    find_exported_callable_in_sf(cache, cwd, sf, exp, container_name.as_deref(), 0)
             {
                 let info = build_target_payload(TargetPayloadInput {
                     cwd,
@@ -1737,7 +1734,13 @@ fn resolve_from_provenance_and_decl(
     } else {
         let exp = decl_node.name().and_then(node_text);
         let cont = enclosing_container_name(decl_node);
-        (None, ".".to_string(), PackageResolutionMode::Unknown, exp, cont)
+        (
+            None,
+            ".".to_string(),
+            PackageResolutionMode::Unknown,
+            exp,
+            cont,
+        )
     };
 
     let Some((pkg_dir, pkg_info)) =
@@ -1794,14 +1797,9 @@ fn resolve_from_provenance_and_decl(
                     ),
                 };
             };
-            if let Some((_impl_decl, impl_fn)) = find_exported_callable_in_sf(
-                cache,
-                cwd,
-                impl_sf,
-                exp,
-                container_name.as_deref(),
-                0,
-            ) {
+            if let Some((_impl_decl, impl_fn)) =
+                find_exported_callable_in_sf(cache, cwd, impl_sf, exp, container_name.as_deref(), 0)
+            {
                 let info = build_target_payload(TargetPayloadInput {
                     cwd,
                     file_abs: impl_sf.file_name(),
@@ -1913,7 +1911,8 @@ pub fn resolve_impl_for_call_target(
         && let Some(decl_sf) = get_source_file_of_node(dn)
         && decl_sf.is_declaration_file()
         && let Some(caller_sf) = get_source_file_of_node(call_node)
-        && let Some((spec_node, mode)) = find_import_for_decl_sf(program, caller_sf, decl_sf.file_name())
+        && let Some((spec_node, mode)) =
+            find_import_for_decl_sf(program, caller_sf, decl_sf.file_name())
     {
         prov = Some(ProvenanceSpec {
             containing_sf: caller_sf,
@@ -1999,7 +1998,13 @@ pub fn run_resolve_implementations(
                 let decl_n = first.map(|t| t.decl_node);
                 let fn_n = first.and_then(|t| t.fn_node);
                 let res = resolve_impl_for_call_target(
-                    &cache, cwd.as_str(), program, checker, node, decl_n, fn_n,
+                    &cache,
+                    cwd.as_str(),
+                    program,
+                    checker,
+                    node,
+                    decl_n,
+                    fn_n,
                 );
                 (res, node_location_rel(&cwd, node))
             } else {
@@ -2033,14 +2038,8 @@ pub fn run_resolve_implementations(
                 let sym = canonical_symbol_for_node(checker, node);
                 let decl_n = sym.and_then(|s| pick_preferred_impl_decl(s, None));
                 let fn_n = decl_n.and_then(extract_callable_from_decl);
-                let res = resolve_from_provenance_and_decl(
-                    &cache,
-                    &cwd,
-                    program,
-                    prov,
-                    decl_n,
-                    fn_n,
-                );
+                let res =
+                    resolve_from_provenance_and_decl(&cache, &cwd, program, prov, decl_n, fn_n);
                 (res, node_location_rel(&cwd, node))
             }
         } else {

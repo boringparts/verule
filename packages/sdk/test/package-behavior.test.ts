@@ -227,10 +227,7 @@ void describe("@verule/sdk package behavior resolution", () => {
           const prop = await ctx.valuePropagation({
             propagation: "value",
             from: inputInit,
-            to: [
-              mainOutDeclRow!.declaration!,
-              subOutDeclRow!.declaration!,
-            ],
+            to: [mainOutDeclRow!.declaration!, subOutDeclRow!.declaration!],
           });
 
           const [inputInst, mainOutInst, subOutInst] =
@@ -253,9 +250,9 @@ void describe("@verule/sdk package behavior resolution", () => {
             subMode: subImpl.implementation?.resolutionMode ?? null,
             subSubpath: subImpl.implementation?.subpath ?? null,
             mainPropReachable: prop.results[0]!.reachable,
-            mainPropEvidenceFiles: prop.results[0]!.evidence
-              .map((e) => e.at?.file)
-              .filter((f): f is string => f !== undefined),
+            mainPropEvidenceFiles: prop.results[0]!.evidence.map(
+              (e) => e.at?.file,
+            ).filter((f): f is string => f !== undefined),
             subPropReachable: prop.results[1]!.reachable,
             inputInst,
             mainOutInst,
@@ -689,10 +686,7 @@ void describe("@verule/sdk package behavior resolution", () => {
       assert.equal(mixedCjsSame, false);
       assert.equal(mixedPureJsImplFile, "node_modules/pure-js-dep/index.js");
       assert.equal(mixedEsmImplFile, "node_modules/cond-custom/dist/fast.mjs");
-      assert.equal(
-        mixedCjsImplFile,
-        "node_modules/cond-custom/dist/clone.cjs",
-      );
+      assert.equal(mixedCjsImplFile, "node_modules/cond-custom/dist/clone.cjs");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -747,7 +741,10 @@ void describe("@verule/sdk package behavior resolution", () => {
         "export function ambigOp(x) { return x; }\n",
       "node_modules/ambiguous-pkg/dist/b.mjs":
         "export function ambigOp(x) { return { ...x }; }\n",
-      "package.json": JSON.stringify({ name: "removable-host", type: "module" }),
+      "package.json": JSON.stringify({
+        name: "removable-host",
+        type: "module",
+      }),
       "tsconfig.json": JSON.stringify({
         compilerOptions: {
           strict: true,
@@ -864,7 +861,7 @@ void describe("@verule/sdk package behavior resolution", () => {
             [
               mProj.returnType!.ref,
               uProj.returnType!.ref,
-              mProj.instantiatedParameterTypes[0]!.type!.ref,
+              mProj.instantiatedParameterTypes[0]!.type.ref,
             ],
             { select: { typeText: true } },
           );
