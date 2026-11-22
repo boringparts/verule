@@ -1520,4 +1520,251 @@ void test("runs the independently deployed CLI with its production SDK and engin
     ).length,
     1,
   );
+
+  // 8. Deployed CLI additional inputs: only editing allowed-packages.json updates shared session immediately
+  using manifestHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-manifest-host-"),
+  );
+  using manifestSockDir = mkdtempDisposableSync(
+    join(tmpdir(), "verule-manifest-sock-"),
+  );
+  const manifestSocketPath = join(manifestSockDir.path, "manifest.sock");
+  mkdirSync(join(manifestHost.path, "src"), { recursive: true });
+  mkdirSync(join(manifestHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(manifestHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(manifestHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(manifestHost.path, "src", "app.ts"),
+    [
+      "declare function usePackage(name: string): void;",
+      "export function run(): void {",
+      '  usePackage("zod");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const allowlistPath = join(manifestHost.path, "allowed-packages.json");
+  writeFileSync(
+    allowlistPath,
+    JSON.stringify({ allowed: ["zod"] }, null, 2),
+    "utf8",
+  );
+  const manifestConfigPath = join(manifestHost.path, "verule.config.ts");
+  writeFileSync(
+    manifestConfigPath,
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      `const absAllowlist = ${JSON.stringify(allowlistPath)};`,
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      '  additionalInputs: ["./allowed-packages.json"],',
+      "  rules: [",
+      "    defineRule({",
+      '      id: "e2e-allowlist-reader",',
+      "      run: async (ctx) => {",
+      '        const parsed = JSON.parse(ctx.readAdditionalInput("allowed-packages.json")) as { allowed: string[] };',
+      '        const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "        for (const call of calls) {",
+      '          if (!call.text.startsWith("usePackage(")) continue;',
+      '          const m = /usePackage\\("([^"]+)"\\)/u.exec(call.text);',
+      "          const pkg = m?.[1];",
+      "          if (pkg !== undefined && !parsed.allowed.includes(pkg)) {",
+      "            ctx.report({",
+      "              at: call.location,",
+      '              message: `Disallowed package "${pkg}"`,',
+      "              findingKey: `pkg:${pkg}`,",
+      '              evidence: [{ kind: "source", message: `Used ${pkg}`, at: call.location }],',
+      "            });",
+      "          }",
+      "        }",
+      "      },",
+      "    }),",
+      "    defineRule({",
+      '      id: "e2e-allowlist-auditor",',
+      "      run: (ctx) => {",
+      "        ctx.registerAdditionalInput(absAllowlist);",
+      "      },",
+      "    }),",
+      "  ],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const manifestSessionChild = spawn(
+    process.execPath,
+    [
+      entry,
+      "session",
+      "--config",
+      manifestConfigPath,
+      "--socket",
+      manifestSocketPath,
+      "--output",
+      "ndjson",
+    ],
+    {
+      cwd: manifestHost.path,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const manifestSessionRecords: Record<string, unknown>[] = [];
+  let manifestSessionBuf = "";
+  let manifestSessionStderr = "";
+  let manifestWaiters: (() => void)[] = [];
+  manifestSessionChild.stdout.setEncoding("utf8");
+  manifestSessionChild.stdout.on("data", (chunk: string) => {
+    manifestSessionBuf += chunk;
+    while (true) {
+      const idx = manifestSessionBuf.indexOf("\n");
+      if (idx === -1) break;
+      const line = manifestSessionBuf.slice(0, idx).trim();
+      manifestSessionBuf = manifestSessionBuf.slice(idx + 1);
+      if (line.length > 0) {
+        manifestSessionRecords.push(
+          JSON.parse(line) as Record<string, unknown>,
+        );
+        const pending = manifestWaiters;
+        manifestWaiters = [];
+        for (const wake of pending) wake();
+      }
+    }
+  });
+  manifestSessionChild.stderr.setEncoding("utf8");
+  manifestSessionChild.stderr.on("data", (chunk: string) => {
+    manifestSessionStderr += chunk;
+  });
+
+  async function waitForManifestSessionRecord(
+    predicate: (item: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 10_000;
+    let cursor = 0;
+    while (true) {
+      while (cursor < manifestSessionRecords.length) {
+        const item = manifestSessionRecords[cursor]!;
+        cursor += 1;
+        if (predicate(item)) return item;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for manifest session record. Records=${JSON.stringify(manifestSessionRecords)} stderr=${manifestSessionStderr}`,
+        );
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 100);
+        manifestWaiters.push(() => {
+          clearTimeout(timer);
+          resolveWait();
+        });
+      });
+    }
+  }
+
+  function compareManifestRound(expectedStatus: 0 | 1) {
+    const sharedRes = invoke(
+      tmpdir(),
+      "check",
+      "--session",
+      manifestSocketPath,
+      "--output",
+      "json",
+    );
+    assert.equal(sharedRes.status, expectedStatus, sharedRes.stderr);
+    const coldRes = invoke(
+      manifestHost.path,
+      "check",
+      "--config",
+      manifestConfigPath,
+      "--output",
+      "json",
+    );
+    assert.equal(coldRes.status, expectedStatus, coldRes.stderr);
+    const sharedData = (
+      JSON.parse(sharedRes.stdout) as {
+        data: import("@verule/sdk").CheckReport;
+      }
+    ).data;
+    const coldData = (
+      JSON.parse(coldRes.stdout) as { data: import("@verule/sdk").CheckReport }
+    ).data;
+    assert.deepEqual(sharedData, coldData);
+    assert.deepEqual(sharedData.projects[0]?.sourceFiles, ["src/app.ts"]);
+    assert.deepEqual(
+      sharedData.fileOrigins.map((o) => o.file),
+      ["src/app.ts"],
+    );
+    assert.equal(sharedData.additionalInputs.length, 1);
+    assert.deepEqual(sharedData.additionalInputs[0]?.sources, [
+      { kind: "config" },
+      { kind: "rule", id: "e2e-allowlist-auditor" },
+      { kind: "rule", id: "e2e-allowlist-reader" },
+    ]);
+    return sharedData;
+  }
+
+  try {
+    await waitForManifestSessionRecord(
+      (r) => r.kind === "record" && r.variant === "ready",
+    );
+    compareManifestRound(0);
+
+    // Edit only allowed-packages.json -> immediate query -> exit 1
+    writeFileSync(
+      allowlistPath,
+      JSON.stringify({ allowed: ["lodash"] }, null, 2),
+      "utf8",
+    );
+    const findingsRound = compareManifestRound(1);
+    assert.equal(findingsRound.diagnostics.length, 1);
+
+    // Restore only allowed-packages.json -> immediate query -> exit 0
+    writeFileSync(
+      allowlistPath,
+      JSON.stringify({ allowed: ["zod"] }, null, 2),
+      "utf8",
+    );
+    const cleanRound = compareManifestRound(0);
+    assert.equal(cleanRound.diagnostics.length, 0);
+
+    manifestSessionChild.kill("SIGINT");
+    const exitRes = await new Promise<{ code: number | null }>(
+      (resolveExit) => {
+        manifestSessionChild.once("exit", (code) => resolveExit({ code }));
+      },
+    );
+    assert.equal(exitRes.code, 0, manifestSessionStderr);
+    assert.equal(existsSync(manifestSocketPath), false);
+  } finally {
+    if (
+      manifestSessionChild.exitCode === null &&
+      manifestSessionChild.signalCode === null
+    ) {
+      manifestSessionChild.kill("SIGKILL");
+    }
+  }
 });

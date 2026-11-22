@@ -88,9 +88,12 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
       `  excludedByQuery: ${exp.excludedByQuery.op} (provider=${exp.excludedByQuery.provider}, cache=${exp.excludedByQuery.cacheStatus}, candidates=${exp.excludedByQuery.candidateCount})`,
     );
   }
+  if (exp.providers.length > 0) {
+    lines.push(`  providers: ${exp.providers.join(", ")}`);
+  }
   for (const query of exp.queries) {
     lines.push(
-      `  query #${query.queryIndex}: ${query.op} [${query.cacheStatus}] candidates=${query.candidateCount} matchedTarget=${String(query.matchedTarget)}`,
+      `  query #${query.queryIndex}: ${query.op} [provider=${query.provider}, cache=${query.cacheStatus}] candidates=${query.candidateCount} matchedTarget=${String(query.matchedTarget)}`,
     );
   }
 }
@@ -108,12 +111,26 @@ function appendObservationLines(lines: string[], obs: WireObservation): void {
   lines.push(
     `  queries: total=${obs.queryCount}, computed=${obs.computedQueryCount}, reused=${obs.reusedQueryCount}, candidates=${obs.candidateCount}, checkpoints=${obs.checkpointCount}`,
   );
+  if (obs.providers.length > 0) {
+    lines.push(`  providers: ${obs.providers.join(", ")}`);
+  }
   if (obs.truncated) {
     lines.push(`  truncated: true (dropped=${obs.droppedCount})`);
   }
   if (obs.details) {
     for (const detail of obs.details) {
-      lines.push(`  detail [${detail.kind}]: ${detail.summary}`);
+      const meta: string[] = [];
+      if (detail.ruleId !== undefined) meta.push(`rule=${detail.ruleId}`);
+      if (detail.provider !== undefined)
+        meta.push(`provider=${detail.provider}`);
+      if (detail.cacheStatus !== undefined) {
+        meta.push(`cache=${detail.cacheStatus}`);
+      }
+      if (detail.candidateCount !== undefined) {
+        meta.push(`candidates=${detail.candidateCount}`);
+      }
+      const metaSuffix = meta.length > 0 ? ` (${meta.join(", ")})` : "";
+      lines.push(`  detail [${detail.kind}]${metaSuffix}: ${detail.summary}`);
     }
   }
 }

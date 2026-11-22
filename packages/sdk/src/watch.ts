@@ -211,6 +211,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
       normalizeAbsPath(resolve(absCwd, file)),
     ),
   );
+  const additionalInputFiles = new Set<string>();
   const knownFileHashes = new Map<string, string>();
   const knownWorkspaceFiles = new Set<string>();
   for (const file of configWatchFiles) {
@@ -266,7 +267,8 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
     if (closed) return;
     const normalized = normalizeAbsPath(absPath);
     const rel = normalizeRelPath(absCwd, normalized);
-    const isExplicitWatchFile = configWatchFiles.has(normalized);
+    const isExplicitWatchFile =
+      configWatchFiles.has(normalized) || additionalInputFiles.has(normalized);
     if (!isExplicitWatchFile && isIgnoredRelativePath(rel)) {
       return;
     }
@@ -320,7 +322,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
 
     const absCwdNorm = normalizeAbsPath(absCwd);
     const neededDirs = new Set<string>();
-    for (const filePath of configWatchFiles) {
+    for (const filePath of [...configWatchFiles, ...additionalInputFiles]) {
       if (filePath !== absCwdNorm && !filePath.startsWith(`${absCwdNorm}/`)) {
         neededDirs.add(normalizeAbsPath(dirname(filePath)));
       }
@@ -338,11 +340,17 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         const watcher = watch(dir, (_event, filename) => {
           if (typeof filename === "string" && filename.length > 0) {
             const candidate = normalizeAbsPath(resolve(dir, filename));
-            if (configWatchFiles.has(candidate)) {
+            if (
+              configWatchFiles.has(candidate) ||
+              additionalInputFiles.has(candidate)
+            ) {
               schedulePath(candidate);
             }
           } else {
-            for (const filePath of configWatchFiles) {
+            for (const filePath of [
+              ...configWatchFiles,
+              ...additionalInputFiles,
+            ]) {
               if (normalizeAbsPath(dirname(filePath)) === dir) {
                 schedulePath(filePath);
               }
@@ -352,6 +360,30 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         externalWatchers.set(dir, watcher);
       }
     }
+  }
+
+  function syncSessionAdditionalInputs(): void {
+    if (!session || closed) return;
+    const nextAdditionalFiles = new Set<string>();
+    for (const entry of session.additionalInputs) {
+      const absFile = normalizeAbsPath(resolve(absCwd, entry.file));
+      nextAdditionalFiles.add(absFile);
+      if (!knownFileHashes.has(absFile)) {
+        const hash =
+          entry.exists && entry.digest !== undefined
+            ? entry.digest
+            : hashFileContent(absFile);
+        if (hash !== undefined) {
+          knownFileHashes.set(absFile, hash);
+          knownWorkspaceFiles.add(absFile);
+        }
+      }
+    }
+    additionalInputFiles.clear();
+    for (const file of nextAdditionalFiles) {
+      additionalInputFiles.add(file);
+    }
+    syncWatchers();
   }
 
   async function resolveCurrentConfig(): Promise<NormalizedVeruleConfig> {
@@ -515,6 +547,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           knownFileHashes,
           knownWorkspaceFiles,
         );
+        syncSessionAdditionalInputs();
         clearFailureState();
         cachedDefaultReport = undefined;
         return {
@@ -556,6 +589,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
     }
 
     recordSessionFiles(absCwd, session, knownFileHashes, knownWorkspaceFiles);
+    syncSessionAdditionalInputs();
     clearFailureState();
     cachedDefaultReport = undefined;
     return {
@@ -580,6 +614,9 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
     for (const file of configWatchFiles) {
       candidates.add(file);
     }
+    for (const file of additionalInputFiles) {
+      candidates.add(file);
+    }
     if (existsSync(absCwd)) {
       const currentDiskFiles = new Set<string>();
       collectWorkspaceFiles(absCwd, absCwd, currentDiskFiles);
@@ -598,6 +635,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
       return session;
     },
     syncWatchers,
+    syncAdditionalInputs: syncSessionAdditionalInputs,
     openInitial: () =>
       runSerialized(async () => {
         syncWatchers();
@@ -620,6 +658,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
             knownFileHashes,
             knownWorkspaceFiles,
           );
+          syncSessionAdditionalInputs();
           clearFailureState();
           cachedDefaultReport = undefined;
           return {
@@ -687,7 +726,12 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
                   : {}),
               }
             : undefined;
-        const report = await session.check(checkOptions);
+        let report: CheckReport;
+        try {
+          report = await session.check(checkOptions);
+        } finally {
+          syncSessionAdditionalInputs();
+        }
         if (isDefaultQuery) {
           cachedDefaultReport = {
             snapshotId: session.snapshotId,
@@ -792,7 +836,12 @@ export async function* watchProject(
     sequence += 1;
     try {
       const initial = await controller.openInitial();
-      const report = await initial.session.check();
+      let report: CheckReport;
+      try {
+        report = await initial.session.check();
+      } finally {
+        controller.syncAdditionalInputs();
+      }
       yield {
         kind: "report",
         sequence,
@@ -840,7 +889,12 @@ export async function* watchProject(
 
       sequence += 1;
       try {
-        const report = await applied.session.check();
+        let report: CheckReport;
+        try {
+          report = await applied.session.check();
+        } finally {
+          controller.syncAdditionalInputs();
+        }
         yield {
           kind: "report",
           sequence,

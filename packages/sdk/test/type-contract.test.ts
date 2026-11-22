@@ -126,7 +126,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
       prepareExternalConsumer(root);
 
       const validCode = [
-        'import { defineConfig, defineModel, defineRule, isSameInstance, type CallRef, type DeclarationRef, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        'import { createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallRef, type DeclarationRef, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
         "",
         "const extModel = defineModel({",
         '  id: "ext-model",',
@@ -143,13 +143,47 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "  ],",
         "});",
         "",
+        'const registrar: AdditionalInputRegistrar = createAdditionalInputRegistry({ cwd: "/tmp/workspace" });',
+        'const adapterSource: AdditionalInputSource = { kind: "adapter", id: "demo-adapter" };',
+        'const regEntry: AdditionalInputEntry = registrar.registerAdditionalInput("allowed-packages.json", adapterSource);',
+        "void regEntry;",
+        "",
+        'const sampleFact = defineFactType<"syntax", { readonly strict?: boolean } | undefined, readonly string[]>({',
+        '  id: "demo.sample-fact",',
+        '  subjectKind: "syntax",',
+        "});",
+        "const sampleAdapter = defineAdapter({",
+        '  id: "demo-adapter",',
+        "  provides: [",
+        "    defineFactProvider(sampleFact, async (ctx) => {",
+        '      const adapterInput: AdditionalInputEntry = ctx.registerAdditionalInput("allowed-packages.json");',
+        "      if (adapterInput.exists) {",
+        '        const raw: string = ctx.readAdditionalInput("allowed-packages.json");',
+        "        void raw;",
+        "      }",
+        '      const nodes = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+        '      return nodes.map((n) => ({ subject: n.ref, value: ["ok"] }));',
+        "    }),",
+        "  ],",
+        "});",
+        "",
         "const validRule = defineRule({",
         '  id: "external-consumer-valid",',
         "  run: async (ctx) => {",
+        '    const inputEntry: AdditionalInputEntry = ctx.registerAdditionalInput("allowed-packages.json");',
+        "    if (inputEntry.exists) {",
+        '      const raw: string = ctx.readAdditionalInput("allowed-packages.json");',
+        "      void raw;",
+        "    }",
         "    const syntaxNodes = await ctx.findSyntax({",
         '      range: { file: "src/app.ts", startLine: 1, endLine: 20 },',
         '      kinds: ["CallExpression"],',
         "    });",
+        "    const facts = await ctx.facts(sampleFact, {",
+        "      targets: syntaxNodes.map((n) => n.ref),",
+        "      condition: { strict: true },",
+        "    });",
+        "    void facts;",
         "    const callResolutions = await ctx.resolveCalls(",
         "      syntaxNodes.map((n) => n.ref),",
         "      { select: { signature: true, location: true } },",
@@ -232,7 +266,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "  },",
         "});",
         "",
-        'export default defineConfig({ tsconfig: "tsconfig.json", rules: [validRule], models: [extModel] });',
+        'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [sampleAdapter], additionalInputs: ["allowed-packages.json"], models: [extModel], rules: [validRule] });',
         "",
       ].join("\n");
 
@@ -388,6 +422,23 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           expectedPattern: /TS2322|TS2345/u,
         },
         {
+          name: 'CallRef passed to FactType<"syntax">',
+          body: `
+            declare const callRef: CallRef;
+            declare const syntaxFact: FactType<"syntax", { readonly mode?: string } | undefined, string>;
+            await ctx.facts(syntaxFact, { targets: [callRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "wrong condition passed to FactType",
+          body: `
+            declare const syntaxFact: FactType<"syntax", { readonly mode: "a" | "b" }, string>;
+            await ctx.facts(syntaxFact, { condition: { mode: "c" } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
           name: "SyntaxRef passed to projectInstances",
           body: `
             const syntaxRef = undefined as unknown as SyntaxRef;
@@ -457,7 +508,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
 
       for (const testCase of negativeCases) {
         const snippet = [
-          'import type { CallRef, DeclarationRef, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
+          'import type { CallRef, DeclarationRef, FactType, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
           "",
           "export async function checkContract(ctx: RuleContext): Promise<void> {",
           testCase.body,

@@ -203,7 +203,7 @@ export type SyntaxLookupSelection = {
 };
 
 export type FullSyntaxLookupFields = {
-  readonly kind: SyntaxKind | null;
+  readonly kind: (SyntaxKind | (string & {})) | null;
   readonly text: string | null;
   readonly location: DiagnosticLocation | null;
   readonly expression: SyntaxRef | null;
@@ -217,7 +217,7 @@ export type FullSyntaxLookupFields = {
 export type ProjectedSyntaxLookupRow<
   S extends SyntaxLookupSelection = Record<never, never>,
 > = {
-  readonly target: DeclarationRef | CallRef | SignatureRef;
+  readonly target: SyntaxRef | DeclarationRef | CallRef | SignatureRef;
   readonly syntax: SyntaxRef | null;
   readonly gaps: readonly Gap[];
 } & Pick<
@@ -860,7 +860,7 @@ export function createProjectionQueries(deps: {
     syntaxOf: async <
       const S extends SyntaxLookupSelection = Record<never, never>,
     >(
-      targets: readonly (DeclarationRef | CallRef | SignatureRef)[],
+      targets: readonly (SyntaxRef | DeclarationRef | CallRef | SignatureRef)[],
       options?: { readonly select?: S },
     ): Promise<readonly ProjectedSyntaxLookupRow<S>[]> => {
       assertOpen();

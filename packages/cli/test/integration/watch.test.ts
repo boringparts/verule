@@ -23,6 +23,7 @@ type NdjsonLine =
         readonly status: "clean" | "findings";
         readonly projects: readonly unknown[];
         readonly fileOrigins: readonly unknown[];
+        readonly additionalInputs: readonly unknown[];
         readonly diagnostics: readonly {
           readonly id: string;
           readonly ruleId: string;
@@ -108,6 +109,7 @@ async function runColdJsonCheck(cwd: string, configArg?: string) {
       readonly status: "clean" | "findings";
       readonly projects: readonly unknown[];
       readonly fileOrigins: readonly unknown[];
+      readonly additionalInputs: readonly unknown[];
       readonly diagnostics: readonly unknown[];
       readonly gaps: readonly unknown[];
       readonly identity: unknown;
@@ -337,6 +339,7 @@ void test("verule watch --output ndjson aligns every round with independent veru
           status: rec.data.status,
           projects: rec.data.projects,
           fileOrigins: rec.data.fileOrigins,
+          additionalInputs: rec.data.additionalInputs,
           diagnostics: rec.data.diagnostics,
           gaps: rec.data.gaps,
           identity: rec.data.identity,

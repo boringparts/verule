@@ -3,6 +3,14 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
+  createAdditionalInputRegistry,
+  createScopedAdditionalInputRegistrar,
+  validateAdditionalInputPaths,
+  type AdditionalInputEntry,
+  type AdditionalInputRegistrar,
+  type AdditionalInputSource,
+} from "./additional-inputs.ts";
+import {
   assertValidProgramRef,
   toBranchCoverageItem,
   toFunctionBranchesResult,
@@ -17,6 +25,15 @@ import {
   createCallsValuesQueries,
 } from "./calls-values.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
+import {
+  FactCache,
+  executeFactQuery,
+  validateAdapters,
+  type AdapterContext,
+  type FactQueryOptions,
+  type FactType,
+  type LibraryAdapter,
+} from "./facts.ts";
 import {
   INLINE_IGNORE_RULE_ID,
   resolveInlineIgnores,
@@ -62,6 +79,7 @@ import {
   type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
+  type ProgramObjectKind,
   type ProjectSummary,
   type RecomputationScope,
   type ReportIdentity,
@@ -261,6 +279,10 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
   }
   const rules = validateRules(config.rules ?? []);
   const models = validateModels(config.models ?? []);
+  const adapters = validateAdapters(config.adapters ?? []);
+  const additionalInputs = validateAdditionalInputPaths(
+    config.additionalInputs,
+  );
   return {
     ...(config.tsconfig !== undefined ? { tsconfig: config.tsconfig } : {}),
     ...(config.projects !== undefined
@@ -268,6 +290,8 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
       : {}),
     rules,
     models,
+    adapters,
+    additionalInputs,
   };
 }
 
@@ -321,19 +345,34 @@ function summarizeModel(model: Model): ModelIdentitySummary {
   };
 }
 
+function summarizeAdapter(adapter: LibraryAdapter) {
+  return {
+    id: adapter.id,
+    version: adapter.version ?? null,
+    provides: adapter.provides
+      .map((provider) => provider.factType.id)
+      .toSorted(),
+  };
+}
+
 function computeReportIdentity(
   snapshotDigest: string,
   entries: readonly string[],
   rules: readonly Rule[],
   models: readonly Model[],
+  additionalInputs: readonly string[] = [],
+  adapters: readonly LibraryAdapter[] = [],
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
   const modelSummaries = models.map(summarizeModel);
+  const adapterSummaries = adapters.map(summarizeAdapter);
   const configDigest = sha256Prefix(
     stableSerialize({
       entries,
       rules: ruleSummaries,
       models: modelSummaries,
+      ...(additionalInputs.length > 0 ? { additionalInputs } : {}),
+      ...(adapterSummaries.length > 0 ? { adapters: adapterSummaries } : {}),
     }),
   );
   return {
@@ -491,6 +530,13 @@ function resolveNextConfig(
   const models = options?.models
     ? validateModels(options.models)
     : current.models;
+  const adapters = options?.adapters
+    ? validateAdapters(options.adapters)
+    : current.adapters;
+  const additionalInputs =
+    options?.additionalInputs !== undefined
+      ? validateAdditionalInputPaths(options.additionalInputs)
+      : current.additionalInputs;
   if (options?.entries !== undefined) {
     if (options.entries.length === 0) {
       throw new VeruleExecutionError(
@@ -502,6 +548,8 @@ function resolveNextConfig(
       projects: [...options.entries],
       rules,
       models,
+      adapters,
+      additionalInputs,
     };
   }
   return {
@@ -509,6 +557,8 @@ function resolveNextConfig(
     ...(current.projects !== undefined ? { projects: current.projects } : {}),
     rules,
     models,
+    adapters,
+    additionalInputs,
   };
 }
 
@@ -516,11 +566,18 @@ function collectInvalidatedBy(
   prevConfig: NormalizedVeruleConfig,
   nextConfig: NormalizedVeruleConfig,
   options?: SessionUpdateOptions,
+  changedAdditionalFiles: readonly string[] = [],
 ): readonly string[] {
   const reasons: string[] = [];
+  const changedSet = new Set<string>(options?.changed ?? []);
   for (const file of options?.changed ?? []) reasons.push(`changed:${file}`);
   for (const file of options?.created ?? []) reasons.push(`created:${file}`);
   for (const file of options?.deleted ?? []) reasons.push(`deleted:${file}`);
+  for (const file of changedAdditionalFiles) {
+    if (!changedSet.has(file)) {
+      reasons.push(`additional-input:${file}`);
+    }
+  }
 
   const prevEntries = resolveProjectEntries(prevConfig);
   const nextEntries = resolveProjectEntries(nextConfig);
@@ -529,12 +586,16 @@ function collectInvalidatedBy(
     prevEntries,
     prevConfig.rules,
     prevConfig.models,
+    prevConfig.additionalInputs,
+    prevConfig.adapters,
   );
   const nextIdentity = computeReportIdentity(
     "",
     nextEntries,
     nextConfig.rules,
     nextConfig.models,
+    nextConfig.additionalInputs,
+    nextConfig.adapters,
   );
   if (stableSerialize(prevEntries) !== stableSerialize(nextEntries)) {
     reasons.push("entries");
@@ -549,6 +610,18 @@ function collectInvalidatedBy(
     stableSerialize(nextIdentity.models)
   ) {
     reasons.push("models");
+  }
+  if (
+    stableSerialize(prevConfig.additionalInputs) !==
+    stableSerialize(nextConfig.additionalInputs)
+  ) {
+    reasons.push("additionalInputs");
+  }
+  if (
+    stableSerialize(prevConfig.adapters.map(summarizeAdapter)) !==
+    stableSerialize(nextConfig.adapters.map(summarizeAdapter))
+  ) {
+    reasons.push("adapters");
   }
   if (options?.config !== undefined && reasons.length === 0) {
     reasons.push("config");
@@ -664,6 +737,7 @@ export async function openSession(
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const callsValuesCache = createCallsValuesCache();
   const instanceCache = createInstanceIdentityCache();
+  const factCache = new FactCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
   let cachedDirectives:
     | {
@@ -690,6 +764,45 @@ export async function openSession(
     return promise;
   }
 
+  const explicitRegistrations: {
+    readonly filePath: string;
+    readonly source: AdditionalInputSource;
+  }[] = [];
+  let lastRuleRegistrations: {
+    readonly filePath: string;
+    readonly source: AdditionalInputSource;
+  }[] = [];
+
+  function buildSessionRegistry(
+    configInputs: readonly string[],
+    explicit: readonly {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[],
+    dynamic: readonly {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[],
+  ) {
+    const registry = createAdditionalInputRegistry({ cwd: absCwd });
+    for (const filePath of configInputs) {
+      registry.registerAdditionalInput(filePath, { kind: "config" });
+    }
+    for (const item of explicit) {
+      registry.registerAdditionalInput(item.filePath, item.source);
+    }
+    for (const item of dynamic) {
+      registry.registerAdditionalInput(item.filePath, item.source);
+    }
+    return registry;
+  }
+
+  let sessionRegistry = buildSessionRegistry(
+    normalizedConfig.additionalInputs,
+    explicitRegistrations,
+    lastRuleRegistrations,
+  );
+
   function assertOpen(): void {
     if (closed) {
       throw new VeruleExecutionError(
@@ -707,8 +820,13 @@ export async function openSession(
     collectedGaps: Gap[],
     collector: ObservationCollector,
     recordRuleEngineMs: (ms: number) => void,
+    additionalInputRegistrar: AdditionalInputRegistrar,
   ): RuleContext {
     const activeSnapshotId = currentSnapshotId;
+    const scopedAdditionalInputs = createScopedAdditionalInputRegistrar(
+      additionalInputRegistrar,
+      { kind: "rule", id: ruleId },
+    );
 
     const assertActiveSnapshot = (): void => {
       assertOpen();
@@ -817,79 +935,96 @@ export async function openSession(
         : {}),
     });
 
-    return {
-      project,
-      models,
-      getModel: (id: string) => models.find((model) => model.id === id),
-      ...projectionQueries,
-      ...callsValuesQueries,
-      ...instanceQueries,
-      findSyntax: async (query: FindSyntaxOptions) => {
-        assertActiveSnapshot();
-        const cacheKey = JSON.stringify([
-          activeSnapshotId,
-          project.projectId,
-          query.kinds ? query.kinds.toSorted() : null,
-          query.files ? query.files.toSorted() : null,
-          query.range ?? null,
-        ]);
-        const cached = syntaxCache.get(cacheKey);
-        const queryStart = collector.isActive() ? performance.now() : 0;
-
-        let items: readonly SyntaxNodeResult[];
-        let cacheStatus: "computed" | "reused";
-        if (cached) {
-          cacheStatus = "reused";
-          items = await cached;
-        } else {
-          cacheStatus = "computed";
-          const promise = client
-            .request<EngineBatchResult>(
-              "query.batch",
-              {
-                snapshotId: activeSnapshotId,
-                projectId: project.projectId,
-                steps: [
-                  {
-                    op: "findSyntax",
-                    ...(query.kinds !== undefined
-                      ? { kinds: query.kinds }
-                      : {}),
-                    ...(query.files !== undefined
-                      ? { files: query.files }
-                      : {}),
-                    ...(query.range !== undefined
-                      ? { range: query.range }
-                      : {}),
-                  },
-                ],
-              },
-              buildRpcOptions(collector),
-            )
-            .then((batch) => {
-              const rawItems = (batch.results[0]?.items ??
-                []) as readonly EngineSyntaxItem[];
-              return rawItems.map((item) =>
-                toSyntaxNodeResult(
-                  item,
-                  sessionToken,
-                  project.projectId,
-                  activeSnapshotId,
-                  syntaxLocations,
-                ),
-              );
-            });
-
-          syntaxCache.set(cacheKey, promise);
-          items = await promise;
-        }
-
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          if (cacheStatus === "computed") {
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
+    const adapterCallsValuesQueries = createCallsValuesQueries({
+      client,
+      cache: callsValuesCache,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (
+              _op,
+              cacheStatus,
+              _candidateCount,
+              durationMs,
+            ) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+            },
           }
+        : {}),
+    });
+
+    const runFindSyntax = async (
+      query: FindSyntaxOptions,
+      recordRuleQuery: boolean,
+    ): Promise<readonly SyntaxNodeResult[]> => {
+      assertActiveSnapshot();
+      const cacheKey = JSON.stringify([
+        activeSnapshotId,
+        project.projectId,
+        query.kinds ? query.kinds.toSorted() : null,
+        query.files ? query.files.toSorted() : null,
+        query.range ?? null,
+      ]);
+      const cached = syntaxCache.get(cacheKey);
+      const queryStart = collector.isActive() ? performance.now() : 0;
+
+      let items: readonly SyntaxNodeResult[];
+      let cacheStatus: "computed" | "reused";
+      if (cached) {
+        cacheStatus = "reused";
+        items = await cached;
+      } else {
+        cacheStatus = "computed";
+        const promise = client
+          .request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId: activeSnapshotId,
+              projectId: project.projectId,
+              steps: [
+                {
+                  op: "findSyntax",
+                  ...(query.kinds !== undefined ? { kinds: query.kinds } : {}),
+                  ...(query.files !== undefined ? { files: query.files } : {}),
+                  ...(query.range !== undefined ? { range: query.range } : {}),
+                },
+              ],
+            },
+            buildRpcOptions(collector),
+          )
+          .then((batch) => {
+            const rawItems = (batch.results[0]?.items ??
+              []) as readonly EngineSyntaxItem[];
+            return rawItems.map((item) =>
+              toSyntaxNodeResult(
+                item,
+                sessionToken,
+                project.projectId,
+                activeSnapshotId,
+                syntaxLocations,
+              ),
+            );
+          });
+
+        syntaxCache.set(cacheKey, promise);
+        items = await promise;
+      }
+
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        if (cacheStatus === "computed") {
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
+        }
+        if (recordRuleQuery) {
           const matchedLocations = collector.explainTarget
             ? items
                 .filter((item) =>
@@ -928,88 +1063,94 @@ export async function openSession(
               : {}),
           });
         }
+      }
 
-        return items;
-      },
-      typeAt: async (targets: readonly SyntaxRef[]) => {
-        assertActiveSnapshot();
-        if (targets.length === 0) return [];
-        validateProgramRefs(
-          targets,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
+      return items;
+    };
+
+    const runTypeAt = async (
+      targets: readonly SyntaxRef[],
+      recordRuleQuery: boolean,
+    ): Promise<readonly TypeAtResult[]> => {
+      assertActiveSnapshot();
+      if (targets.length === 0) return [];
+      validateProgramRefs(
+        targets,
+        sessionToken,
+        activeSnapshotId,
+        project.projectId,
+      );
+
+      const missingTargets: SyntaxRef[] = [];
+      for (const target of targets) {
+        const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
+        if (!typeCache.has(key)) {
+          missingTargets.push(target);
+        }
+      }
+
+      const queryStart = collector.isActive() ? performance.now() : 0;
+      const cacheStatus: "computed" | "reused" =
+        missingTargets.length > 0 ? "computed" : "reused";
+
+      if (missingTargets.length > 0) {
+        const batchPromise = client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId: activeSnapshotId,
+            projectId: project.projectId,
+            steps: [
+              {
+                op: "typeAtLocation",
+                targets: missingTargets.map((target) => target.handleId),
+              },
+            ],
+          },
+          buildRpcOptions(collector),
         );
 
-        const missingTargets: SyntaxRef[] = [];
-        for (const target of targets) {
+        for (const [index, target] of missingTargets.entries()) {
           const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-          if (!typeCache.has(key)) {
-            missingTargets.push(target);
-          }
-        }
-
-        const queryStart = collector.isActive() ? performance.now() : 0;
-        const cacheStatus: "computed" | "reused" =
-          missingTargets.length > 0 ? "computed" : "reused";
-
-        if (missingTargets.length > 0) {
-          const batchPromise = client.request<EngineBatchResult>(
-            "query.batch",
-            {
-              snapshotId: activeSnapshotId,
-              projectId: project.projectId,
-              steps: [
-                {
-                  op: "typeAtLocation",
-                  targets: missingTargets.map((target) => target.handleId),
-                },
-              ],
-            },
-            buildRpcOptions(collector),
-          );
-
-          for (const [index, target] of missingTargets.entries()) {
-            const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-            const itemPromise = batchPromise.then((batch) => {
-              const items = (batch.results[0]?.items ??
-                []) as readonly EngineTypeItem[];
-              const raw = items[index];
-              if (!raw) {
-                throw new VeruleExecutionError(
-                  "ENGINE_ERROR",
-                  `Engine omitted type result for target "${target.handleId}".`,
-                );
-              }
-              if (raw.gaps) {
-                recordGaps(raw.gaps);
-              }
-              return toTypeAtResult(
-                raw,
-                target,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
+          const itemPromise = batchPromise.then((batch) => {
+            const items = (batch.results[0]?.items ??
+              []) as readonly EngineTypeItem[];
+            const raw = items[index];
+            if (!raw) {
+              throw new VeruleExecutionError(
+                "ENGINE_ERROR",
+                `Engine omitted type result for target "${target.handleId}".`,
               );
-            });
-            typeCache.set(key, itemPromise);
-          }
+            }
+            if (raw.gaps) {
+              recordGaps(raw.gaps);
+            }
+            return toTypeAtResult(
+              raw,
+              target,
+              sessionToken,
+              project.projectId,
+              activeSnapshotId,
+            );
+          });
+          typeCache.set(key, itemPromise);
         }
+      }
 
-        const results = await Promise.all(
-          targets.map((target) =>
-            typeCache.get(
-              `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
-            )!,
-          ),
-        );
+      const results = await Promise.all(
+        targets.map((target) =>
+          typeCache.get(
+            `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
+          )!,
+        ),
+      );
 
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          if (cacheStatus === "computed") {
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
-          }
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        if (cacheStatus === "computed") {
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
+        }
+        if (recordRuleQuery) {
           const matchedLocations: DiagnosticLocation[] = [];
           const matchedTypeTexts: string[] = [];
           if (collector.explainTarget) {
@@ -1042,91 +1183,97 @@ export async function openSession(
               : {}),
           });
         }
+      }
 
-        return results;
-      },
-      listBranches: async (functions: readonly SyntaxRef[]) => {
-        assertActiveSnapshot();
-        if (functions.length === 0) return [];
+      return results;
+    };
 
-        for (const fnRef of functions) {
-          assertValidProgramRef(
-            fnRef,
-            sessionToken,
-            activeSnapshotId,
-            project.projectId,
-          );
+    const runListBranches = async (
+      functions: readonly SyntaxRef[],
+      recordRuleQuery: boolean,
+    ): Promise<readonly FunctionBranchesResult[]> => {
+      assertActiveSnapshot();
+      if (functions.length === 0) return [];
+
+      for (const fnRef of functions) {
+        assertValidProgramRef(
+          fnRef,
+          sessionToken,
+          activeSnapshotId,
+          project.projectId,
+        );
+      }
+
+      const queryStart = collector.isActive() ? performance.now() : 0;
+      const missingFunctions: SyntaxRef[] = [];
+      for (const fnRef of functions) {
+        const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
+        if (!branchListCache.has(key)) {
+          missingFunctions.push(fnRef);
         }
+      }
+      const cacheStatus: "computed" | "reused" =
+        missingFunctions.length > 0 ? "computed" : "reused";
 
-        const queryStart = collector.isActive() ? performance.now() : 0;
-        const missingFunctions: SyntaxRef[] = [];
-        for (const fnRef of functions) {
-          const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
-          if (!branchListCache.has(key)) {
-            missingFunctions.push(fnRef);
-          }
-        }
-        const cacheStatus: "computed" | "reused" =
-          missingFunctions.length > 0 ? "computed" : "reused";
-
-        if (missingFunctions.length > 0) {
-          const batchPromise = client.request<EngineBatchResult>(
-            "query.batch",
-            {
-              snapshotId: activeSnapshotId,
-              projectId: project.projectId,
-              steps: [
-                {
-                  op: "listBranches",
-                  targets: missingFunctions.map((fnRef) => fnRef.handleId),
-                },
-              ],
-            },
-            buildRpcOptions(collector),
-          );
-
-          for (const [index, fnRef] of missingFunctions.entries()) {
-            const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
-            const itemPromise = batchPromise.then((batch) => {
-              const items = (batch.results[0]?.items ??
-                []) as readonly EngineFunctionBranchesItem[];
-              const raw = items[index];
-              if (!raw) {
-                throw new VeruleExecutionError(
-                  "ENGINE_ERROR",
-                  `Engine omitted branch list for function "${fnRef.handleId}".`,
-                );
-              }
-              const mapped = toFunctionBranchesResult(
-                raw,
-                fnRef,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
-              );
-              for (const branch of mapped.branches) {
-                syntaxLocations.set(branch.condition, branch.location);
-              }
-              return mapped;
-            });
-            branchListCache.set(key, itemPromise);
-          }
-        }
-
-        const results = await Promise.all(
-          functions.map((fnRef) =>
-            branchListCache.get(
-              `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`,
-            )!,
-          ),
+      if (missingFunctions.length > 0) {
+        const batchPromise = client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId: activeSnapshotId,
+            projectId: project.projectId,
+            steps: [
+              {
+                op: "listBranches",
+                targets: missingFunctions.map((fnRef) => fnRef.handleId),
+              },
+            ],
+          },
+          buildRpcOptions(collector),
         );
 
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          if (cacheStatus === "computed") {
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
-          }
+        for (const [index, fnRef] of missingFunctions.entries()) {
+          const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
+          const itemPromise = batchPromise.then((batch) => {
+            const items = (batch.results[0]?.items ??
+              []) as readonly EngineFunctionBranchesItem[];
+            const raw = items[index];
+            if (!raw) {
+              throw new VeruleExecutionError(
+                "ENGINE_ERROR",
+                `Engine omitted branch list for function "${fnRef.handleId}".`,
+              );
+            }
+            const mapped = toFunctionBranchesResult(
+              raw,
+              fnRef,
+              sessionToken,
+              project.projectId,
+              activeSnapshotId,
+            );
+            for (const branch of mapped.branches) {
+              syntaxLocations.set(branch.condition, branch.location);
+            }
+            return mapped;
+          });
+          branchListCache.set(key, itemPromise);
+        }
+      }
+
+      const results = await Promise.all(
+        functions.map((fnRef) =>
+          branchListCache.get(
+            `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`,
+          )!,
+        ),
+      );
+
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        if (cacheStatus === "computed") {
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
+        }
+        if (recordRuleQuery) {
           collector.recordQuery({
             ruleId,
             op: "listBranches",
@@ -1141,77 +1288,83 @@ export async function openSession(
             summary: `listBranches(${functions.length} function(s))`,
           });
         }
+      }
 
-        return results;
-      },
-      branchCoverage: async (query: BranchCoverageOptions) => {
-        assertActiveSnapshot();
-        if (query.function !== undefined) {
-          assertValidProgramRef(
-            query.function,
-            sessionToken,
-            activeSnapshotId,
-            project.projectId,
-          );
-        }
-        for (const branchRef of query.branches) {
-          assertValidProgramRef(
-            branchRef,
-            sessionToken,
-            activeSnapshotId,
-            project.projectId,
-          );
-        }
-        for (const targetRef of query.targets) {
-          assertValidProgramRef(
-            targetRef,
-            sessionToken,
-            activeSnapshotId,
-            project.projectId,
-          );
-        }
-        if (query.targets.length === 0) return [];
+      return results;
+    };
 
-        const queryStart = collector.isActive() ? performance.now() : 0;
-        const batch = await client.request<EngineBatchResult>(
-          "query.batch",
-          {
-            snapshotId: activeSnapshotId,
-            projectId: project.projectId,
-            steps: [
-              {
-                op: "branchCoverage",
-                ...(query.function !== undefined
-                  ? { function: query.function.handleId }
-                  : {}),
-                branches: query.branches.map((branch) => branch.handleId),
-                targets: query.targets.map((target) => target.handleId),
-              },
-            ],
-          },
-          buildRpcOptions(collector),
+    const runBranchCoverage = async (
+      query: BranchCoverageOptions,
+      recordRuleQuery: boolean,
+    ): Promise<readonly BranchCoverageItem[]> => {
+      assertActiveSnapshot();
+      if (query.function !== undefined) {
+        assertValidProgramRef(
+          query.function,
+          sessionToken,
+          activeSnapshotId,
+          project.projectId,
         );
+      }
+      for (const branchRef of query.branches) {
+        assertValidProgramRef(
+          branchRef,
+          sessionToken,
+          activeSnapshotId,
+          project.projectId,
+        );
+      }
+      for (const targetRef of query.targets) {
+        assertValidProgramRef(
+          targetRef,
+          sessionToken,
+          activeSnapshotId,
+          project.projectId,
+        );
+      }
+      if (query.targets.length === 0) return [];
 
-        const rawItems = (batch.results[0]?.items ??
-          []) as readonly EngineBranchCoverageItem[];
-        const results: BranchCoverageItem[] = [];
-        for (const [index, targetRef] of query.targets.entries()) {
-          const raw = rawItems[index];
-          if (!raw) {
-            throw new VeruleExecutionError(
-              "ENGINE_ERROR",
-              `Engine omitted branchCoverage result for target "${targetRef.handleId}".`,
-            );
-          }
-          const mapped = toBranchCoverageItem(raw, targetRef);
-          collectedGaps.push(...mapped.gaps);
-          results.push(mapped);
+      const queryStart = collector.isActive() ? performance.now() : 0;
+      const batch = await client.request<EngineBatchResult>(
+        "query.batch",
+        {
+          snapshotId: activeSnapshotId,
+          projectId: project.projectId,
+          steps: [
+            {
+              op: "branchCoverage",
+              ...(query.function !== undefined
+                ? { function: query.function.handleId }
+                : {}),
+              branches: query.branches.map((branch) => branch.handleId),
+              targets: query.targets.map((target) => target.handleId),
+            },
+          ],
+        },
+        buildRpcOptions(collector),
+      );
+
+      const rawItems = (batch.results[0]?.items ??
+        []) as readonly EngineBranchCoverageItem[];
+      const results: BranchCoverageItem[] = [];
+      for (const [index, targetRef] of query.targets.entries()) {
+        const raw = rawItems[index];
+        if (!raw) {
+          throw new VeruleExecutionError(
+            "ENGINE_ERROR",
+            `Engine omitted branchCoverage result for target "${targetRef.handleId}".`,
+          );
         }
+        const mapped = toBranchCoverageItem(raw, targetRef);
+        collectedGaps.push(...mapped.gaps);
+        results.push(mapped);
+      }
 
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          collector.addEngineQueryMs(durationMs);
-          recordRuleEngineMs(durationMs);
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        collector.addEngineQueryMs(durationMs);
+        recordRuleEngineMs(durationMs);
+        if (recordRuleQuery) {
           collector.recordQuery({
             ruleId,
             op: "branchCoverage",
@@ -1223,8 +1376,113 @@ export async function openSession(
             summary: `branchCoverage(${query.branches.length} branch(es), ${query.targets.length} target(s))`,
           });
         }
+      }
 
-        return results;
+      return results;
+    };
+
+    const adapterProjectionQueries = createProjectionQueries({
+      client,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (_op, _candidateCount, durationMs) => {
+              collector.addEngineQueryMs(durationMs);
+              recordRuleEngineMs(durationMs);
+            },
+          }
+        : {}),
+    });
+
+    const createAdapterContext = (
+      adapterId: string,
+      onAdditionalInput: (filePath: string) => void,
+    ): AdapterContext => {
+      const scopedAdapterInputs = createScopedAdditionalInputRegistrar(
+        additionalInputRegistrar,
+        { kind: "adapter", id: adapterId },
+      );
+      return {
+        project,
+        models,
+        getModel: (id: string) => models.find((model) => model.id === id),
+        ...adapterProjectionQueries,
+        ...adapterCallsValuesQueries,
+        findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
+        typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
+        listBranches: (functions: readonly SyntaxRef[]) =>
+          runListBranches(functions, false),
+        branchCoverage: (query: BranchCoverageOptions) =>
+          runBranchCoverage(query, false),
+        registerAdditionalInput: (filePath: string) => {
+          assertActiveSnapshot();
+          onAdditionalInput(filePath);
+          return scopedAdapterInputs.registerAdditionalInput(filePath);
+        },
+        readAdditionalInput: (filePath: string) => {
+          assertActiveSnapshot();
+          onAdditionalInput(filePath);
+          return scopedAdapterInputs.readAdditionalInput(filePath);
+        },
+      };
+    };
+
+    const replayAdapterAdditionalInput = (
+      adapterId: string,
+      filePath: string,
+    ): void => {
+      assertActiveSnapshot();
+      additionalInputRegistrar.registerAdditionalInput(filePath, {
+        kind: "adapter",
+        id: adapterId,
+      });
+    };
+
+    return {
+      project,
+      models,
+      getModel: (id: string) => models.find((model) => model.id === id),
+      ...projectionQueries,
+      ...callsValuesQueries,
+      ...instanceQueries,
+      findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, true),
+      typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, true),
+      facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
+        factType: FactType<SubjectKind, Condition, Value>,
+        factOptions?: FactQueryOptions<SubjectKind, Condition>,
+      ) =>
+        executeFactQuery({
+          factType,
+          options: factOptions,
+          adapters: normalizedConfig.adapters,
+          factCache,
+          sessionToken,
+          snapshotId: activeSnapshotId,
+          projectId: project.projectId,
+          ruleId,
+          assertActiveSnapshot,
+          createAdapterContext,
+          replayAdapterAdditionalInput,
+          recordGaps,
+          collector,
+          syntaxLocations,
+        }),
+      listBranches: (functions: readonly SyntaxRef[]) =>
+        runListBranches(functions, true),
+      branchCoverage: (query: BranchCoverageOptions) =>
+        runBranchCoverage(query, true),
+      registerAdditionalInput: (filePath: string) => {
+        assertActiveSnapshot();
+        return scopedAdditionalInputs.registerAdditionalInput(filePath);
+      },
+      readAdditionalInput: (filePath: string) => {
+        assertActiveSnapshot();
+        return scopedAdditionalInputs.readAdditionalInput(filePath);
       },
       report: (input: DiagnosticInput) => {
         assertActiveSnapshot();
@@ -1311,6 +1569,31 @@ export async function openSession(
 
     const collected: CollectedDiagnostic[] = [];
     const collectedGaps: Gap[] = [];
+    const runRegistry = buildSessionRegistry(
+      normalizedConfig.additionalInputs,
+      explicitRegistrations,
+      [],
+    );
+    const runRuleRegistrations: {
+      readonly filePath: string;
+      readonly source: AdditionalInputSource;
+    }[] = [];
+    const runRegistrar: AdditionalInputRegistrar = {
+      cwd: runRegistry.cwd,
+      registerAdditionalInput: (filePath, source) => {
+        sessionRegistry.registerAdditionalInput(filePath, source);
+        runRuleRegistrations.push({ filePath, source });
+        return runRegistry.registerAdditionalInput(filePath, source);
+      },
+      readAdditionalInput: (filePath, source) => {
+        sessionRegistry.registerAdditionalInput(filePath, source);
+        runRuleRegistrations.push({ filePath, source });
+        return runRegistry.readAdditionalInput(filePath, source);
+      },
+      listAdditionalInputs: () => runRegistry.listAdditionalInputs(),
+      getTrackedAbsolutePaths: () => runRegistry.getTrackedAbsolutePaths(),
+    };
+
     for (const project of currentProjects) {
       for (const rule of rules) {
         let ruleEngineMs = 0;
@@ -1325,6 +1608,7 @@ export async function openSession(
           (ms) => {
             ruleEngineMs += ms;
           },
+          runRegistrar,
         );
         try {
           await rule.run(ctx);
@@ -1365,6 +1649,15 @@ export async function openSession(
 
     const diagnostics = buildDiagnostics(settlement.diagnostics);
     const gaps = buildGaps(collectedGaps);
+    const additionalInputs = runRegistry.listAdditionalInputs();
+    if (!runOptions?.ruleIds && !runOptions?.rulesOverride) {
+      lastRuleRegistrations = runRuleRegistrations;
+      sessionRegistry = buildSessionRegistry(
+        normalizedConfig.additionalInputs,
+        explicitRegistrations,
+        lastRuleRegistrations,
+      );
+    }
     const observation = collector.buildObservationReport();
     const explanations = explainTarget
       ? rules.map((rule) =>
@@ -1382,6 +1675,7 @@ export async function openSession(
       status: diagnostics.length > 0 ? "findings" : "clean",
       projects: currentProjects,
       fileOrigins: currentFileOrigins,
+      additionalInputs,
       diagnostics,
       gaps,
       identity: computeReportIdentity(
@@ -1389,6 +1683,8 @@ export async function openSession(
         resolveProjectEntries(normalizedConfig),
         rules,
         normalizedConfig.models,
+        normalizedConfig.additionalInputs,
+        normalizedConfig.adapters,
       ),
       ...(settlement.entries.length > 0
         ? { inlineIgnores: settlement.entries }
@@ -1413,8 +1709,19 @@ export async function openSession(
     get fileOrigins() {
       return currentFileOrigins;
     },
+    get additionalInputs(): readonly AdditionalInputEntry[] {
+      return sessionRegistry.listAdditionalInputs();
+    },
     get memory() {
       return readMemoryStats(lastEngineRssBytes);
+    },
+    registerAdditionalInput: (
+      filePath: string,
+      source: AdditionalInputSource,
+    ) => {
+      assertOpen();
+      explicitRegistrations.push({ filePath, source });
+      return sessionRegistry.registerAdditionalInput(filePath, source);
     },
     check: (optionsOrRules?: readonly Rule[] | SessionCheckOptions) => {
       if (isSessionCheckOptions(optionsOrRules)) {
@@ -1428,6 +1735,7 @@ export async function openSession(
     },
     update: async (updateOptions?: SessionUpdateOptions) => {
       assertOpen();
+      const changedAdditionalFiles = sessionRegistry.refresh();
       const nextConfig = resolveNextConfig(normalizedConfig, updateOptions);
       const nextEntries = resolveProjectEntries(nextConfig);
       const previousSnapshotId = currentSnapshotId;
@@ -1447,6 +1755,7 @@ export async function openSession(
         normalizedConfig,
         nextConfig,
         updateOptions,
+        changedAdditionalFiles,
       );
       const updatedFileOrigins = buildFileOrigins(updated.projects);
 
@@ -1461,7 +1770,14 @@ export async function openSession(
       branchListCache.clear();
       callsValuesCache.clear();
       instanceCache.clear();
+      factCache.clear();
       cachedDirectives = undefined;
+      sessionRegistry = buildSessionRegistry(
+        nextConfig.additionalInputs,
+        explicitRegistrations,
+        lastRuleRegistrations,
+      );
+      const updatedAdditionalInputs = sessionRegistry.listAdditionalInputs();
 
       const recomputation: RecomputationScope = {
         recomputedProjects: updated.recomputedProjects,
@@ -1477,6 +1793,7 @@ export async function openSession(
         snapshotId: updated.snapshotId,
         projects: updated.projects,
         fileOrigins: updatedFileOrigins,
+        additionalInputs: updatedAdditionalInputs,
         recomputation,
         memory: readMemoryStats(updated.engineRssBytes),
       };
@@ -1517,6 +1834,7 @@ export async function openSession(
       branchListCache.clear();
       callsValuesCache.clear();
       instanceCache.clear();
+      factCache.clear();
       cachedDirectives = undefined;
       try {
         await client.request("snapshot.release", {
