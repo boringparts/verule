@@ -883,6 +883,126 @@ void test("runs the independently deployed CLI with its production SDK and engin
   });
   assert.deepEqual(multiEnvelope.data, multiSdkReport);
 
+  // 4b. Deployed `verule check` on mixed TS -> JS -> TS (allowJs: true, checkJs: false) with JSDoc and dynamic gaps
+  using mixedHost = mkdtempDisposableSync(join(tmpdir(), "verule-mixed-host-"));
+  mkdirSync(join(mixedHost.path, "src"), { recursive: true });
+  mkdirSync(join(mixedHost.path, "node_modules/@verule"), { recursive: true });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(mixedHost.path, "node_modules/@verule/sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(mixedHost.path, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        allowJs: true,
+        checkJs: false,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+      },
+      files: ["src/entry.ts"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/sink.ts"),
+    'export function deliver(_mode: "alpha" | "beta", received: string): string {\n  return received;\n}\n',
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/bridge.js"),
+    [
+      'import { deliver } from "./sink.js";',
+      "/**",
+      ' * @param {"alpha" | "beta"} mode',
+      " * @param {string} payload",
+      " */",
+      "export function forwardBridge(mode, payload) {",
+      "  return deliver(mode, payload);",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/entry.ts"),
+    [
+      'import { forwardBridge } from "./bridge.js";',
+      'function makeOrigin(): string { return "origin"; }',
+      "export function main(useDyn: boolean, cb: (x: string) => string): string {",
+      "  const origin = makeOrigin();",
+      '  const out = forwardBridge("alpha", origin);',
+      "  if (useDyn) return cb(origin);",
+      "  return out;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "verule.config.ts"),
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "const rule = defineRule({",
+      '  id: "host-mixed-ts-js-flow",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ files: ["src/entry.ts"], kinds: ["CallExpression"] });',
+      '    const forwardCall = calls.find((c) => c.text.startsWith("forwardBridge("));',
+      '    const dynCall = calls.find((c) => c.text.startsWith("cb("));',
+      "    if (forwardCall && dynCall) {",
+      "      const resolved = await ctx.resolveCalls([forwardCall.ref, dynCall.ref], { select: { instantiatedParameterTypes: [0] } });",
+      '      if (resolved[0]?.instantiatedParameterTypes[0]?.type.typeText !== "\\"alpha\\" | \\"beta\\"") {',
+      '        throw new Error("Expected JSDoc union type from bridge.js");',
+      "      }",
+      "      await ctx.calleesOf([resolved[1]!.call!]);",
+      "    }",
+      '    const varDecls = await ctx.findSyntax({ files: ["src/entry.ts"], kinds: ["VariableDeclaration"] });',
+      '    const originInit = varDecls.find((d) => d.text.startsWith("origin ="))?.initializer;',
+      '    const outDecl = varDecls.find((d) => d.text.startsWith("out ="));',
+      "    if (originInit && outDecl) {",
+      "      const [outRes] = await ctx.resolveDeclarations([outDecl.ref]);",
+      '      const prop = await ctx.valuePropagation({ propagation: "value", from: originInit, to: [outRes!.declaration!] });',
+      "      if (prop.results[0]?.reachable) {",
+      "        ctx.report({",
+      "          at: outDecl.location,",
+      '          message: "Origin propagates through JS bridge to TS sink",',
+      "          evidence: prop.results[0].evidence,",
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      'export default defineConfig({ tsconfig: "tsconfig.json", rules: [rule] });',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const mixedHostJson = invoke(mixedHost.path, "check", "--output", "json");
+  assert.equal(mixedHostJson.status, 1, mixedHostJson.stderr);
+  const mixedHostEnv = JSON.parse(mixedHostJson.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(mixedHostEnv.variant, "findings");
+  assert.equal(mixedHostEnv.data.diagnostics.length, 1);
+  assert.ok(
+    mixedHostEnv.data.diagnostics[0]!.evidence.some(
+      (e) => e.at?.file === "src/bridge.js",
+    ),
+  );
+  assert.ok(
+    mixedHostEnv.data.diagnostics[0]!.evidence.some(
+      (e) => e.at?.file === "src/sink.ts",
+    ),
+  );
+  assert.equal(mixedHostEnv.data.gaps.length, 1);
+  assert.equal(mixedHostEnv.data.gaps[0]!.kind, "dynamic-callee");
+  assert.equal("observation" in mixedHostEnv.data, false);
+
   // 5. Deployed `verule watch --output ndjson` over real file edits, recovery, and SIGINT shutdown
   writeFileSync(
     join(host.path, "tsconfig.json"),

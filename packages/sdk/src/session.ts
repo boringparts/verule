@@ -20,6 +20,10 @@ import {
   normalizeTargetSpec,
   type EngineCallIoMetrics,
 } from "./observation.ts";
+import {
+  createCallsValuesCache,
+  createCallsValuesQueries,
+} from "./calls-values.ts";
 import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
 import {
   buildDiagnostics,
@@ -636,6 +640,7 @@ export async function openSession(
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
+  const callsValuesCache = createCallsValuesCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
 
   function assertOpen(): void {
@@ -702,11 +707,43 @@ export async function openSession(
         : {}),
     });
 
+    const callsValuesQueries = createCallsValuesQueries({
+      client,
+      cache: callsValuesCache,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus,
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
     return {
       project,
       models,
       getModel: (id: string) => models.find((model) => model.id === id),
       ...projectionQueries,
+      ...callsValuesQueries,
       findSyntax: async (query: FindSyntaxOptions) => {
         assertActiveSnapshot();
         const cacheKey = JSON.stringify([
@@ -1324,6 +1361,7 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      callsValuesCache.clear();
 
       const recomputation: RecomputationScope = {
         recomputedProjects: updated.recomputedProjects,
@@ -1377,6 +1415,7 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      callsValuesCache.clear();
       try {
         await client.request("snapshot.release", {
           snapshotId: currentSnapshotId,

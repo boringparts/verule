@@ -15,6 +15,7 @@ use tsrs_core::P;
 use tsrs_project::ID as ProjectId;
 use tsrs_vfs::{FS, bundled, osvfs};
 
+use crate::calls_values::ProjectCallGraph;
 use crate::cfg::{
     EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
 };
@@ -203,6 +204,7 @@ pub struct SnapshotState {
     pub project_ids: BTreeMap<String, ProjectId>,
     pub handles: FxHashMap<String, HandleEntry>,
     pub cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
+    pub call_graph_cache: FxHashMap<String, Arc<ProjectCallGraph>>,
     pub next_handle_id: u64,
 }
 
@@ -510,6 +512,7 @@ impl EngineServer {
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
+                call_graph_cache: FxHashMap::default(),
                 next_handle_id: 0,
             },
         );
@@ -593,6 +596,7 @@ impl EngineServer {
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
+                call_graph_cache: FxHashMap::default(),
                 next_handle_id: 0,
             },
         );

@@ -22,6 +22,21 @@ export type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 export type {
+  CallSiteParameterBinding,
+  CallTargetInfo,
+  CallTargetsResult,
+  DeclarationCallersResult,
+  DirectCallInfo,
+  ValueEndpoint,
+  ValuePropagationMode,
+  ValuePropagationOptions,
+  ValuePropagationPath,
+  ValuePropagationResult,
+  ValuePropagationStep,
+  ValuePropagationStepKind,
+  ValuePropagationTargetResult,
+} from "./calls-values.ts";
+export type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,

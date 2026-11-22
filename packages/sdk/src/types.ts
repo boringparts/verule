@@ -4,6 +4,12 @@ import type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import type {
+  CallTargetsResult,
+  DeclarationCallersResult,
+  ValuePropagationOptions,
+  ValuePropagationResult,
+} from "./calls-values.ts";
+import type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,
@@ -467,6 +473,13 @@ export type RuleContext = {
     targets: readonly (DeclarationRef | CallRef | SignatureRef)[],
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedSyntaxLookupRow<S>[]>;
+  callersOf: (
+    declarations: readonly DeclarationRef[],
+  ) => Promise<readonly DeclarationCallersResult[]>;
+  calleesOf: (calls: readonly CallRef[]) => Promise<readonly CallTargetsResult[]>;
+  valuePropagation: (
+    options: ValuePropagationOptions,
+  ) => Promise<ValuePropagationResult>;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.

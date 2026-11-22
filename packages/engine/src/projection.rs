@@ -16,6 +16,10 @@ use tsrs_scanner::{
     get_ecma_line_and_utf16_character_of_position, get_ecma_line_starts, get_token_pos_of_node,
 };
 
+use crate::calls_values::{
+    CallTargetsRow, DeclarationCallersRow, ValuePropagationResultPayload, run_callees_of,
+    run_callers_of, run_value_propagation,
+};
 use crate::cfg::GapItem;
 use crate::observe::{EngineStepDetail, ObserveCollector};
 use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
@@ -115,6 +119,18 @@ pub enum QueryStep {
         function: Option<String>,
         branches: Vec<String>,
         targets: Vec<String>,
+    },
+    CallersOf {
+        targets: Vec<String>,
+    },
+    CalleesOf {
+        targets: Vec<String>,
+    },
+    ValuePropagation {
+        #[serde(default)]
+        propagation: Option<String>,
+        from: Vec<String>,
+        to: Vec<String>,
     },
 }
 
@@ -311,6 +327,9 @@ enum StepResult {
     SyntaxOf { items: Vec<SyntaxLookupRow> },
     ListBranches { items: Vec<FunctionBranchesItem> },
     BranchCoverage { items: Vec<BranchCoverageItem> },
+    CallersOf { items: Vec<DeclarationCallersRow> },
+    CalleesOf { items: Vec<CallTargetsRow> },
+    ValuePropagation { items: Vec<ValuePropagationResultPayload> },
 }
 
 #[derive(Clone, Serialize)]
@@ -598,19 +617,9 @@ fn execute_step(
 ) -> Result<StepResult, RpcErr> {
     let step_start = observer.start_step();
     match step {
-        QueryStep::FindSyntax {
-            files,
-            kinds,
-            range,
-        } => execute_find_syntax_step(
-            snapshot,
-            project_id,
-            program,
-            files.as_deref(),
-            kinds.as_deref(),
-            range.as_ref(),
-            step_start,
-            observer,
+        QueryStep::FindSyntax { files, kinds, range } => execute_find_syntax_step(
+            snapshot, project_id, program, files.as_deref(), kinds.as_deref(), range.as_ref(),
+            step_start, observer,
         ),
         QueryStep::TypeAtLocation { targets } => execute_type_at_location_step(
             snapshot, project_id, checker, &targets, step_start, observer,
@@ -666,20 +675,75 @@ fn execute_step(
         QueryStep::ListBranches { targets } => {
             execute_list_branches_step(snapshot, project_id, &targets, step_start, observer)
         }
-        QueryStep::BranchCoverage {
-            function,
-            branches,
-            targets,
-        } => execute_branch_coverage_step(
-            snapshot,
-            project_id,
-            function.as_deref(),
-            &branches,
-            &targets,
-            step_start,
+        QueryStep::BranchCoverage { function, branches, targets } => execute_branch_coverage_step(
+            snapshot, project_id, function.as_deref(), &branches, &targets, step_start, observer,
+        ),
+        QueryStep::CallersOf { targets } => execute_call_graph_step(
+            snapshot, project_id, program, checker, &targets, true, step_start, observer,
+        ),
+        QueryStep::CalleesOf { targets } => execute_call_graph_step(
+            snapshot, project_id, program, checker, &targets, false, step_start, observer,
+        ),
+        QueryStep::ValuePropagation { propagation, from, to } => execute_value_propagation_step(
+            snapshot, project_id, program, checker, propagation.as_deref(), &from, &to, step_start,
             observer,
         ),
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Forwards call-graph query context alongside timing and observation collector."
+)]
+fn execute_call_graph_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    targets: &[String],
+    is_callers: bool,
+    step_start: Option<Instant>,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    if is_callers {
+        let items = run_callers_of(snapshot, project_id, program, checker, targets)?;
+        observer.record_step("callersOf", step_start, items.len(), Vec::new());
+        Ok(StepResult::CallersOf { items })
+    } else {
+        let items = run_callees_of(snapshot, project_id, program, checker, targets)?;
+        observer.record_step("calleesOf", step_start, items.len(), Vec::new());
+        Ok(StepResult::CalleesOf { items })
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Forwards value propagation inputs alongside timing and observation collector."
+)]
+fn execute_value_propagation_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    propagation: Option<&str>,
+    from: &[String],
+    to: &[String],
+    step_start: Option<Instant>,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    let result = run_value_propagation(
+        snapshot,
+        project_id,
+        program,
+        checker,
+        propagation,
+        from,
+        to,
+    )?;
+    observer.record_step("valuePropagation", step_start, result.results.len(), Vec::new());
+    Ok(StepResult::ValuePropagation {
+        items: vec![result],
+    })
 }
 
 #[expect(
