@@ -12,6 +12,7 @@ export {
   type AdditionalInputSource,
   type ScopedAdditionalInputRegistrar,
 } from "./additional-inputs.ts";
+export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {
   defineConfig,
@@ -31,6 +32,21 @@ export type {
   BranchKind,
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
+export type {
+  CallSiteParameterBinding,
+  CallTargetInfo,
+  CallTargetsResult,
+  DeclarationCallersResult,
+  DirectCallInfo,
+  ValueEndpoint,
+  ValuePropagationMode,
+  ValuePropagationOptions,
+  ValuePropagationPath,
+  ValuePropagationResult,
+  ValuePropagationStep,
+  ValuePropagationStepKind,
+  ValuePropagationTargetResult,
+} from "./calls-values.ts";
 export type {
   AssignabilityPair,
   AssignabilityResult,
@@ -79,6 +95,8 @@ export {
   type ExplainStatus,
   type FindSyntaxOptions,
   type Gap,
+  type InlineIgnoreEntry,
+  type InlineIgnoreStatus,
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,

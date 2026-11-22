@@ -1,0 +1,621 @@
+import { performance } from "node:perf_hooks";
+
+import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { validateProgramRefs } from "./projection.ts";
+import {
+  makeProgramRef,
+  type CallRef,
+  type DeclarationRef,
+  type DiagnosticLocation,
+  type Evidence,
+  type Gap,
+  type SyntaxRef,
+} from "./types.ts";
+
+export type CallSiteParameterBinding = {
+  readonly argumentIndex: number;
+  readonly argument: SyntaxRef;
+  readonly parameterName: string | null;
+  readonly parameterDeclaration: DeclarationRef | null;
+  readonly isRest: boolean;
+};
+
+export type DirectCallInfo = {
+  readonly call: CallRef;
+  readonly syntax: SyntaxRef;
+  readonly location: DiagnosticLocation;
+  readonly callerDeclaration: DeclarationRef | null;
+  readonly parameterBindings: readonly CallSiteParameterBinding[];
+  readonly returnTarget: SyntaxRef;
+};
+
+export type DeclarationCallersResult = {
+  readonly declaration: DeclarationRef;
+  readonly calls: readonly CallRef[];
+  readonly callSites: readonly DirectCallInfo[];
+  readonly gaps: readonly Gap[];
+};
+
+export type CallTargetInfo = {
+  readonly declaration: DeclarationRef;
+  readonly name: string | null;
+  readonly location: DiagnosticLocation | null;
+  readonly isExternal: boolean;
+  readonly parameterBindings: readonly CallSiteParameterBinding[];
+  readonly returnExpressions: readonly SyntaxRef[];
+};
+
+export type ValuePropagationMode = "value";
+
+export type ValueEndpoint = SyntaxRef | DeclarationRef | CallRef;
+
+export type ValuePropagationStepKind =
+  | "variableInit"
+  | "assignment"
+  | "callArgument"
+  | "returnValue"
+  | "awaitUnwrap"
+  | "typeAssertion"
+  | "parenthesized"
+  | "propertyWrite"
+  | "propertyRead"
+  | "destructure"
+  | "restDestructure"
+  | "conditionalBranch"
+  | "alias";
+
+export type ValuePropagationStep = {
+  readonly kind: ValuePropagationStepKind;
+  readonly description: string;
+  readonly fromLocation: DiagnosticLocation;
+  readonly toLocation: DiagnosticLocation;
+};
+
+export type ValuePropagationPath = {
+  readonly from: ValueEndpoint;
+  readonly to: ValueEndpoint;
+  readonly steps: readonly ValuePropagationStep[];
+  readonly evidence: readonly Evidence[];
+};
+
+export type ValuePropagationTargetResult = {
+  readonly from: ValueEndpoint;
+  readonly to: ValueEndpoint;
+  readonly reachable: boolean;
+  readonly paths: readonly ValuePropagationPath[];
+  readonly evidence: readonly Evidence[];
+  readonly gaps: readonly Gap[];
+};
+
+export type ValuePropagationOptions = {
+  readonly propagation?: ValuePropagationMode;
+  readonly from: ValueEndpoint | readonly ValueEndpoint[];
+  readonly to: ValueEndpoint | readonly ValueEndpoint[];
+};
+
+export type ValuePropagationResult = {
+  readonly propagation: ValuePropagationMode;
+  readonly results: readonly ValuePropagationTargetResult[];
+  readonly reachableTargets: readonly ValueEndpoint[];
+  readonly gaps: readonly Gap[];
+};
+
+export type CallTargetsResult = {
+  readonly call: CallRef;
+  readonly targets: readonly DeclarationRef[];
+  readonly resolvedTargets: readonly CallTargetInfo[];
+  readonly returnTarget: SyntaxRef;
+  readonly evidence: readonly Evidence[];
+  readonly gaps: readonly Gap[];
+};
+
+type RawParameterBinding = {
+  readonly argumentIndex: number;
+  readonly argument: string;
+  readonly parameterName: string | null;
+  readonly parameterDeclaration: string | null;
+  readonly isRest: boolean;
+};
+
+type RawDirectCallInfo = {
+  readonly call: string;
+  readonly syntax: string;
+  readonly location: DiagnosticLocation;
+  readonly callerDeclaration: string | null;
+  readonly parameterBindings: readonly RawParameterBinding[];
+  readonly returnTarget: string;
+};
+
+type RawDeclarationCallersRow = {
+  readonly declaration: string;
+  readonly calls: readonly string[];
+  readonly callSites: readonly RawDirectCallInfo[];
+  readonly gaps: readonly Gap[];
+};
+
+type RawCallTargetInfo = {
+  readonly declaration: string;
+  readonly name: string | null;
+  readonly location: DiagnosticLocation | null;
+  readonly isExternal: boolean;
+  readonly parameterBindings: readonly RawParameterBinding[];
+  readonly returnExpressions: readonly string[];
+};
+
+type RawCallTargetsRow = {
+  readonly call: string;
+  readonly targets: readonly string[];
+  readonly resolvedTargets: readonly RawCallTargetInfo[];
+  readonly returnTarget: string;
+  readonly evidence: readonly Evidence[];
+  readonly gaps: readonly Gap[];
+};
+
+type RawValuePropagationPath = {
+  readonly from: string;
+  readonly to: string;
+  readonly steps: readonly ValuePropagationStep[];
+  readonly evidence: readonly Evidence[];
+};
+
+type RawValuePropagationTargetRow = {
+  readonly from: string;
+  readonly to: string;
+  readonly reachable: boolean;
+  readonly paths: readonly RawValuePropagationPath[];
+  readonly evidence: readonly Evidence[];
+  readonly gaps: readonly Gap[];
+};
+
+type RawValuePropagationResult = {
+  readonly propagation: ValuePropagationMode;
+  readonly results: readonly RawValuePropagationTargetRow[];
+  readonly gaps: readonly Gap[];
+};
+
+type EngineBatchResult = {
+  readonly results: readonly {
+    readonly items: readonly unknown[];
+  }[];
+};
+
+function mapBindings(
+  rawBindings: readonly RawParameterBinding[],
+  sessionToken: symbol,
+  projectId: string,
+  snapshotId: number,
+): readonly CallSiteParameterBinding[] {
+  return rawBindings.map((binding) => ({
+    argumentIndex: binding.argumentIndex,
+    argument: makeProgramRef(
+      "syntax",
+      sessionToken,
+      projectId,
+      snapshotId,
+      binding.argument,
+    ),
+    parameterName: binding.parameterName,
+    parameterDeclaration:
+      binding.parameterDeclaration !== null
+        ? makeProgramRef(
+            "declaration",
+            sessionToken,
+            projectId,
+            snapshotId,
+            binding.parameterDeclaration,
+          )
+        : null,
+    isRest: binding.isRest,
+  }));
+}
+
+export type CallsValuesCache = {
+  readonly callersCache: Map<string, Promise<DeclarationCallersResult>>;
+  readonly calleesCache: Map<string, Promise<CallTargetsResult>>;
+  readonly valueCache: Map<string, Promise<ValuePropagationResult>>;
+  clear: () => void;
+};
+
+export function createCallsValuesCache(): CallsValuesCache {
+  const callersCache = new Map<string, Promise<DeclarationCallersResult>>();
+  const calleesCache = new Map<string, Promise<CallTargetsResult>>();
+  const valueCache = new Map<string, Promise<ValuePropagationResult>>();
+  return {
+    callersCache,
+    calleesCache,
+    valueCache,
+    clear: () => {
+      callersCache.clear();
+      calleesCache.clear();
+      valueCache.clear();
+    },
+  };
+}
+
+/** Creates call-graph and value-propagation query methods bound to an active snapshot and project. */
+export function createCallsValuesQueries(deps: {
+  readonly client: EngineClient;
+  readonly cache: CallsValuesCache;
+  readonly sessionToken: symbol;
+  readonly snapshotId: number;
+  readonly projectId: string;
+  readonly assertOpen: () => void;
+  readonly recordGaps: (gaps: readonly Gap[]) => void;
+  readonly getRpcOptions?: () => RpcRequestOptions | undefined;
+  readonly onQueryCompleted?: (
+    op: string,
+    cacheStatus: "computed" | "reused",
+    candidateCount: number,
+    durationMs: number,
+  ) => void;
+}) {
+  const {
+    client,
+    cache,
+    sessionToken,
+    snapshotId,
+    projectId,
+    assertOpen,
+    recordGaps,
+    getRpcOptions,
+    onQueryCompleted,
+  } = deps;
+
+  return {
+    callersOf: async (
+      declarations: readonly DeclarationRef[],
+    ): Promise<readonly DeclarationCallersResult[]> => {
+      assertOpen();
+      if (declarations.length === 0) return [];
+      validateProgramRefs(declarations, sessionToken, snapshotId, projectId);
+
+      const missing: DeclarationRef[] = [];
+      for (const decl of declarations) {
+        const key = `${snapshotId}:${projectId}:${decl.handleId}`;
+        if (!cache.callersCache.has(key)) {
+          missing.push(decl);
+        }
+      }
+
+      const start = onQueryCompleted ? performance.now() : 0;
+      const cacheStatus: "computed" | "reused" =
+        missing.length > 0 ? "computed" : "reused";
+
+      if (missing.length > 0) {
+        const batchPromise = client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId,
+            projectId,
+            steps: [
+              {
+                op: "callersOf",
+                targets: missing.map((d) => d.handleId),
+              },
+            ],
+          },
+          getRpcOptions?.(),
+        );
+
+        for (const [index, decl] of missing.entries()) {
+          const key = `${snapshotId}:${projectId}:${decl.handleId}`;
+          const rowPromise = batchPromise.then((batch) => {
+            const items = (batch.results[0]?.items ??
+              []) as readonly RawDeclarationCallersRow[];
+            const raw = items[index];
+            if (!raw) {
+              throw new Error(
+                `Engine omitted callersOf result for "${decl.handleId}".`,
+              );
+            }
+            recordGaps(raw.gaps);
+            return {
+              declaration: decl,
+              calls: raw.calls.map((id) =>
+                makeProgramRef("call", sessionToken, projectId, snapshotId, id),
+              ),
+              callSites: raw.callSites.map((site) => ({
+                call: makeProgramRef(
+                  "call",
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                  site.call,
+                ),
+                syntax: makeProgramRef(
+                  "syntax",
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                  site.syntax,
+                ),
+                location: site.location,
+                callerDeclaration:
+                  site.callerDeclaration !== null
+                    ? makeProgramRef(
+                        "declaration",
+                        sessionToken,
+                        projectId,
+                        snapshotId,
+                        site.callerDeclaration,
+                      )
+                    : null,
+                parameterBindings: mapBindings(
+                  site.parameterBindings,
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                ),
+                returnTarget: makeProgramRef(
+                  "syntax",
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                  site.returnTarget,
+                ),
+              })),
+              gaps: raw.gaps,
+            };
+          });
+          cache.callersCache.set(key, rowPromise);
+        }
+      }
+
+      const results = await Promise.all(
+        declarations.map((decl) =>
+          cache.callersCache.get(
+            `${snapshotId}:${projectId}:${decl.handleId}`,
+          )!,
+        ),
+      );
+
+      if (onQueryCompleted) {
+        const count = results.reduce((sum, r) => sum + r.calls.length, 0);
+        onQueryCompleted(
+          "callersOf",
+          cacheStatus,
+          count,
+          performance.now() - start,
+        );
+      }
+
+      return results;
+    },
+
+    calleesOf: async (
+      calls: readonly CallRef[],
+    ): Promise<readonly CallTargetsResult[]> => {
+      assertOpen();
+      if (calls.length === 0) return [];
+      validateProgramRefs(calls, sessionToken, snapshotId, projectId);
+
+      const missing: CallRef[] = [];
+      for (const call of calls) {
+        const key = `${snapshotId}:${projectId}:${call.handleId}`;
+        if (!cache.calleesCache.has(key)) {
+          missing.push(call);
+        }
+      }
+
+      const start = onQueryCompleted ? performance.now() : 0;
+      const cacheStatus: "computed" | "reused" =
+        missing.length > 0 ? "computed" : "reused";
+
+      if (missing.length > 0) {
+        const batchPromise = client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId,
+            projectId,
+            steps: [
+              {
+                op: "calleesOf",
+                targets: missing.map((c) => c.handleId),
+              },
+            ],
+          },
+          getRpcOptions?.(),
+        );
+
+        for (const [index, call] of missing.entries()) {
+          const key = `${snapshotId}:${projectId}:${call.handleId}`;
+          const rowPromise = batchPromise.then((batch) => {
+            const items = (batch.results[0]?.items ??
+              []) as readonly RawCallTargetsRow[];
+            const raw = items[index];
+            if (!raw) {
+              throw new Error(
+                `Engine omitted calleesOf result for "${call.handleId}".`,
+              );
+            }
+            recordGaps(raw.gaps);
+            return {
+              call,
+              targets: raw.targets.map((id) =>
+                makeProgramRef(
+                  "declaration",
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                  id,
+                ),
+              ),
+              resolvedTargets: raw.resolvedTargets.map((target) => ({
+                declaration: makeProgramRef(
+                  "declaration",
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                  target.declaration,
+                ),
+                name: target.name,
+                location: target.location,
+                isExternal: target.isExternal,
+                parameterBindings: mapBindings(
+                  target.parameterBindings,
+                  sessionToken,
+                  projectId,
+                  snapshotId,
+                ),
+                returnExpressions: target.returnExpressions.map((id) =>
+                  makeProgramRef(
+                    "syntax",
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    id,
+                  ),
+                ),
+              })),
+              returnTarget: makeProgramRef(
+                "syntax",
+                sessionToken,
+                projectId,
+                snapshotId,
+                raw.returnTarget,
+              ),
+              evidence: raw.evidence,
+              gaps: raw.gaps,
+            };
+          });
+          cache.calleesCache.set(key, rowPromise);
+        }
+      }
+
+      const results = await Promise.all(
+        calls.map((call) =>
+          cache.calleesCache.get(
+            `${snapshotId}:${projectId}:${call.handleId}`,
+          )!,
+        ),
+      );
+
+      if (onQueryCompleted) {
+        const count = results.reduce((sum, r) => sum + r.targets.length, 0);
+        onQueryCompleted(
+          "calleesOf",
+          cacheStatus,
+          count,
+          performance.now() - start,
+        );
+      }
+
+      return results;
+    },
+
+    valuePropagation: async (
+      options: ValuePropagationOptions,
+    ): Promise<ValuePropagationResult> => {
+      assertOpen();
+      const propagation: ValuePropagationMode = options.propagation ?? "value";
+      const fromList = Array.isArray(options.from)
+        ? options.from
+        : [options.from];
+      const toList = Array.isArray(options.to) ? options.to : [options.to];
+      const allEndpoints = [...fromList, ...toList];
+      if (fromList.length === 0 || toList.length === 0) {
+        return {
+          propagation,
+          results: [],
+          reachableTargets: [],
+          gaps: [],
+        };
+      }
+      validateProgramRefs(allEndpoints, sessionToken, snapshotId, projectId);
+
+      const endpointByHandle = new Map<string, ValueEndpoint>();
+      for (const endpoint of allEndpoints) {
+        endpointByHandle.set(endpoint.handleId, endpoint);
+      }
+
+      const cacheKey = JSON.stringify([
+        snapshotId,
+        projectId,
+        propagation,
+        fromList.map((e) => e.handleId),
+        toList.map((e) => e.handleId),
+      ]);
+
+      const start = onQueryCompleted ? performance.now() : 0;
+      const existing = cache.valueCache.get(cacheKey);
+      const cacheStatus: "computed" | "reused" = existing
+        ? "reused"
+        : "computed";
+
+      let promise: Promise<ValuePropagationResult>;
+      if (existing) {
+        promise = existing;
+      } else {
+        promise = client
+          .request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId,
+              projectId,
+              steps: [
+                {
+                  op: "valuePropagation",
+                  propagation,
+                  from: fromList.map((e) => e.handleId),
+                  to: toList.map((e) => e.handleId),
+                },
+              ],
+            },
+            getRpcOptions?.(),
+          )
+          .then((batch) => {
+            const raw = (batch.results[0]?.items?.[0] ?? undefined) as
+              | RawValuePropagationResult
+              | undefined;
+            if (!raw) {
+              throw new Error("Engine omitted valuePropagation result.");
+            }
+            recordGaps(raw.gaps);
+            const results: ValuePropagationTargetResult[] = raw.results.map(
+              (row) => {
+                const fromRef = endpointByHandle.get(row.from)!;
+                const toRef = endpointByHandle.get(row.to)!;
+                return {
+                  from: fromRef,
+                  to: toRef,
+                  reachable: row.reachable,
+                  paths: row.paths.map((p) => ({
+                    from: endpointByHandle.get(p.from) ?? fromRef,
+                    to: endpointByHandle.get(p.to) ?? toRef,
+                    steps: p.steps,
+                    evidence: p.evidence,
+                  })),
+                  evidence: row.evidence,
+                  gaps: row.gaps,
+                };
+              },
+            );
+            const reachableSet = new Set<ValueEndpoint>();
+            for (const row of results) {
+              if (row.reachable) {
+                reachableSet.add(row.to);
+              }
+            }
+            return {
+              propagation: raw.propagation,
+              results,
+              reachableTargets: [...reachableSet],
+              gaps: raw.gaps,
+            };
+          });
+        cache.valueCache.set(cacheKey, promise);
+      }
+
+      const result = await promise;
+      if (onQueryCompleted) {
+        onQueryCompleted(
+          "valuePropagation",
+          cacheStatus,
+          result.results.length,
+          performance.now() - start,
+        );
+      }
+      return result;
+    },
+  };
+}

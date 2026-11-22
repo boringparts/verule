@@ -184,7 +184,18 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "            const [lookedUp] = await ctx.syntaxOf([decl], { select: { kind: true, location: true } });",
         "            const syn: SyntaxRef | null = lookedUp?.syntax ?? null;",
         "            if (syn !== null && lookedUp?.location != null) {",
-        '              ctx.report({ at: lookedUp.location, message: "ok" });',
+        "              const callers = await ctx.callersOf([decl]);",
+        "              const callees = await ctx.calleesOf(callRefs);",
+        "              const prop = await ctx.valuePropagation({",
+        '                propagation: "value",',
+        "                from: syn,",
+        "                to: [decl, ...callRefs],",
+        "              });",
+        "              void callers;",
+        "              void callees;",
+        "              if (prop.results[0]?.reachable) {",
+        '                ctx.report({ at: lookedUp.location, message: "ok" });',
+        "              }",
         "            }",
         "          }",
         "        }",
@@ -322,6 +333,31 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
             void row?.location;
           `,
           expectedPattern: /TS2339/u,
+        },
+        {
+          name: "SyntaxRef passed to calleesOf",
+          body: `
+            declare const syntaxRef: SyntaxRef;
+            await ctx.calleesOf([syntaxRef]);
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "CallRef passed to callersOf",
+          body: `
+            declare const callRef: CallRef;
+            await ctx.callersOf([callRef]);
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "TypeRef passed to valuePropagation",
+          body: `
+            declare const typeRef: TypeRef;
+            declare const syntaxRef: SyntaxRef;
+            await ctx.valuePropagation({ propagation: "value", from: typeRef, to: [syntaxRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
         },
       ];
 

@@ -8,6 +8,12 @@ import type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import type {
+  CallTargetsResult,
+  DeclarationCallersResult,
+  ValuePropagationOptions,
+  ValuePropagationResult,
+} from "./calls-values.ts";
+import type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,
@@ -364,8 +370,28 @@ export type ExplainResult = {
   readonly cleanupPaths: readonly unknown[];
   readonly inlineIgnore?: {
     readonly matched: boolean;
+    readonly ruleId?: string;
     readonly reason?: string;
+    readonly commentAt?: DiagnosticLocation;
   };
+};
+
+export type InlineIgnoreStatus =
+  | "suppressed"
+  | "unused"
+  | "ambiguous"
+  | "malformed"
+  | "unknown_rule"
+  | "undetermined";
+
+export type InlineIgnoreEntry = {
+  readonly status: InlineIgnoreStatus;
+  readonly at: DiagnosticLocation;
+  readonly targetLine?: number;
+  readonly ruleId?: string;
+  readonly reason?: string;
+  readonly matchedLocations?: readonly DiagnosticLocation[];
+  readonly message?: string;
 };
 
 export type CheckReport = {
@@ -377,6 +403,7 @@ export type CheckReport = {
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
   readonly identity: ReportIdentity;
+  readonly inlineIgnores?: readonly InlineIgnoreEntry[];
   readonly observation?: ObservationReport;
   readonly explanation?: ExplainResult;
   readonly explanations?: readonly ExplainResult[];
@@ -476,6 +503,15 @@ export type RuleContext = {
   registerAdditionalInput: (filePath: string) => AdditionalInputEntry;
   /** Registers a local non-source file as an additional input and reads its UTF-8 content. */
   readAdditionalInput: (filePath: string) => string;
+  callersOf: (
+    declarations: readonly DeclarationRef[],
+  ) => Promise<readonly DeclarationCallersResult[]>;
+  calleesOf: (
+    calls: readonly CallRef[],
+  ) => Promise<readonly CallTargetsResult[]>;
+  valuePropagation: (
+    options: ValuePropagationOptions,
+  ) => Promise<ValuePropagationResult>;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.

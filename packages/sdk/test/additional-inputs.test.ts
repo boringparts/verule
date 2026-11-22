@@ -42,6 +42,34 @@ function createTsConfig(include: readonly string[] = ["src/**/*.ts"]): string {
   );
 }
 
+function assertMatchesCold(
+  actual: CheckReport,
+  expected: CheckReport,
+  label: string,
+): void {
+  assert.deepEqual(
+    {
+      status: actual.status,
+      projects: actual.projects,
+      fileOrigins: actual.fileOrigins,
+      additionalInputs: actual.additionalInputs,
+      diagnostics: actual.diagnostics,
+      gaps: actual.gaps,
+      identity: actual.identity,
+    },
+    {
+      status: expected.status,
+      projects: expected.projects,
+      fileOrigins: expected.fileOrigins,
+      additionalInputs: expected.additionalInputs,
+      diagnostics: expected.diagnostics,
+      gaps: expected.gaps,
+      identity: expected.identity,
+    },
+    `Report diverged from cold runCheck at "${label}"`,
+  );
+}
+
 void describe("@verule/sdk additional inputs", () => {
   void it("merges config, rule, and adapter declarations for the same physical file while preserving all sources and keeping compiler sourceFiles unchanged", async () => {
     const root = mkdtempSync(join(tmpdir(), "verule-add-inputs-"));
@@ -282,34 +310,6 @@ void describe("@verule/sdk additional inputs", () => {
       additionalInputs: ["allowed-packages.json"],
       rules: [rule],
     });
-
-    function assertMatchesCold(
-      actual: CheckReport,
-      expected: CheckReport,
-      label: string,
-    ): void {
-      assert.deepEqual(
-        {
-          status: actual.status,
-          projects: actual.projects,
-          fileOrigins: actual.fileOrigins,
-          additionalInputs: actual.additionalInputs,
-          diagnostics: actual.diagnostics,
-          gaps: actual.gaps,
-          identity: actual.identity,
-        },
-        {
-          status: expected.status,
-          projects: expected.projects,
-          fileOrigins: expected.fileOrigins,
-          additionalInputs: expected.additionalInputs,
-          diagnostics: expected.diagnostics,
-          gaps: expected.gaps,
-          identity: expected.identity,
-        },
-        `Report diverged from cold runCheck at "${label}"`,
-      );
-    }
 
     const abortController = new AbortController();
     let sharedSession:

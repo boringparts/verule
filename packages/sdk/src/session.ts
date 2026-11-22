@@ -20,7 +20,17 @@ import {
   type EngineFunctionBranchesItem,
   type FunctionBranchesResult,
 } from "./branch-coverage.ts";
+import {
+  createCallsValuesCache,
+  createCallsValuesQueries,
+} from "./calls-values.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
+import {
+  INLINE_IGNORE_RULE_ID,
+  resolveInlineIgnores,
+  type EngineDirectiveItem,
+  type EngineDirectivesScanResult,
+} from "./inline-ignore.ts";
 import {
   ObservationCollector,
   locationMatchesTarget,
@@ -131,6 +141,12 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
       throw new VeruleExecutionError(
         "INVALID_CONFIG",
         `Duplicate rule id: "${rule.id}".`,
+      );
+    }
+    if (rule.id === INLINE_IGNORE_RULE_ID) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Rule id "${INLINE_IGNORE_RULE_ID}" is reserved.`,
       );
     }
     if (typeof rule.run !== "function") {
@@ -671,7 +687,32 @@ export async function openSession(
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
+  const callsValuesCache = createCallsValuesCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
+  let cachedDirectives:
+    | {
+        readonly snapshotId: number;
+        readonly promise: Promise<readonly EngineDirectiveItem[]>;
+      }
+    | undefined;
+
+  function scanDirectives(
+    snapshotId: number,
+    collector: ObservationCollector,
+  ): Promise<readonly EngineDirectiveItem[]> {
+    if (cachedDirectives?.snapshotId === snapshotId) {
+      return cachedDirectives.promise;
+    }
+    const promise = client
+      .request<EngineDirectivesScanResult>(
+        "directives.scan",
+        { snapshotId },
+        buildRpcOptions(collector),
+      )
+      .then((res) => res.directives);
+    cachedDirectives = { snapshotId, promise };
+    return promise;
+  }
 
   const explicitRegistrations: {
     readonly filePath: string;
@@ -781,11 +822,43 @@ export async function openSession(
         : {}),
     });
 
+    const callsValuesQueries = createCallsValuesQueries({
+      client,
+      cache: callsValuesCache,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus,
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
     return {
       project,
       models,
       getModel: (id: string) => models.find((model) => model.id === id),
       ...projectionQueries,
+      ...callsValuesQueries,
       findSyntax: async (query: FindSyntaxOptions) => {
         assertActiveSnapshot();
         const cacheKey = JSON.stringify([
@@ -1345,7 +1418,21 @@ export async function openSession(
       }
     }
 
-    const diagnostics = buildDiagnostics(collected);
+    const scannedDirectives = await scanDirectives(
+      currentSnapshotId,
+      collector,
+    );
+    const settlement = resolveInlineIgnores({
+      directives: scannedDirectives,
+      collected,
+      projects: currentProjects,
+      configuredRuleIds: new Set(baseRules.map((rule) => rule.id)),
+      executedRuleIds: new Set(rules.map((rule) => rule.id)),
+      isPartialRuleSelection:
+        runOptions?.ruleIds !== undefined && runOptions.ruleIds.length > 0,
+    });
+
+    const diagnostics = buildDiagnostics(settlement.diagnostics);
     const gaps = buildGaps(collectedGaps);
     const additionalInputs = runRegistry.listAdditionalInputs();
     if (!runOptions?.ruleIds && !runOptions?.rulesOverride) {
@@ -1363,6 +1450,7 @@ export async function openSession(
             ruleId: rule.id,
             projects: currentProjects,
             diagnostics,
+            suppressions: settlement.suppressions,
           }),
         )
       : undefined;
@@ -1382,6 +1470,9 @@ export async function openSession(
         normalizedConfig.models,
         normalizedConfig.additionalInputs,
       ),
+      ...(settlement.entries.length > 0
+        ? { inlineIgnores: settlement.entries }
+        : {}),
       ...(observation !== undefined ? { observation } : {}),
       ...(explanations !== undefined && explanations.length === 1
         ? { explanation: explanations[0] }
@@ -1461,6 +1552,8 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      callsValuesCache.clear();
+      cachedDirectives = undefined;
       sessionRegistry = buildSessionRegistry(
         nextConfig.additionalInputs,
         explicitRegistrations,
@@ -1521,6 +1614,8 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      callsValuesCache.clear();
+      cachedDirectives = undefined;
       try {
         await client.request("snapshot.release", {
           snapshotId: currentSnapshotId,

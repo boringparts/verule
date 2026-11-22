@@ -884,6 +884,126 @@ void test("runs the independently deployed CLI with its production SDK and engin
   });
   assert.deepEqual(multiEnvelope.data, multiSdkReport);
 
+  // 4b. Deployed `verule check` on mixed TS -> JS -> TS (allowJs: true, checkJs: false) with JSDoc and dynamic gaps
+  using mixedHost = mkdtempDisposableSync(join(tmpdir(), "verule-mixed-host-"));
+  mkdirSync(join(mixedHost.path, "src"), { recursive: true });
+  mkdirSync(join(mixedHost.path, "node_modules/@verule"), { recursive: true });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(mixedHost.path, "node_modules/@verule/sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(mixedHost.path, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        allowJs: true,
+        checkJs: false,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+      },
+      files: ["src/entry.ts"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/sink.ts"),
+    'export function deliver(_mode: "alpha" | "beta", received: string): string {\n  return received;\n}\n',
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/bridge.js"),
+    [
+      'import { deliver } from "./sink.js";',
+      "/**",
+      ' * @param {"alpha" | "beta"} mode',
+      " * @param {string} payload",
+      " */",
+      "export function forwardBridge(mode, payload) {",
+      "  return deliver(mode, payload);",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "src/entry.ts"),
+    [
+      'import { forwardBridge } from "./bridge.js";',
+      'function makeOrigin(): string { return "origin"; }',
+      "export function main(useDyn: boolean, cb: (x: string) => string): string {",
+      "  const origin = makeOrigin();",
+      '  const out = forwardBridge("alpha", origin);',
+      "  if (useDyn) return cb(origin);",
+      "  return out;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(mixedHost.path, "verule.config.ts"),
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "const rule = defineRule({",
+      '  id: "host-mixed-ts-js-flow",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ files: ["src/entry.ts"], kinds: ["CallExpression"] });',
+      '    const forwardCall = calls.find((c) => c.text.startsWith("forwardBridge("));',
+      '    const dynCall = calls.find((c) => c.text.startsWith("cb("));',
+      "    if (forwardCall && dynCall) {",
+      "      const resolved = await ctx.resolveCalls([forwardCall.ref, dynCall.ref], { select: { instantiatedParameterTypes: [0] } });",
+      '      if (resolved[0]?.instantiatedParameterTypes[0]?.type.typeText !== "\\"alpha\\" | \\"beta\\"") {',
+      '        throw new Error("Expected JSDoc union type from bridge.js");',
+      "      }",
+      "      await ctx.calleesOf([resolved[1]!.call!]);",
+      "    }",
+      '    const varDecls = await ctx.findSyntax({ files: ["src/entry.ts"], kinds: ["VariableDeclaration"] });',
+      '    const originInit = varDecls.find((d) => d.text.startsWith("origin ="))?.initializer;',
+      '    const outDecl = varDecls.find((d) => d.text.startsWith("out ="));',
+      "    if (originInit && outDecl) {",
+      "      const [outRes] = await ctx.resolveDeclarations([outDecl.ref]);",
+      '      const prop = await ctx.valuePropagation({ propagation: "value", from: originInit, to: [outRes!.declaration!] });',
+      "      if (prop.results[0]?.reachable) {",
+      "        ctx.report({",
+      "          at: outDecl.location,",
+      '          message: "Origin propagates through JS bridge to TS sink",',
+      "          evidence: prop.results[0].evidence,",
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      'export default defineConfig({ tsconfig: "tsconfig.json", rules: [rule] });',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const mixedHostJson = invoke(mixedHost.path, "check", "--output", "json");
+  assert.equal(mixedHostJson.status, 1, mixedHostJson.stderr);
+  const mixedHostEnv = JSON.parse(mixedHostJson.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(mixedHostEnv.variant, "findings");
+  assert.equal(mixedHostEnv.data.diagnostics.length, 1);
+  assert.ok(
+    mixedHostEnv.data.diagnostics[0]!.evidence.some(
+      (e) => e.at?.file === "src/bridge.js",
+    ),
+  );
+  assert.ok(
+    mixedHostEnv.data.diagnostics[0]!.evidence.some(
+      (e) => e.at?.file === "src/sink.ts",
+    ),
+  );
+  assert.equal(mixedHostEnv.data.gaps.length, 1);
+  assert.equal(mixedHostEnv.data.gaps[0]!.kind, "dynamic-callee");
+  assert.equal("observation" in mixedHostEnv.data, false);
+
   // 5. Deployed `verule watch --output ndjson` over real file edits, recovery, and SIGINT shutdown
   writeFileSync(
     join(host.path, "tsconfig.json"),
@@ -1239,7 +1359,169 @@ void test("runs the independently deployed CLI with its production SDK and engin
     }
   }
 
-  // 7. Deployed CLI additional inputs: only editing allowed-packages.json updates shared session & watch immediately
+  // 7. Deployed CLI E2E for inline-ignore suppression, explain, unused exit 1, and ambiguity
+  using inlineHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-inline-ignore-host-"),
+  );
+  mkdirSync(join(inlineHost.path, "src"), { recursive: true });
+  mkdirSync(join(inlineHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(inlineHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(inlineHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(inlineHost.path, "verule.config.ts"),
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "",
+      "const noLegacyCall = defineRule({",
+      '  id: "no-legacy-call",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "    for (const call of calls) {",
+      '      if (call.text.startsWith("legacy(")) {',
+      "        ctx.report({",
+      "          at: call.location,",
+      '          message: "legacy() is deprecated",',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [noLegacyCall],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): void;",
+      "",
+      "export function run(): void {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  legacy("one");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const inlineClean = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineClean.status, 0, inlineClean.stderr);
+  const inlineCleanEnv = JSON.parse(inlineClean.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineCleanEnv.variant, "clean");
+  assert.deepEqual(inlineCleanEnv.data.diagnostics, []);
+
+  const inlineExplain = invoke(
+    inlineHost.path,
+    "check",
+    "--rule",
+    "no-legacy-call",
+    "--at",
+    "src/entry.ts:5:3",
+    "--output",
+    "json",
+  );
+  assert.equal(inlineExplain.status, 0, inlineExplain.stderr);
+  const inlineExplainEnv = JSON.parse(inlineExplain.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineExplainEnv.data.explanation?.status,
+    "suppressed_by_ignore",
+  );
+  assert.equal(
+    inlineExplainEnv.data.explanation?.inlineIgnore?.reason,
+    "Approved temporary bridge.",
+  );
+
+  // Fix violation while keeping directive -> exit 1 with unused directive finding
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineUnused = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineUnused.status, 1, inlineUnused.stderr);
+  const inlineUnusedEnv = JSON.parse(inlineUnused.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineUnusedEnv.variant, "findings");
+  assert.equal(inlineUnusedEnv.data.diagnostics.length, 1);
+  assert.equal(
+    inlineUnusedEnv.data.diagnostics[0]?.ruleId,
+    sdk.INLINE_IGNORE_RULE_ID,
+  );
+
+  // Two distinct calls on same line -> ambiguous diagnostic + both violations retained
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): number;",
+      "",
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  return legacy("a") + legacy("b");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineAmbiguous = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineAmbiguous.status, 1, inlineAmbiguous.stderr);
+  const inlineAmbiguousEnv = JSON.parse(inlineAmbiguous.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === "no-legacy-call",
+    ).length,
+    2,
+  );
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === sdk.INLINE_IGNORE_RULE_ID,
+    ).length,
+    1,
+  );
+
+  // 8. Deployed CLI additional inputs: only editing allowed-packages.json updates shared session immediately
   using manifestHost = mkdtempDisposableSync(
     join(tmpdir(), "verule-manifest-host-"),
   );
