@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempDisposableSync,
+  readFileSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
@@ -67,6 +68,7 @@ void test("runs the independently deployed CLI with its production SDK and engin
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /--schema/u);
   assert.match(help.stdout, /check/u);
+  assert.match(help.stdout, /watch/u);
 
   const schema = invoke(tmpdir(), "--schema");
   assert.equal(schema.status, 0, schema.stderr);
@@ -313,4 +315,164 @@ void test("runs the independently deployed CLI with its production SDK and engin
   assert.equal(brokenEnvelope.kind, "failure");
   assert.equal(brokenEnvelope.variant, "failed");
   assert.equal(brokenEnvelope.data.code, "PROJECT_LOAD_ERROR");
+
+  // 4. Deployed `verule watch --output ndjson` over real file edits, recovery, and SIGINT shutdown
+  writeFileSync(
+    join(host.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const watchChild = spawn(
+    process.execPath,
+    [entry, "watch", "--config", rulesConfigPath, "--output", "ndjson"],
+    {
+      cwd: host.path,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  const watchRecords: Record<string, unknown>[] = [];
+  let watchStderr = "";
+  let watchBuffer = "";
+  let recordWaiters: (() => void)[] = [];
+
+  watchChild.stdout.setEncoding("utf8");
+  watchChild.stdout.on("data", (chunk: string) => {
+    watchBuffer += chunk;
+    while (true) {
+      const idx = watchBuffer.indexOf("\n");
+      if (idx === -1) break;
+      const line = watchBuffer.slice(0, idx).trim();
+      watchBuffer = watchBuffer.slice(idx + 1);
+      if (line.length > 0) {
+        watchRecords.push(JSON.parse(line) as Record<string, unknown>);
+        const pending = recordWaiters;
+        recordWaiters = [];
+        for (const wake of pending) wake();
+      }
+    }
+  });
+  watchChild.stderr.setEncoding("utf8");
+  watchChild.stderr.on("data", (chunk: string) => {
+    watchStderr += chunk;
+  });
+
+  async function waitForWatchRecord(
+    predicate: (item: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 10_000;
+    let cursor = 0;
+    while (true) {
+      while (cursor < watchRecords.length) {
+        const item = watchRecords[cursor]!;
+        cursor += 1;
+        if (predicate(item)) return item;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for deployed watch record. Records=${JSON.stringify(watchRecords)} stderr=${watchStderr}`,
+        );
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 200);
+        recordWaiters.push(() => {
+          clearTimeout(timer);
+          resolveWait();
+        });
+      });
+    }
+  }
+
+  try {
+    await waitForWatchRecord((r) => r.kind === "stream");
+    const rec1 = await waitForWatchRecord(
+      (r) =>
+        r.kind === "record" &&
+        r.variant === "report" &&
+        (r.data as { sequence?: number }).sequence === 1,
+    );
+    const rec1Data = rec1.data as Record<string, unknown>;
+    assert.equal(rec1Data.status, "findings");
+
+    // Edit src/handlers.ts to clean state -> watch emits clean report matching cold check
+    const handlersPath = join(host.path, "src", "handlers.ts");
+    writeFileSync(
+      handlersPath,
+      "export function safeOnly(): string {\n  return 'ok';\n}\n",
+      "utf8",
+    );
+    const rec2 = await waitForWatchRecord(
+      (r) =>
+        r.kind === "record" &&
+        r.variant === "report" &&
+        (r.data as { sequence?: number }).sequence === 2,
+    );
+    const rec2Data = rec2.data as Record<string, unknown>;
+    assert.equal(rec2Data.status, "clean");
+    const coldClean = invoke(
+      host.path,
+      "check",
+      "--config",
+      rulesConfigPath,
+      "--output",
+      "json",
+    );
+    assert.equal(coldClean.status, 0, coldClean.stderr);
+    const coldCleanData = (
+      JSON.parse(coldClean.stdout) as { data: Record<string, unknown> }
+    ).data;
+    assert.deepEqual(rec2Data.diagnostics, coldCleanData.diagnostics);
+    assert.deepEqual(rec2Data.identity, coldCleanData.identity);
+
+    // Break config temporarily -> failed record without exit, then restore -> recovers
+    const validRulesConfig = readFileSync(rulesConfigPath, "utf8");
+    writeFileSync(rulesConfigPath, "export default { broken(", "utf8");
+    const rec3 = await waitForWatchRecord(
+      (r) =>
+        r.kind === "record" &&
+        r.variant === "failed" &&
+        (r.data as { sequence?: number }).sequence === 3,
+    );
+    assert.equal((rec3.data as { code?: string }).code, "INVALID_CONFIG");
+
+    writeFileSync(rulesConfigPath, validRulesConfig, "utf8");
+    const rec4 = await waitForWatchRecord(
+      (r) =>
+        r.kind === "record" &&
+        r.variant === "report" &&
+        (r.data as { sequence?: number }).sequence === 4,
+    );
+    assert.equal((rec4.data as { status?: string }).status, "clean");
+
+    // SIGINT triggers clean shutdown with streamSuccess and exit code 0
+    watchChild.kill("SIGINT");
+    const exitResult = await new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolveExit) => {
+      watchChild.once("exit", (code, sig) =>
+        resolveExit({ code, signal: sig }),
+      );
+    });
+    assert.equal(exitResult.code, 0, watchStderr);
+    assert.equal(watchStderr, "");
+    assert.equal(watchRecords.at(-1)?.kind, "streamSuccess");
+  } finally {
+    if (watchChild.exitCode === null && watchChild.signalCode === null) {
+      watchChild.kill("SIGKILL");
+    }
+  }
 });

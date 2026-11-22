@@ -3,7 +3,6 @@ import {
   VeruleExecutionError,
   getEngineVersion,
   runCheck,
-  type CheckReport,
 } from "@verule/sdk";
 import {
   CliWriteError,
@@ -21,109 +20,30 @@ import { z } from "zod";
 
 import type { CliCommandIdentity } from "./cli-command-identity.ts";
 import { loadProjectConfig } from "./config-loader.ts";
+import {
+  checkFailureSchema,
+  checkReportSchema,
+  formatDiagnosticsLines,
+  toWireReport,
+  type WireCheckReport,
+} from "./report-wire.ts";
+import {
+  formatWatchReportText,
+  streamWatchEvents,
+  watchFailureRecordSchema,
+  watchReportRecordSchema,
+} from "./watch-command.ts";
 
 type CliRuntime = {
   readonly argv: readonly string[];
   readonly cwd?: string;
   readonly write: WriteCliOutput;
   readonly identity: CliCommandIdentity;
+  readonly signal?: AbortSignal;
 };
 
-const locationSchema = z.object({
-  file: z.string(),
-  line: z.number().int().positive(),
-  column: z.number().int().positive(),
-  endLine: z.number().int().positive(),
-  endColumn: z.number().int().positive(),
-  start: z.number().int().nonnegative(),
-  end: z.number().int().nonnegative(),
-});
-
-const evidenceSchema = z.object({
-  kind: z.enum(["source", "type", "note"]),
-  message: z.string(),
-  at: locationSchema.optional(),
-});
-
-const gapSchema = z.object({
-  kind: z.string(),
-  message: z.string(),
-  at: locationSchema.optional(),
-});
-
-const diagnosticSchema = z.object({
-  id: z.string(),
-  ruleId: z.string(),
-  at: locationSchema,
-  message: z.string(),
-  evidence: z.array(evidenceSchema),
-  projects: z.array(z.string()),
-});
-
-const projectSummarySchema = z.object({
-  projectId: z.string(),
-  configFile: z.string(),
-  sourceFiles: z.array(z.string()),
-});
-
-const checkReportSchema = z.object({
-  reportVersion: z.literal(REPORT_SCHEMA_VERSION),
-  status: z.enum(["clean", "findings"]),
-  projects: z.array(projectSummarySchema),
-  diagnostics: z.array(diagnosticSchema),
-  gaps: z.array(gapSchema),
-});
-
-type WireCheckReport = z.infer<typeof checkReportSchema>;
-
-const checkFailureSchema = z.object({
-  reportVersion: z.literal(REPORT_SCHEMA_VERSION),
-  code: z.string(),
-  message: z.string(),
-});
-
-function toWireReport(report: CheckReport): WireCheckReport {
-  return {
-    reportVersion: report.reportVersion,
-    status: report.status,
-    projects: report.projects.map((project) => ({
-      projectId: project.projectId,
-      configFile: project.configFile,
-      sourceFiles: [...project.sourceFiles],
-    })),
-    diagnostics: report.diagnostics.map((diag) => ({
-      id: diag.id,
-      ruleId: diag.ruleId,
-      at: { ...diag.at },
-      message: diag.message,
-      evidence: diag.evidence.map((item) => ({
-        kind: item.kind,
-        message: item.message,
-        ...(item.at !== undefined ? { at: { ...item.at } } : {}),
-      })),
-      projects: [...diag.projects],
-    })),
-    gaps: report.gaps.map((gap) => ({
-      kind: gap.kind,
-      message: gap.message,
-      ...(gap.at !== undefined ? { at: { ...gap.at } } : {}),
-    })),
-  };
-}
-
 function formatCheckFindingsText(report: WireCheckReport) {
-  const lines: string[] = [];
-  for (const diag of report.diagnostics) {
-    lines.push(
-      `${diag.at.file}:${diag.at.line}:${diag.at.column} [${diag.ruleId}] (${diag.id}) ${diag.message}`,
-    );
-    for (const item of diag.evidence) {
-      const locSuffix = item.at
-        ? ` (${item.at.file}:${item.at.line}:${item.at.column})`
-        : "";
-      lines.push(`  evidence (${item.kind}): ${item.message}${locSuffix}`);
-    }
-  }
+  const lines = formatDiagnosticsLines(report);
   const summary = `Found ${report.diagnostics.length} violation(s).`;
   const [first, ...rest] = lines;
   return first !== undefined
@@ -134,10 +54,11 @@ function formatCheckFindingsText(report: WireCheckReport) {
 function createCliContract(
   identity: CliCommandIdentity,
   workingDirectory: string,
+  signal?: AbortSignal,
 ) {
   const define = defineCli();
   const versionInput = z.object({});
-  const checkInput = z.object({
+  const configInput = z.object({
     config: z.string().min(1).optional(),
   });
 
@@ -260,8 +181,8 @@ function createCliContract(
             description: "Path to the Verule configuration file.",
           },
         },
-        input: checkInput,
-        outputs: define.outputModes("check", checkInput, (mode) => ({
+        input: configInput,
+        outputs: define.outputModes("check", configInput, (mode) => ({
           default: "text",
           modes: {
             text: mode.atomic({
@@ -346,6 +267,84 @@ function createCliContract(
           },
         })),
       }),
+      ...define.command("watch")({
+        kind: "command",
+        parent: "verule",
+        name: "watch",
+        description:
+          "Watch project files and emit complete reports on every save.",
+        fields: {
+          config: {
+            kind: "valueOption",
+            longOption: "--config",
+            shortAlias: "-c",
+            description: "Path to the Verule configuration file.",
+          },
+        },
+        input: configInput,
+        outputs: define.outputModes("watch", configInput, (mode) => ({
+          default: "text",
+          modes: {
+            text: mode.stream({
+              format: "text",
+              description: "Display watch reports as human-readable text.",
+              success: {
+                kind: "stream",
+                records: {
+                  report: {
+                    description: "Complete analysis report for a snapshot.",
+                    schema: watchReportRecordSchema,
+                    text: formatWatchReportText,
+                  },
+                  failed: {
+                    description: "Single-round check failure.",
+                    schema: watchFailureRecordSchema,
+                    text: ({ sequence, code, message }) =>
+                      text.line(
+                        `[watch #${sequence}] Check failed [${code}]: ${message}`,
+                      ),
+                  },
+                },
+                text: () => text.line("Watch stopped."),
+              },
+              failures: {},
+              handler: ({ input, outcome }) =>
+                streamWatchEvents(
+                  workingDirectory,
+                  input.config,
+                  signal,
+                  outcome,
+                ),
+            }),
+            ndjson: mode.stream({
+              format: "structured",
+              description:
+                "Emit complete analysis reports as NDJSON stream records.",
+              success: {
+                kind: "stream",
+                records: {
+                  report: {
+                    description: "Complete analysis report for a snapshot.",
+                    schema: watchReportRecordSchema,
+                  },
+                  failed: {
+                    description: "Single-round check failure.",
+                    schema: watchFailureRecordSchema,
+                  },
+                },
+              },
+              failures: {},
+              handler: ({ input, outcome }) =>
+                streamWatchEvents(
+                  workingDirectory,
+                  input.config,
+                  signal,
+                  outcome,
+                ),
+            }),
+          },
+        })),
+      }),
     },
   });
 }
@@ -354,7 +353,11 @@ function createCliContract(
 export async function runCli(runtime: CliRuntime): Promise<number> {
   try {
     const workingDirectory = runtime.cwd ?? process.cwd();
-    const contract = createCliContract(runtime.identity, workingDirectory);
+    const contract = createCliContract(
+      runtime.identity,
+      workingDirectory,
+      runtime.signal,
+    );
     const rawArgs = runtime.argv.slice(2);
     const effectiveArgs = rawArgs.length === 0 ? ["version"] : rawArgs;
     const invocation = parseCliInvocation(contract, effectiveArgs);

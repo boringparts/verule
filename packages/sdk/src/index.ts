@@ -3,7 +3,14 @@ import { promisify } from "node:util";
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
-export { defineConfig, defineRule, openSession, runCheck } from "./session.ts";
+export {
+  defineConfig,
+  defineModel,
+  defineRule,
+  openSession,
+  runCheck,
+} from "./session.ts";
+export { watchProject } from "./watch.ts";
 export {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
@@ -15,15 +22,23 @@ export {
   type Evidence,
   type FindSyntaxOptions,
   type Gap,
+  type MemoryStats,
+  type Model,
+  type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type ObserveMode,
   type OpenSessionOptions,
   type ProgramObjectKind,
   type ProgramRef,
   type ProjectSummary,
+  type RecomputationScope,
+  type ReportIdentity,
   type Rule,
   type RuleContext,
+  type RuleIdentitySummary,
   type RunCheckOptions,
+  type SessionUpdateOptions,
+  type SessionUpdateResult,
   type SyntaxKind,
   type SyntaxNodeResult,
   type SyntaxRef,
@@ -31,6 +46,12 @@ export {
   type TypeRef,
   type VeruleConfig,
   type VeruleErrorCode,
+  type WatchConfigLoadResult,
+  type WatchEvent,
+  type WatchFailureEvent,
+  type WatchProjectOptions,
+  type WatchReportEvent,
+  type WatchTrigger,
 } from "./types.ts";
 
 const runEngine = promisify(execFile);

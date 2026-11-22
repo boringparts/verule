@@ -121,6 +121,7 @@ void test("preserves bare command, --version, --help, --schema, and --unknown", 
   const help = await captureCli(["--help"]);
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /check/u);
+  assert.match(help.stdout, /watch/u);
   assert.match(help.stdout, /--schema/u);
 
   const schema = await captureCli(["--schema"]);

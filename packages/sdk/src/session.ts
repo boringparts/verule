@@ -14,12 +14,19 @@ import {
   type DiagnosticLocation,
   type Evidence,
   type FindSyntaxOptions,
+  type MemoryStats,
+  type Model,
+  type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProjectSummary,
+  type RecomputationScope,
+  type ReportIdentity,
   type Rule,
   type RuleContext,
+  type RuleIdentitySummary,
   type RunCheckOptions,
+  type SessionUpdateOptions,
   type SyntaxKind,
   type SyntaxNodeResult,
   type SyntaxRef,
@@ -29,7 +36,17 @@ import {
 
 type EngineOpenResult = {
   readonly snapshotId: number;
+  readonly snapshotDigest: string;
   readonly projects: readonly ProjectSummary[];
+  readonly engineRssBytes?: number;
+};
+
+type EngineUpdateResult = EngineOpenResult & {
+  readonly recomputedProjects: readonly string[];
+  readonly reusedProjects: readonly string[];
+  readonly recomputedFiles: readonly string[];
+  readonly reusedFiles: readonly string[];
+  readonly removedFiles: readonly string[];
 };
 
 type EngineSyntaxItem = {
@@ -95,6 +112,49 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
   return [...rules];
 }
 
+function validateModels(models: readonly Model[]): readonly Model[] {
+  const seen = new Set<string>();
+  for (const model of models) {
+    if (typeof model.id !== "string" || model.id.trim() === "") {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        "Each model must have a non-empty string id.",
+      );
+    }
+    if (model.version !== undefined && typeof model.version !== "string") {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Model "${model.id}" version must be a string when provided.`,
+      );
+    }
+    if (seen.has(model.id)) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Duplicate model id: "${model.id}".`,
+      );
+    }
+    seen.add(model.id);
+  }
+  return [...models];
+}
+
+/** Validates a project model definition. */
+export function defineModel(model: Model): Model {
+  if (typeof model.id !== "string" || model.id.trim() === "") {
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      "Model id must be a non-empty string.",
+    );
+  }
+  if (model.version !== undefined && typeof model.version !== "string") {
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      `Model "${model.id}" version must be a string when provided.`,
+    );
+  }
+  return model;
+}
+
 /** Validates and normalizes a rule definition. */
 export function defineRule(rule: Rule): Rule {
   if (typeof rule.id !== "string" || rule.id.trim() === "") {
@@ -127,12 +187,84 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
     );
   }
   const rules = validateRules(config.rules ?? []);
+  const models = validateModels(config.models ?? []);
   return {
     ...(config.tsconfig !== undefined ? { tsconfig: config.tsconfig } : {}),
     ...(config.projects !== undefined
       ? { projects: [...config.projects] }
       : {}),
     rules,
+    models,
+  };
+}
+
+function stableSerialize(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "undefined";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).toSorted();
+  return `{${keys
+    .filter((key) => record[key] !== undefined)
+    .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+    .join(",")}}`;
+}
+
+function sha256Prefix(input: string): string {
+  return createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+function summarizeRule(rule: Rule): RuleIdentitySummary {
+  return {
+    id: rule.id,
+    digest: sha256Prefix(
+      stableSerialize({
+        id: rule.id,
+        description: rule.description ?? null,
+        run: rule.run.toString(),
+      }),
+    ),
+  };
+}
+
+function summarizeModel(model: Model): ModelIdentitySummary {
+  return {
+    id: model.id,
+    ...(model.version !== undefined ? { version: model.version } : {}),
+    digest: sha256Prefix(
+      stableSerialize({
+        id: model.id,
+        version: model.version ?? null,
+        description: model.description ?? null,
+        facts: model.facts ?? null,
+      }),
+    ),
+  };
+}
+
+function computeReportIdentity(
+  snapshotDigest: string,
+  entries: readonly string[],
+  rules: readonly Rule[],
+  models: readonly Model[],
+): ReportIdentity {
+  const ruleSummaries = rules.map(summarizeRule);
+  const modelSummaries = models.map(summarizeModel);
+  const configDigest = sha256Prefix(
+    stableSerialize({
+      entries,
+      rules: ruleSummaries,
+      models: modelSummaries,
+    }),
+  );
+  return {
+    snapshotDigest,
+    configDigest,
+    rules: ruleSummaries,
+    models: modelSummaries,
   };
 }
 
@@ -358,6 +490,90 @@ function buildDiagnostics(
   });
 }
 
+function resolveNextConfig(
+  current: NormalizedVeruleConfig,
+  options?: SessionUpdateOptions,
+): NormalizedVeruleConfig {
+  if (options?.config !== undefined) {
+    return defineConfig(options.config);
+  }
+  const rules = options?.rules ? validateRules(options.rules) : current.rules;
+  const models = options?.models
+    ? validateModels(options.models)
+    : current.models;
+  if (options?.entries !== undefined) {
+    if (options.entries.length === 0) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        '"entries" must contain at least one tsconfig path when specified.',
+      );
+    }
+    return {
+      projects: [...options.entries],
+      rules,
+      models,
+    };
+  }
+  return {
+    ...(current.tsconfig !== undefined ? { tsconfig: current.tsconfig } : {}),
+    ...(current.projects !== undefined ? { projects: current.projects } : {}),
+    rules,
+    models,
+  };
+}
+
+function collectInvalidatedBy(
+  prevConfig: NormalizedVeruleConfig,
+  nextConfig: NormalizedVeruleConfig,
+  options?: SessionUpdateOptions,
+): readonly string[] {
+  const reasons: string[] = [];
+  for (const file of options?.changed ?? []) reasons.push(`changed:${file}`);
+  for (const file of options?.created ?? []) reasons.push(`created:${file}`);
+  for (const file of options?.deleted ?? []) reasons.push(`deleted:${file}`);
+
+  const prevIdentity = computeReportIdentity(
+    "",
+    resolveEntries(prevConfig),
+    prevConfig.rules,
+    prevConfig.models,
+  );
+  const nextIdentity = computeReportIdentity(
+    "",
+    resolveEntries(nextConfig),
+    nextConfig.rules,
+    nextConfig.models,
+  );
+  if (
+    stableSerialize(resolveEntries(prevConfig)) !==
+    stableSerialize(resolveEntries(nextConfig))
+  ) {
+    reasons.push("entries");
+  }
+  if (
+    stableSerialize(prevIdentity.rules) !== stableSerialize(nextIdentity.rules)
+  ) {
+    reasons.push("rules");
+  }
+  if (
+    stableSerialize(prevIdentity.models) !==
+    stableSerialize(nextIdentity.models)
+  ) {
+    reasons.push("models");
+  }
+  if (options?.config !== undefined && reasons.length === 0) {
+    reasons.push("config");
+  }
+  return reasons;
+}
+
+function readMemoryStats(engineRssBytes?: number): MemoryStats {
+  return {
+    hostRssBytes: process.memoryUsage().rss,
+    ...(engineRssBytes !== undefined ? { engineRssBytes } : {}),
+  };
+}
+
 /**
  * Opens an analysis session backed by a single engine subprocess and project snapshot.
  *
@@ -366,10 +582,10 @@ function buildDiagnostics(
 export async function openSession(
   options: OpenSessionOptions,
 ): Promise<AnalysisSession> {
-  const normalizedConfig = options.config
+  let normalizedConfig = options.config
     ? defineConfig(options.config)
     : defineConfig({});
-  const entries = resolveEntries(normalizedConfig);
+  const initialEntries = resolveEntries(normalizedConfig);
   const absCwd = resolve(options.cwd);
 
   const client = new EngineClient();
@@ -377,7 +593,7 @@ export async function openSession(
   try {
     openResult = await client.request<EngineOpenResult>("snapshot.open", {
       cwd: absCwd,
-      entries,
+      entries: initialEntries,
     });
   } catch (err) {
     await client.close();
@@ -385,8 +601,10 @@ export async function openSession(
   }
 
   const sessionToken = Symbol("verule-session");
-  const snapshotId = openResult.snapshotId;
-  const projects = openResult.projects;
+  let currentSnapshotId = openResult.snapshotId;
+  let currentSnapshotDigest = openResult.snapshotDigest;
+  let currentProjects = openResult.projects;
+  let lastEngineRssBytes = openResult.engineRssBytes;
   let closed = false;
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
@@ -404,13 +622,18 @@ export async function openSession(
   function createRuleContext(
     ruleId: string,
     project: ProjectSummary,
+    models: readonly Model[],
     collected: CollectedDiagnostic[],
   ): RuleContext {
+    const activeSnapshotId = currentSnapshotId;
     return {
       project,
+      models,
+      getModel: (id: string) => models.find((model) => model.id === id),
       findSyntax: (query: FindSyntaxOptions) => {
         assertOpen();
         const cacheKey = JSON.stringify([
+          activeSnapshotId,
           project.projectId,
           query.kinds.toSorted(),
           query.files ? query.files.toSorted() : null,
@@ -420,7 +643,7 @@ export async function openSession(
 
         const promise = client
           .request<EngineBatchResult>("query.batch", {
-            snapshotId,
+            snapshotId: activeSnapshotId,
             projectId: project.projectId,
             steps: [
               {
@@ -438,7 +661,7 @@ export async function openSession(
                 item,
                 sessionToken,
                 project.projectId,
-                snapshotId,
+                activeSnapshotId,
               ),
             );
           });
@@ -453,7 +676,7 @@ export async function openSession(
         for (const target of targets) {
           if (
             getRefSessionToken(target) !== sessionToken ||
-            target.snapshotId !== snapshotId
+            target.snapshotId !== currentSnapshotId
           ) {
             throw new VeruleExecutionError(
               "STALE_REFERENCE",
@@ -470,7 +693,7 @@ export async function openSession(
 
         const missingTargets: SyntaxRef[] = [];
         for (const target of targets) {
-          const key = `${project.projectId}:${target.handleId}`;
+          const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
           if (!typeCache.has(key)) {
             missingTargets.push(target);
           }
@@ -480,7 +703,7 @@ export async function openSession(
           const batchPromise = client.request<EngineBatchResult>(
             "query.batch",
             {
-              snapshotId,
+              snapshotId: activeSnapshotId,
               projectId: project.projectId,
               steps: [
                 {
@@ -492,7 +715,7 @@ export async function openSession(
           );
 
           for (const [index, target] of missingTargets.entries()) {
-            const key = `${project.projectId}:${target.handleId}`;
+            const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
             const itemPromise = batchPromise.then((batch) => {
               const items = (batch.results[0]?.items ??
                 []) as readonly EngineTypeItem[];
@@ -508,7 +731,7 @@ export async function openSession(
                 target,
                 sessionToken,
                 project.projectId,
-                snapshotId,
+                activeSnapshotId,
               );
             });
             typeCache.set(key, itemPromise);
@@ -517,7 +740,9 @@ export async function openSession(
 
         return Promise.all(
           targets.map((target) =>
-            typeCache.get(`${project.projectId}:${target.handleId}`)!,
+            typeCache.get(
+              `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
+            )!,
           ),
         );
       },
@@ -538,18 +763,26 @@ export async function openSession(
   }
 
   return {
-    snapshotId,
-    projects,
+    get snapshotId() {
+      return currentSnapshotId;
+    },
+    get projects() {
+      return currentProjects;
+    },
+    get memory() {
+      return readMemoryStats(lastEngineRssBytes);
+    },
     check: async (rulesOverride?: readonly Rule[]) => {
       assertOpen();
       const rules = rulesOverride
         ? validateRules(rulesOverride)
         : normalizedConfig.rules;
+      const models = normalizedConfig.models;
       const collected: CollectedDiagnostic[] = [];
 
-      for (const project of projects) {
+      for (const project of currentProjects) {
         for (const rule of rules) {
-          const ctx = createRuleContext(rule.id, project, collected);
+          const ctx = createRuleContext(rule.id, project, models, collected);
           try {
             await rule.run(ctx);
           } catch (err) {
@@ -570,16 +803,74 @@ export async function openSession(
       return {
         reportVersion: REPORT_SCHEMA_VERSION,
         status: diagnostics.length > 0 ? "findings" : "clean",
-        projects,
+        projects: currentProjects,
         diagnostics,
         gaps: [],
+        identity: computeReportIdentity(
+          currentSnapshotDigest,
+          resolveEntries(normalizedConfig),
+          rules,
+          models,
+        ),
+      };
+    },
+    update: async (updateOptions?: SessionUpdateOptions) => {
+      assertOpen();
+      const nextConfig = resolveNextConfig(normalizedConfig, updateOptions);
+      const nextEntries = resolveEntries(nextConfig);
+      const previousSnapshotId = currentSnapshotId;
+
+      const updated = await client.request<EngineUpdateResult>(
+        "snapshot.update",
+        {
+          snapshotId: previousSnapshotId,
+          entries: nextEntries,
+          changed: updateOptions?.changed ?? [],
+          created: updateOptions?.created ?? [],
+          deleted: updateOptions?.deleted ?? [],
+        },
+      );
+
+      const invalidatedBy = collectInvalidatedBy(
+        normalizedConfig,
+        nextConfig,
+        updateOptions,
+      );
+
+      normalizedConfig = nextConfig;
+      currentSnapshotId = updated.snapshotId;
+      currentSnapshotDigest = updated.snapshotDigest;
+      currentProjects = updated.projects;
+      lastEngineRssBytes = updated.engineRssBytes;
+      syntaxCache.clear();
+      typeCache.clear();
+
+      const recomputation: RecomputationScope = {
+        recomputedProjects: updated.recomputedProjects,
+        reusedProjects: updated.reusedProjects,
+        recomputedFiles: updated.recomputedFiles,
+        reusedFiles: updated.reusedFiles,
+        removedFiles: updated.removedFiles,
+        invalidatedBy,
+      };
+
+      return {
+        previousSnapshotId,
+        snapshotId: updated.snapshotId,
+        projects: updated.projects,
+        recomputation,
+        memory: readMemoryStats(updated.engineRssBytes),
       };
     },
     close: async () => {
       if (closed) return;
       closed = true;
+      syntaxCache.clear();
+      typeCache.clear();
       try {
-        await client.request("snapshot.release", { snapshotId });
+        await client.request("snapshot.release", {
+          snapshotId: currentSnapshotId,
+        });
       } catch {
         // Best-effort release before terminating the child process.
       } finally {

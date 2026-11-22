@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     io::{self, Write},
     path::Path,
     sync::Arc,
@@ -17,7 +18,7 @@ use tsrs_core::{
     context::{CheckerLifetime, Context, with_checker_lifetime},
 };
 use tsrs_diagnostics::Category;
-use tsrs_project::ID as ProjectId;
+use tsrs_project::{ID as ProjectId, Kind as ProjectKind};
 use tsrs_scanner::{get_ecma_line_and_utf16_character_of_position, get_token_pos_of_node};
 use tsrs_vfs::{FS, bundled, osvfs};
 
@@ -68,6 +69,20 @@ struct SnapshotOpenParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SnapshotUpdateParams {
+    snapshot_id: u64,
+    #[serde(default)]
+    entries: Option<Vec<String>>,
+    #[serde(default)]
+    changed: Vec<String>,
+    #[serde(default)]
+    created: Vec<String>,
+    #[serde(default)]
+    deleted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotReleaseParams {
     snapshot_id: u64,
 }
@@ -97,7 +112,25 @@ enum QueryStep {
 #[serde(rename_all = "camelCase")]
 struct SnapshotOpenResult {
     snapshot_id: u64,
+    snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_rss_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotUpdateResult {
+    snapshot_id: u64,
+    snapshot_digest: String,
+    projects: Vec<ProjectSummary>,
+    recomputed_projects: Vec<String>,
+    reused_projects: Vec<String>,
+    recomputed_files: Vec<String>,
+    reused_files: Vec<String>,
+    removed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_rss_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -173,16 +206,8 @@ struct TypeItem {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TsrsCreateSnapshotResponse {
+struct TsrsSnapshotResponse {
     snapshot: u64,
-    projects: Vec<TsrsProjectResponse>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TsrsProjectResponse {
-    id: String,
-    config_file_name: String,
 }
 
 enum HandlePayload {
@@ -198,6 +223,7 @@ struct HandleEntry {
 struct SnapshotState {
     tsrs_snapshot_id: u64,
     cwd: String,
+    entries: Vec<String>,
     snapshot_data: Arc<SnapshotData>,
     project_ids: BTreeMap<String, ProjectId>,
     handles: FxHashMap<String, HandleEntry>,
@@ -302,6 +328,13 @@ impl EngineServer {
                 serde_json::to_value(result)
                     .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
             }
+            "snapshot.update" => {
+                let parsed: SnapshotUpdateParams = serde_json::from_value(params)
+                    .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
+                let result = self.update_snapshot(&parsed)?;
+                serde_json::to_value(result)
+                    .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
+            }
             "snapshot.release" => {
                 let parsed: SnapshotReleaseParams = serde_json::from_value(params)
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
@@ -324,25 +357,8 @@ impl EngineServer {
     }
 
     fn open_snapshot(&mut self, params: &SnapshotOpenParams) -> Result<SnapshotOpenResult, RpcErr> {
-        if params.entries.is_empty() {
-            return Err(RpcErr::new(
-                "PROJECT_LOAD_ERROR",
-                "At least one tsconfig entry is required.".to_string(),
-            ));
-        }
-
         let cwd = normalize_path(&params.cwd);
-        let mut resolved_entries = Vec::with_capacity(params.entries.len());
-        for entry in &params.entries {
-            let resolved = resolve_against_cwd(&cwd, entry);
-            if !Path::new(&resolved).is_file() {
-                return Err(RpcErr::new(
-                    "PROJECT_LOAD_ERROR",
-                    format!("Project configuration file not found: {resolved}"),
-                ));
-            }
-            resolved_entries.push(resolved);
-        }
+        let resolved_entries = resolve_entry_paths(&cwd, &params.entries)?;
 
         let session = self.ensure_session(&cwd);
         let payload = serde_json::to_vec(&serde_json::json!({
@@ -360,7 +376,7 @@ impl EngineServer {
             ));
         };
 
-        let created: TsrsCreateSnapshotResponse = serde_json::from_str(&json_text)
+        let created: TsrsSnapshotResponse = serde_json::from_str(&json_text)
             .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
         let tsrs_snapshot_id = created.snapshot;
 
@@ -368,48 +384,15 @@ impl EngineServer {
             .snapshot_data(tsrs_snapshot_id)
             .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
 
-        let mut project_ids = BTreeMap::new();
-        let mut summaries = Vec::with_capacity(created.projects.len());
-
-        for project in created.projects {
-            let pid = ProjectId(project.id.clone());
-            let program = match snapshot_data.get_program(&pid) {
-                Ok(prog) => prog,
+        let (project_ids, summaries, snapshot_digest) =
+            match collect_snapshot_projects(&cwd, &snapshot_data) {
+                Ok(collected) => collected,
                 Err(err) => {
+                    drop(snapshot_data);
                     release_tsrs_snapshot(&session, tsrs_snapshot_id);
-                    return Err(RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()));
+                    return Err(err);
                 }
             };
-
-            if let Some(config_err) = first_config_error(program) {
-                release_tsrs_snapshot(&session, tsrs_snapshot_id);
-                return Err(RpcErr::new("PROJECT_LOAD_ERROR", config_err));
-            }
-
-            let mut source_files = Vec::new();
-            for &sf in program.get_source_files() {
-                if !is_project_source_file(program, sf) {
-                    continue;
-                }
-                source_files.push(relative_to_cwd(&cwd, sf.file_name()));
-            }
-            source_files.sort();
-
-            project_ids.insert(project.id.clone(), pid);
-            summaries.push(ProjectSummary {
-                project_id: project.id,
-                config_file: relative_to_cwd(&cwd, &project.config_file_name),
-                source_files,
-            });
-        }
-
-        if summaries.is_empty() {
-            release_tsrs_snapshot(&session, tsrs_snapshot_id);
-            return Err(RpcErr::new(
-                "PROJECT_LOAD_ERROR",
-                "No compiler projects were opened.".to_string(),
-            ));
-        }
 
         self.next_snapshot_id += 1;
         let snapshot_id = self.next_snapshot_id;
@@ -418,6 +401,7 @@ impl EngineServer {
             SnapshotState {
                 tsrs_snapshot_id,
                 cwd,
+                entries: resolved_entries,
                 snapshot_data,
                 project_ids,
                 handles: FxHashMap::default(),
@@ -427,7 +411,104 @@ impl EngineServer {
 
         Ok(SnapshotOpenResult {
             snapshot_id,
+            snapshot_digest,
             projects: summaries,
+            engine_rss_bytes: read_process_rss_bytes(),
+        })
+    }
+
+    fn update_snapshot(
+        &mut self,
+        params: &SnapshotUpdateParams,
+    ) -> Result<SnapshotUpdateResult, RpcErr> {
+        let (cwd, old_tsrs_snapshot_id, old_entries, old_snapshot_data, old_project_ids) = {
+            let Some(old_state) = self.snapshots.get(&params.snapshot_id) else {
+                return Err(RpcErr::new(
+                    "STALE_SNAPSHOT",
+                    format!("Snapshot {} is expired or unknown.", params.snapshot_id),
+                ));
+            };
+            (
+                old_state.cwd.clone(),
+                old_state.tsrs_snapshot_id,
+                old_state.entries.clone(),
+                Arc::clone(&old_state.snapshot_data),
+                old_state.project_ids.clone(),
+            )
+        };
+
+        let next_entries = match &params.entries {
+            Some(entries) => resolve_entry_paths(&cwd, entries)?,
+            None => old_entries.clone(),
+        };
+
+        let Some(session) = self.session.as_ref().map(|(_, s)| Arc::clone(s)) else {
+            return Err(RpcErr::new(
+                "STALE_SNAPSHOT",
+                "Analysis session is not initialized.".to_string(),
+            ));
+        };
+
+        let payload = build_update_payload(
+            &cwd,
+            old_tsrs_snapshot_id,
+            &old_entries,
+            &next_entries,
+            params,
+        )?;
+        let new_tsrs_snapshot_id = send_update_snapshot(&session, &payload)?;
+
+        let new_snapshot_data = session
+            .snapshot_data(new_tsrs_snapshot_id)
+            .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
+
+        let (project_ids, summaries, snapshot_digest) =
+            match collect_snapshot_projects(&cwd, &new_snapshot_data) {
+                Ok(collected) => collected,
+                Err(err) => {
+                    drop(new_snapshot_data);
+                    release_tsrs_snapshot(&session, new_tsrs_snapshot_id);
+                    return Err(err);
+                }
+            };
+
+        let diff = compute_recomputation_scope(
+            &cwd,
+            &old_snapshot_data,
+            &old_project_ids,
+            &new_snapshot_data,
+            &project_ids,
+        );
+
+        drop(old_snapshot_data);
+        drop(self.snapshots.remove(&params.snapshot_id));
+        release_tsrs_snapshot(&session, old_tsrs_snapshot_id);
+
+        self.next_snapshot_id += 1;
+        let snapshot_id = self.next_snapshot_id;
+        self.snapshots.insert(
+            snapshot_id,
+            SnapshotState {
+                tsrs_snapshot_id: new_tsrs_snapshot_id,
+                cwd,
+                entries: next_entries,
+                snapshot_data: new_snapshot_data,
+                project_ids,
+                handles: FxHashMap::default(),
+                next_handle_id: 0,
+            },
+        );
+
+        Ok(SnapshotUpdateResult {
+            snapshot_id,
+            snapshot_digest,
+            projects: summaries,
+            recomputed_projects: diff.recomputed_projects,
+            reused_projects: diff.reused_projects,
+            recomputed_files: diff.recomputed_files,
+            reused_files: diff.reused_files,
+            removed_files: diff.removed_files,
+            engine_rss_bytes: read_process_rss_bytes(),
         })
     }
 
@@ -506,9 +587,464 @@ impl EngineServer {
     }
 }
 
+fn build_update_payload(
+    cwd: &str,
+    old_tsrs_snapshot_id: u64,
+    old_entries: &[String],
+    next_entries: &[String],
+    params: &SnapshotUpdateParams,
+) -> Result<Vec<u8>, RpcErr> {
+    let old_entry_set: BTreeSet<&str> = old_entries.iter().map(String::as_str).collect();
+    let next_entry_set: BTreeSet<&str> = next_entries.iter().map(String::as_str).collect();
+    let open_projects: Vec<&str> = next_entries
+        .iter()
+        .map(String::as_str)
+        .filter(|entry| !old_entry_set.contains(entry))
+        .collect();
+    let close_projects: Vec<&str> = old_entries
+        .iter()
+        .map(String::as_str)
+        .filter(|entry| !next_entry_set.contains(entry))
+        .collect();
+    let resolve_list = |paths: &[String]| -> Vec<String> {
+        paths
+            .iter()
+            .map(|item| resolve_against_cwd(cwd, item))
+            .collect()
+    };
+
+    serde_json::to_vec(&serde_json::json!({
+        "snapshot": old_tsrs_snapshot_id,
+        "changes": {
+            "openProjects": open_projects,
+            "closeProjects": close_projects,
+            "ensurePrograms": true,
+            "fileNotifications": {
+                "changed": resolve_list(&params.changed),
+                "created": resolve_list(&params.created),
+                "deleted": resolve_list(&params.deleted),
+            }
+        }
+    }))
+    .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))
+}
+
+fn send_update_snapshot(session: &Session, payload: &[u8]) -> Result<u64, RpcErr> {
+    let response = session
+        .handle_request("updateSnapshot", payload)
+        .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
+    let Response::Json(json_text) = response else {
+        return Err(RpcErr::new(
+            "PROJECT_LOAD_ERROR",
+            "Unexpected binary response from tsrs session.".to_string(),
+        ));
+    };
+    let updated: TsrsSnapshotResponse = serde_json::from_str(&json_text)
+        .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
+    Ok(updated.snapshot)
+}
+
 fn release_tsrs_snapshot(session: &Session, tsrs_snapshot_id: u64) {
     if let Ok(payload) = serde_json::to_vec(&serde_json::json!({ "snapshot": tsrs_snapshot_id })) {
         let _ = session.handle_request("release", &payload);
+    }
+}
+
+fn resolve_entry_paths(cwd: &str, entries: &[String]) -> Result<Vec<String>, RpcErr> {
+    if entries.is_empty() {
+        return Err(RpcErr::new(
+            "PROJECT_LOAD_ERROR",
+            "At least one tsconfig entry is required.".to_string(),
+        ));
+    }
+
+    let mut resolved_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let resolved = resolve_against_cwd(cwd, entry);
+        if !Path::new(&resolved).is_file() {
+            return Err(RpcErr::new(
+                "PROJECT_LOAD_ERROR",
+                format!("Project configuration file not found: {resolved}"),
+            ));
+        }
+        resolved_entries.push(resolved);
+    }
+    Ok(resolved_entries)
+}
+
+type CollectedProjects = (BTreeMap<String, ProjectId>, Vec<ProjectSummary>, String);
+
+fn collect_snapshot_projects(
+    cwd: &str,
+    snapshot_data: &SnapshotData,
+) -> Result<CollectedProjects, RpcErr> {
+    let mut configured = Vec::new();
+    for project in snapshot_data.snapshot.project_collection.projects() {
+        if project.kind != ProjectKind::Configured || project.command_line.is_none() {
+            continue;
+        }
+        configured.push(project);
+    }
+    configured.sort_by(|a, b| a.id().0.cmp(&b.id().0));
+
+    let mut project_ids = BTreeMap::new();
+    let mut summaries = Vec::with_capacity(configured.len());
+    let mut hasher = Sha256::new();
+
+    for project in configured {
+        let id_str = project.id().0;
+        let pid = ProjectId(id_str.clone());
+        let program = snapshot_data
+            .get_program(&pid)
+            .map_err(|err| RpcErr::new("PROJECT_LOAD_ERROR", err.to_string()))?;
+
+        if let Some(config_err) = first_config_error(program) {
+            return Err(RpcErr::new("PROJECT_LOAD_ERROR", config_err));
+        }
+
+        let config_abs = project.config_file_name();
+        let config_rel = relative_to_cwd(cwd, config_abs);
+        let config_bytes = std::fs::read(config_abs).unwrap_or_default();
+
+        let mut files_with_text: Vec<(String, &'static str)> = program
+            .get_source_files()
+            .iter()
+            .copied()
+            .filter(|&sf| is_project_source_file(program, sf))
+            .map(|sf| (relative_to_cwd(cwd, sf.file_name()), sf.text()))
+            .collect();
+        files_with_text.sort_by(|a, b| a.0.cmp(&b.0));
+
+        hasher.update_len_prefixed(id_str.as_bytes());
+        hasher.update_len_prefixed(config_rel.as_bytes());
+        hasher.update_len_prefixed(&config_bytes);
+        for (rel_file, text) in &files_with_text {
+            hasher.update_len_prefixed(rel_file.as_bytes());
+            hasher.update_len_prefixed(text.as_bytes());
+        }
+
+        let source_files = files_with_text.into_iter().map(|(rel, _)| rel).collect();
+        project_ids.insert(id_str.clone(), pid);
+        summaries.push(ProjectSummary {
+            project_id: id_str,
+            config_file: config_rel,
+            source_files,
+        });
+    }
+
+    if summaries.is_empty() {
+        return Err(RpcErr::new(
+            "PROJECT_LOAD_ERROR",
+            "No compiler projects were opened.".to_string(),
+        ));
+    }
+
+    Ok((project_ids, summaries, hasher.finish_hex()))
+}
+
+struct RecomputationDiff {
+    recomputed_projects: Vec<String>,
+    reused_projects: Vec<String>,
+    recomputed_files: Vec<String>,
+    reused_files: Vec<String>,
+    removed_files: Vec<String>,
+}
+
+fn compute_recomputation_scope(
+    cwd: &str,
+    old_snapshot: &SnapshotData,
+    old_projects: &BTreeMap<String, ProjectId>,
+    new_snapshot: &SnapshotData,
+    new_projects: &BTreeMap<String, ProjectId>,
+) -> RecomputationDiff {
+    let mut old_all_files = BTreeSet::new();
+    for pid in old_projects.values() {
+        if let Ok(prog) = old_snapshot.get_program(pid) {
+            for &sf in prog.get_source_files() {
+                if is_project_source_file(prog, sf) {
+                    old_all_files.insert(relative_to_cwd(cwd, sf.file_name()));
+                }
+            }
+        }
+    }
+
+    let mut recomputed_projects = Vec::new();
+    let mut reused_projects = Vec::new();
+    let mut recomputed_files_set = BTreeSet::new();
+    let mut reused_files_set = BTreeSet::new();
+    let mut new_all_files = BTreeSet::new();
+
+    for (id_str, pid) in new_projects {
+        let Ok(new_prog) = new_snapshot.get_program(pid) else {
+            continue;
+        };
+        let old_prog = old_projects
+            .get(id_str)
+            .and_then(|old_pid| old_snapshot.get_program(old_pid).ok());
+
+        let project_reused = old_prog.is_some_and(|old| std::ptr::eq(old, new_prog));
+        if project_reused {
+            reused_projects.push(id_str.clone());
+        } else {
+            recomputed_projects.push(id_str.clone());
+        }
+
+        for &sf in new_prog.get_source_files() {
+            if !is_project_source_file(new_prog, sf) {
+                continue;
+            }
+            let rel = relative_to_cwd(cwd, sf.file_name());
+            new_all_files.insert(rel.clone());
+
+            let file_reused = old_prog
+                .and_then(|old| old.get_source_file(sf.file_name()))
+                .is_some_and(|old_sf| std::ptr::eq(&raw const *old_sf, &raw const *sf));
+
+            if file_reused {
+                reused_files_set.insert(rel);
+            } else {
+                recomputed_files_set.insert(rel);
+            }
+        }
+    }
+
+    let removed_files: Vec<String> = old_all_files.difference(&new_all_files).cloned().collect();
+    let reused_files: Vec<String> = reused_files_set
+        .difference(&recomputed_files_set)
+        .cloned()
+        .collect();
+    let recomputed_files: Vec<String> = recomputed_files_set.into_iter().collect();
+
+    RecomputationDiff {
+        recomputed_projects,
+        reused_projects,
+        recomputed_files,
+        reused_files,
+        removed_files,
+    }
+}
+
+fn read_process_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb_str = rest.split_whitespace().next()?;
+            let kb: u64 = kb_str.parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
+}
+
+const SHA256_K: [u32; 64] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
+];
+
+struct Sha256 {
+    state: [u32; 8],
+    bit_len: u64,
+    buffer: [u8; 64],
+    buf_len: usize,
+}
+
+impl Sha256 {
+    const fn new() -> Self {
+        Self {
+            state: [
+                0x6a09_e667,
+                0xbb67_ae85,
+                0x3c6e_f372,
+                0xa54f_f53a,
+                0x510e_527f,
+                0x9b05_688c,
+                0x1f83_d9ab,
+                0x5be0_cd19,
+            ],
+            bit_len: 0,
+            buffer: [0; 64],
+            buf_len: 0,
+        }
+    }
+
+    fn update_len_prefixed(&mut self, data: &[u8]) {
+        let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        self.update(&len.to_be_bytes());
+        self.update(data);
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        let mut offset = 0;
+        if self.buf_len > 0 {
+            let take = (64 - self.buf_len).min(data.len());
+            self.buffer[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            offset += take;
+            if self.buf_len == 64 {
+                let block = self.buffer;
+                self.compress(&block);
+                self.buf_len = 0;
+            }
+        }
+        while offset + 64 <= data.len() {
+            let mut block = [0u8; 64];
+            block.copy_from_slice(&data[offset..offset + 64]);
+            self.compress(&block);
+            offset += 64;
+        }
+        if offset < data.len() {
+            let rem = data.len() - offset;
+            self.buffer[..rem].copy_from_slice(&data[offset..]);
+            self.buf_len = rem;
+        }
+        let bits = u64::try_from(data.len()).unwrap_or(0).saturating_mul(8);
+        self.bit_len = self.bit_len.wrapping_add(bits);
+    }
+
+    fn finish_hex(mut self) -> String {
+        let bit_len = self.bit_len;
+        self.update(&[0x80]);
+        if self.buf_len > 56 {
+            while self.buf_len < 64 {
+                self.buffer[self.buf_len] = 0;
+                self.buf_len += 1;
+            }
+            let block = self.buffer;
+            self.compress(&block);
+            self.buf_len = 0;
+        }
+        while self.buf_len < 56 {
+            self.buffer[self.buf_len] = 0;
+            self.buf_len += 1;
+        }
+        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        let block = self.buffer;
+        self.compress(&block);
+
+        let mut out = String::with_capacity(64);
+        for word in self.state {
+            let _ = write!(out, "{word:08x}");
+        }
+        out
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
+        let mut schedule = [0u32; 64];
+        for (idx, word) in schedule.iter_mut().enumerate().take(16) {
+            let off = idx * 4;
+            *word =
+                u32::from_be_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+        }
+        for idx in 16..64 {
+            let s0 = schedule[idx - 15].rotate_right(7)
+                ^ schedule[idx - 15].rotate_right(18)
+                ^ (schedule[idx - 15] >> 3);
+            let s1 = schedule[idx - 2].rotate_right(17)
+                ^ schedule[idx - 2].rotate_right(19)
+                ^ (schedule[idx - 2] >> 10);
+            schedule[idx] = schedule[idx - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[idx - 7])
+                .wrapping_add(s1);
+        }
+
+        let [
+            mut s0,
+            mut s1,
+            mut s2,
+            mut s3,
+            mut s4,
+            mut s5,
+            mut s6,
+            mut s7,
+        ] = self.state;
+        for (idx, &k_val) in SHA256_K.iter().enumerate() {
+            let sigma1 = s4.rotate_right(6) ^ s4.rotate_right(11) ^ s4.rotate_right(25);
+            let choice = (s4 & s5) ^ ((!s4) & s6);
+            let temp1 = s7
+                .wrapping_add(sigma1)
+                .wrapping_add(choice)
+                .wrapping_add(k_val)
+                .wrapping_add(schedule[idx]);
+            let sigma0 = s0.rotate_right(2) ^ s0.rotate_right(13) ^ s0.rotate_right(22);
+            let majority = (s0 & s1) ^ (s0 & s2) ^ (s1 & s2);
+            let temp2 = sigma0.wrapping_add(majority);
+
+            s7 = s6;
+            s6 = s5;
+            s5 = s4;
+            s4 = s3.wrapping_add(temp1);
+            s3 = s2;
+            s2 = s1;
+            s1 = s0;
+            s0 = temp1.wrapping_add(temp2);
+        }
+
+        for (slot, delta) in self.state.iter_mut().zip([s0, s1, s2, s3, s4, s5, s6, s7]) {
+            *slot = slot.wrapping_add(delta);
+        }
     }
 }
 

@@ -306,3 +306,185 @@ fn rejects_stale_snapshots_and_invalid_project_configs() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn updates_snapshots_and_invalidates_stale_handles() {
+    let temp = TempDirGuard::new("verule-engine-serve-update");
+    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let unrelated_path = temp.path().join("src").join("unrelated.ts");
+    fs::write(&unrelated_path, "export const untouched = 1;\n").expect("write unrelated.ts");
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+
+    let (snap1, project_id, files1) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+    assert!(files1.iter().any(|v| v.as_str() == Some("src/sample.ts")));
+    assert!(
+        files1
+            .iter()
+            .any(|v| v.as_str() == Some("src/unrelated.ts"))
+    );
+
+    let syn_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snap1,
+                "projectId": project_id,
+                "steps": [{ "op": "findSyntax", "files": ["src/sample.ts"], "kinds": ["CallExpression"] }]
+            }
+        }),
+    );
+    assert_eq!(syn_resp["ok"], json!(true));
+    let old_ref = syn_resp["result"]["results"][0]["items"][0]["ref"]
+        .as_str()
+        .expect("old ref")
+        .to_string();
+
+    fs::write(&unrelated_path, "export const untouched = 2;\n").expect("update unrelated.ts");
+    let update1 = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "snapshot.update",
+            "params": { "snapshotId": snap1, "changed": ["src/unrelated.ts"] }
+        }),
+    );
+    assert_eq!(update1["ok"], json!(true), "update1 failed: {update1}");
+    let snap2 = update1["result"]["snapshotId"].as_u64().expect("snap2");
+    assert_ne!(snap2, snap1);
+    assert!(
+        update1["result"]["snapshotDigest"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    assert!(
+        update1["result"]["recomputedFiles"]
+            .as_array()
+            .expect("recomputedFiles")
+            .iter()
+            .any(|v| v.as_str() == Some("src/unrelated.ts"))
+    );
+    assert!(
+        update1["result"]["reusedFiles"]
+            .as_array()
+            .expect("reusedFiles")
+            .iter()
+            .any(|v| v.as_str() == Some("src/sample.ts"))
+    );
+    if let Some(rss) = update1["result"]["engineRssBytes"].as_u64() {
+        assert!(rss > 0);
+    }
+
+    assert_stale_type_query(
+        &mut stdin,
+        &mut reader,
+        4,
+        snap1,
+        &project_id,
+        &old_ref,
+        "STALE_SNAPSHOT",
+    );
+    assert_stale_type_query(
+        &mut stdin,
+        &mut reader,
+        5,
+        snap2,
+        &project_id,
+        &old_ref,
+        "STALE_REFERENCE",
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn recovers_from_broken_tsconfig_on_snapshot_update() {
+    let temp = TempDirGuard::new("verule-engine-serve-recover");
+    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+
+    let (snap1, _, _) = open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+    let tsconfig_path = temp.path().join("tsconfig.json");
+    let valid_tsconfig = fs::read_to_string(&tsconfig_path).expect("read tsconfig");
+
+    fs::write(&tsconfig_path, "{ broken json").expect("break tsconfig");
+    let failed_update = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "snapshot.update",
+            "params": { "snapshotId": snap1, "changed": ["tsconfig.json"] }
+        }),
+    );
+    assert_eq!(failed_update["ok"], json!(false));
+    assert_eq!(failed_update["error"]["code"], json!("PROJECT_LOAD_ERROR"));
+
+    fs::write(&tsconfig_path, valid_tsconfig).expect("restore tsconfig");
+    let recovered_update = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "snapshot.update",
+            "params": { "snapshotId": snap1, "changed": ["tsconfig.json"] }
+        }),
+    );
+    assert_eq!(
+        recovered_update["ok"],
+        json!(true),
+        "recovery failed: {recovered_update}"
+    );
+    assert_ne!(
+        recovered_update["result"]["snapshotId"]
+            .as_u64()
+            .expect("snap2"),
+        snap1
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_stale_type_query(
+    stdin: &mut ChildStdin,
+    reader: &mut BufReader<ChildStdout>,
+    id: u64,
+    snapshot_id: u64,
+    project_id: &str,
+    handle_ref: &str,
+    expected_code: &str,
+) {
+    let resp = rpc_call(
+        stdin,
+        reader,
+        &json!({
+            "id": id,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "typeAtLocation", "targets": [handle_ref] }]
+            }
+        }),
+    );
+    assert_eq!(resp["ok"], json!(false));
+    assert_eq!(resp["error"]["code"], json!(expected_code));
+}
