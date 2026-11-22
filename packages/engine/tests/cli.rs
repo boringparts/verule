@@ -17,7 +17,14 @@ fn prints_package_version() {
 
 #[test]
 fn rejects_missing_unknown_and_extra_arguments() {
-    for args in [&[][..], &["--unknown"][..], &["--version", "extra"][..]] {
+    for args in [
+        &[][..],
+        &["--unknown"][..],
+        &["--version", "extra"][..],
+        &["serve"][..],
+        &["serve", "--unknown"][..],
+        &["serve", "--stdio", "extra"][..],
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_verule-engine"))
             .args(args)
             .output()
@@ -25,6 +32,9 @@ fn rejects_missing_unknown_and_extra_arguments() {
 
         assert_eq!(output.status.code(), Some(2));
         assert_eq!(output.stdout, b"");
-        assert_eq!(output.stderr, b"Usage: verule-engine --version\n");
+        assert_eq!(
+            output.stderr,
+            b"Usage: verule-engine (--version | serve --stdio)\n"
+        );
     }
 }
