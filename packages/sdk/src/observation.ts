@@ -7,6 +7,7 @@ import {
   type Diagnostic,
   type DiagnosticLocation,
   type ExplainCheckpointTrace,
+  type ExplainCleanupPath,
   type ExplainQueryStep,
   type ExplainResult,
   type ExplainStatus,
@@ -394,6 +395,13 @@ export class ObservationCollector {
   readonly #queriesByRule = new Map<string, QueryTraceRecord[]>();
   readonly #checkpointsByRule = new Map<string, CheckpointTraceRecord[]>();
   readonly #matchingCandidatesByRule = new Map<string, DiagnosticLocation[]>();
+  readonly #cleanupPathsByRule = new Map<
+    string,
+    {
+      readonly targetLocations: readonly DiagnosticLocation[];
+      readonly path: ExplainCleanupPath;
+    }[]
+  >();
 
   constructor(options: {
     readonly mode: ObserveMode;
@@ -643,6 +651,24 @@ export class ObservationCollector {
     return candidates.some((candidate) => locationsOverlap(candidate, loc));
   }
 
+  recordCleanupPaths(params: {
+    readonly ruleId: string;
+    readonly targetLocations: readonly DiagnosticLocation[];
+    readonly paths: readonly ExplainCleanupPath[];
+  }): void {
+    if (!this.isExplainEnabled()) {
+      return;
+    }
+    const list = this.#cleanupPathsByRule.get(params.ruleId) ?? [];
+    for (const path of params.paths) {
+      list.push({
+        targetLocations: params.targetLocations,
+        path,
+      });
+    }
+    this.#cleanupPathsByRule.set(params.ruleId, list);
+  }
+
   #isItemLimitReached(): boolean {
     return (
       this.#truncated ||
@@ -808,6 +834,25 @@ export class ObservationCollector {
         }
       | undefined;
 
+    const matchingCleanupEntries = (
+      this.#cleanupPathsByRule.get(params.ruleId) ?? []
+    ).filter((entry) =>
+      entry.targetLocations.some(
+        (loc) =>
+          locationMatchesTarget(loc, target) ||
+          matchingCandidates.some((cand) => locationsOverlap(cand, loc)),
+      ),
+    );
+    const cleanupPaths: ExplainCleanupPath[] = [];
+    const seenCleanupKeys = new Set<string>();
+    for (const entry of matchingCleanupEntries) {
+      const key = `${entry.path.instanceKey}:${entry.path.scopeLocation.file}:${entry.path.scopeLocation.start}`;
+      if (!seenCleanupKeys.has(key)) {
+        seenCleanupKeys.add(key);
+        cleanupPaths.push(entry.path);
+      }
+    }
+
     if (matchingDiagnostic) {
       status = "reported";
       summary = `Rule "${params.ruleId}" reported a diagnostic at ${formatTarget(target)}.`;
@@ -823,6 +868,9 @@ export class ObservationCollector {
     } else if (!targetInAnyProject) {
       status = "target_not_in_project";
       summary = `Target "${target.file}" is not part of any opened compiler project.`;
+    } else if (cleanupPaths.length > 0) {
+      status = "covered_by_cleanup";
+      summary = `Target is covered by valid cleanup path(s) (${cleanupPaths.map((cp) => cp.instanceKey).join(", ")}).`;
     } else if (excludedCheckpoint) {
       status = "excluded_by_checkpoint";
       excludedByCheckpoint = excludedCheckpoint;
@@ -854,7 +902,7 @@ export class ObservationCollector {
       checkpoints: relevantCheckpoints,
       gaps: [],
       providers,
-      cleanupPaths: [],
+      cleanupPaths,
     };
   }
 }

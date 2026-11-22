@@ -50,6 +50,26 @@ export type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 export type {
+  CallEffectsOptions,
+  CallEffectsResult,
+  CallEffectsTargetRef,
+  CallbackInvocationInfo,
+  CleanupCoverageStatus,
+  CleanupModelOperation,
+  CleanupModelOperationKind,
+  CleanupModelTarget,
+  CleanupScopeRef,
+  CleanupSiteInfo,
+  FieldEffect,
+  FieldEffectKind,
+  FieldWriteOperator,
+  GuardConditionInfo,
+  InstanceCleanupOptions,
+  InstanceCleanupScopeResult,
+  LifecycleEventBehavior,
+  TargetInstanceCleanupResult,
+} from "./call-effects.ts";
+export type {
   CallSiteParameterBinding,
   CallTargetInfo,
   CallTargetsResult,
@@ -90,6 +110,13 @@ export type {
   TypeSummary,
 } from "./projection.ts";
 export type {
+  ImplementationResolutionResult,
+  ImplementationStatus,
+  ImplementationTargetRef,
+  PackageResolutionMode,
+  ResolvedImplementationTarget,
+} from "./package-impl.ts";
+export type {
   FullInstanceProjectionFields,
   InstanceModelBehavior,
   InstanceModelMatch,
@@ -116,6 +143,7 @@ export {
   type DiagnosticLocation,
   type Evidence,
   type ExplainCheckpointTrace,
+  type ExplainCleanupPath,
   type ExplainOptions,
   type ExplainQueryStep,
   type ExplainReport,

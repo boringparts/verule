@@ -126,7 +126,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
       prepareExternalConsumer(root);
 
       const validCode = [
-        'import { VeruleExecutionError, createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallRef, type DeclarationRef, type FactConflictDetails, type FactConflictParty, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        'import { VeruleExecutionError, createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallEffectsResult, type CallRef, type DeclarationRef, type ExplainCleanupPath, type FactConflictDetails, type FactConflictParty, type InstanceCleanupScopeResult, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
         "",
         "const extModel = defineModel({",
         '  id: "ext-model",',
@@ -139,6 +139,25 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         '      kind: "forwards-argument",',
         '      match: { container: "Disposable", member: "_register" },',
         "      argumentIndex: 0,",
+        "    },",
+        "  ],",
+        "  cleanupOperations: [",
+        "    {",
+        '      kind: "disposes-target",',
+        '      match: { member: "dispose" },',
+        '      target: "receiver",',
+        "    },",
+        "    {",
+        '      kind: "replaces-previous-value",',
+        '      match: { container: "MutableDisposable", member: "value" },',
+        '      target: "receiver",',
+        "    },",
+        "  ],",
+        "  lifecycleEvents: [",
+        "    {",
+        '      kind: "lifecycle-end-callback",',
+        '      match: { symbol: "onDidDisconnect" },',
+        "      callbackArgumentIndex: 0,",
         "    },",
         "  ],",
         "});",
@@ -283,6 +302,27 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "        }",
         "      }",
         "    }",
+        "    const cleanupResults: readonly InstanceCleanupScopeResult[] = await ctx.instanceCleanup({",
+        "      scopes: callRefs,",
+        "      targets: instRefs,",
+        "    });",
+        "    const effectsResults: readonly CallEffectsResult[] = await ctx.callEffects({",
+        "      targets: callRefs,",
+        "    });",
+        "    const firstEffect = effectsResults[0]?.fieldWrites[0];",
+        "    if (firstEffect !== undefined) {",
+        "      const writeSyn: SyntaxRef = firstEffect.syntax;",
+        "      const recvSyn: SyntaxRef = firstEffect.receiverSyntax;",
+        "      await ctx.branchCoverage({ branches: [], targets: [writeSyn] });",
+        "      await ctx.resolveInstances([recvSyn]);",
+        "    }",
+        "    const firstCleanup = cleanupResults[0];",
+        "    if (firstCleanup !== undefined) {",
+        "      const disposedInst: InstanceRef | undefined = firstCleanup.disposedInstances[0]?.instance;",
+        "      void disposedInst;",
+        "    }",
+        "    const sampleExplainPath: ExplainCleanupPath | undefined = undefined;",
+        "    void sampleExplainPath;",
         "  },",
         "});",
         "",
@@ -531,6 +571,42 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
             void row?.originKind;
           `,
           expectedPattern: /TS2339/u,
+        },
+        {
+          name: "InstanceRef passed to callEffects targets",
+          body: `
+            const instRef = undefined as unknown as InstanceRef;
+            await ctx.callEffects({ targets: [instRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "SyntaxRef passed to instanceCleanup targets (requires InstanceRef)",
+          body: `
+            const synRef = undefined as unknown as SyntaxRef;
+            await ctx.instanceCleanup({ scopes: [synRef], targets: [synRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "TypeRef passed to instanceCleanup scopes",
+          body: `
+            const typeRef = undefined as unknown as TypeRef;
+            await ctx.instanceCleanup({ scopes: [typeRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "CallEffects fieldWrite syntax cannot be passed as InstanceRef",
+          body: `
+            const callRef = undefined as unknown as CallRef;
+            const [res] = await ctx.callEffects({ targets: [callRef] });
+            const w = res?.fieldWrites[0];
+            if (w) {
+              await ctx.projectInstances([w.syntax], { select: { instanceKey: true } });
+            }
+          `,
+          expectedPattern: /TS2322|TS2345/u,
         },
       ];
 

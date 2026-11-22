@@ -14,6 +14,10 @@ use tsrs_compiler::{CheckerHandle, Program};
 use tsrs_core::P;
 
 use crate::cfg::{EvidenceItem, GapItem, resolve_enclosing_function};
+use crate::package_impl::{
+    PackageImplCache, PackageImplLookup, ResolvedImplTargetPayload, check_call_missing_package_gap,
+    resolve_impl_for_call_target,
+};
 use crate::projects::{is_project_source_file, relative_to_cwd};
 use crate::serve::{SourceLocation, node_location, slice_source_text};
 
@@ -54,6 +58,8 @@ pub struct CallTargetInfoPayload {
     pub name: Option<String>,
     pub location: Option<SourceLocation>,
     pub is_external: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<ResolvedImplTargetPayload>,
     pub parameter_bindings: Vec<CallSiteParameterBindingPayload>,
     pub return_expressions: Vec<String>,
 }
@@ -649,6 +655,11 @@ impl<'a> CalleeResolver<'a> {
                     "Resolved via call signature declaration".to_string(),
                 );
                 self.gaps.clear();
+            } else if let Some(missing_gap) =
+                check_call_missing_package_gap(self.program, self.checker, self.cwd, call_node)
+            {
+                self.gaps.clear();
+                self.gaps.push(missing_gap);
             }
         }
 
@@ -925,6 +936,10 @@ pub fn run_callers_of(
     Ok(rows)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Resolves direct call targets alongside cross-package implementation lookup and evidence."
+)]
 pub fn run_callees_of(
     snapshot: &mut crate::serve::SnapshotState,
     project_id: &str,
@@ -938,9 +953,11 @@ pub fn run_callees_of(
         call_nodes.push((handle_id.clone(), node));
     }
 
+    let cache = snapshot.package_impl_cache.clone();
+    let cwd = snapshot.cwd.clone();
     let mut rows = Vec::with_capacity(call_nodes.len());
     for (call_id, call_node) in call_nodes {
-        let outcome = resolve_call_targets(&snapshot.cwd, program, checker, call_node);
+        let mut outcome = resolve_call_targets(&cwd, program, checker, call_node);
         let return_target = snapshot.alloc_syntax(project_id, call_node);
 
         let mut target_refs = Vec::with_capacity(outcome.targets.len());
@@ -949,10 +966,80 @@ pub fn run_callees_of(
 
         for target in outcome.targets {
             let decl_ref = snapshot.alloc_declaration(project_id, target.decl_node, target.symbol);
+            let is_decl_only_node = target.fn_node.is_none_or(|f| f.body().is_none())
+                || get_source_file_of_node(target.decl_node)
+                    .is_some_and(|sf| sf.is_declaration_file());
+
+            let (effective_fn, implementation) = if is_decl_only_node {
+                match resolve_impl_for_call_target(
+                    &cache,
+                    &cwd,
+                    program,
+                    checker,
+                    call_node,
+                    Some(target.decl_node),
+                    target.fn_node,
+                ) {
+                    PackageImplLookup::ResolvedExternal { fn_node, info, .. }
+                    | PackageImplLookup::SourceBody { fn_node, info } => {
+                        evidence.push(EvidenceItem::simple(
+                            "source",
+                            format!(
+                                "Resolved {} implementation '{}' for '{}'",
+                                info.resolution_mode,
+                                info.file,
+                                target.name.as_deref().unwrap_or("<anonymous>")
+                            ),
+                            info.location.clone(),
+                        ));
+                        (Some(fn_node), Some(info))
+                    }
+                    PackageImplLookup::DeclarationOnly { message, .. } => {
+                        outcome.gaps.push(GapItem {
+                            kind: "missing-package-implementation",
+                            message,
+                            at: node_location_rel(&cwd, call_node),
+                        });
+                        (target.fn_node, None)
+                    }
+                    PackageImplLookup::MissingPackage { message, .. } => {
+                        outcome.gaps.push(GapItem {
+                            kind: "missing-package",
+                            message,
+                            at: node_location_rel(&cwd, call_node),
+                        });
+                        (target.fn_node, None)
+                    }
+                    PackageImplLookup::Ambiguous { message, .. } => {
+                        outcome.gaps.push(GapItem {
+                            kind: "ambiguous-package-implementation",
+                            message,
+                            at: node_location_rel(&cwd, call_node),
+                        });
+                        (target.fn_node, None)
+                    }
+                    PackageImplLookup::Unimplemented { .. } => (target.fn_node, None),
+                }
+            } else {
+                let impl_info = match resolve_impl_for_call_target(
+                    &cache,
+                    &cwd,
+                    program,
+                    checker,
+                    call_node,
+                    Some(target.decl_node),
+                    target.fn_node,
+                ) {
+                    PackageImplLookup::SourceBody { info, .. }
+                    | PackageImplLookup::ResolvedExternal { info, .. } => Some(info),
+                    _ => None,
+                };
+                (target.fn_node, impl_info)
+            };
+
             let parameter_bindings =
-                build_parameter_bindings(snapshot, project_id, checker, call_node, target.fn_node);
-            let return_expressions = target
-                .fn_node
+                build_parameter_bindings(snapshot, project_id, checker, call_node, effective_fn);
+            let return_expressions = effective_fn
                 .map_or_default(collect_return_expressions)
                 .into_iter()
                 .map(|expr| snapshot.alloc_syntax(project_id, expr))
@@ -976,6 +1063,7 @@ pub fn run_callees_of(
                 name: target.name,
                 location: target.location,
                 is_external: target.is_external,
+                implementation,
                 parameter_bindings,
                 return_expressions,
             });
@@ -1360,6 +1448,7 @@ struct PropagationRunner<'a> {
     program: &'static Program,
     checker: &'a mut CheckerHandle,
     call_graph: Arc<ProjectCallGraph>,
+    package_impl_cache: PackageImplCache,
     all_gaps: Vec<GapItem>,
     target_endpoints: Vec<(String, EndpointSpec)>,
     found_paths: Vec<Vec<ValuePropagationPathPayload>>,
@@ -1372,6 +1461,7 @@ impl<'a> PropagationRunner<'a> {
         program: &'static Program,
         checker: &'a mut CheckerHandle,
         call_graph: Arc<ProjectCallGraph>,
+        package_impl_cache: PackageImplCache,
         target_endpoints: Vec<(String, EndpointSpec)>,
     ) -> Self {
         let n = target_endpoints.len();
@@ -1380,6 +1470,7 @@ impl<'a> PropagationRunner<'a> {
             program,
             checker,
             call_graph,
+            package_impl_cache,
             all_gaps: Vec::new(),
             target_endpoints,
             found_paths: (0..n).map(|_| Vec::new()).collect(),
@@ -2155,7 +2246,8 @@ impl<'a> PropagationRunner<'a> {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Call argument transition records gaps and updates bounded call stack."
+        clippy::too_many_lines,
+        reason = "Call argument transition resolves package implementations, records gaps, and updates call stack."
     )]
     fn step_call_argument(
         &mut self,
@@ -2192,65 +2284,103 @@ impl<'a> PropagationRunner<'a> {
         }
 
         for target in resolution.targets {
-            if let Some(fn_node) = target.fn_node
+            let resolved_impl_fn = if let Some(fn_node) = target.fn_node
                 && fn_node.body().is_some()
+                && !get_source_file_of_node(fn_node).is_some_and(|sf| sf.is_declaration_file())
             {
-                if item.key.call_stack.len() >= MAX_CALL_STACK_DEPTH {
-                    continue;
+                Ok(fn_node)
+            } else if target.is_default_library && !return_used {
+                continue;
+            } else {
+                match resolve_impl_for_call_target(
+                    &self.package_impl_cache,
+                    self.cwd,
+                    self.program,
+                    self.checker,
+                    call_node,
+                    Some(target.decl_node),
+                    target.fn_node,
+                ) {
+                    PackageImplLookup::ResolvedExternal { fn_node, .. }
+                    | PackageImplLookup::SourceBody { fn_node, .. } => Ok(fn_node),
+                    PackageImplLookup::MissingPackage { message, .. } => {
+                        Err(("missing-package", message))
+                    }
+                    PackageImplLookup::Ambiguous { message, .. } => {
+                        Err(("ambiguous-package-implementation", message))
+                    }
+                    PackageImplLookup::DeclarationOnly { message, .. } => {
+                        Err(("missing-function-body", message))
+                    }
+                    PackageImplLookup::Unimplemented { .. } => {
+                        let name = target.name.as_deref().unwrap_or("<callee>");
+                        Err((
+                            "missing-function-body",
+                            format!(
+                                "Callee '{name}' has no implementation body; value propagation across this call cannot be verified."
+                            ),
+                        ))
+                    }
                 }
-                let params = fn_node.parameters();
-                let Some(param) = params.get(arg_index).copied() else {
-                    continue;
-                };
-                if param.kind() == Kind::Parameter
-                    && param
-                        .as_parameter_declaration()
-                        .dot_dot_dot_token()
-                        .is_some()
-                {
-                    continue;
+            };
+
+            match resolved_impl_fn {
+                Ok(fn_node) => {
+                    if item.key.call_stack.len() >= MAX_CALL_STACK_DEPTH {
+                        continue;
+                    }
+                    let params = fn_node.parameters();
+                    let Some(param) = params.get(arg_index).copied() else {
+                        continue;
+                    };
+                    if param.kind() == Kind::Parameter
+                        && param
+                            .as_parameter_declaration()
+                            .dot_dot_dot_token()
+                            .is_some()
+                    {
+                        continue;
+                    }
+                    let mut next_stack = item.key.call_stack.clone();
+                    next_stack.push(call_node);
+                    if let Some(param_name_node) = param.name() {
+                        self.bind_pattern(
+                            arg_node,
+                            param,
+                            param_name_node,
+                            &item.key.field_path,
+                            &next_stack,
+                            &item.steps,
+                            &item.gap_indices,
+                            "callArgument",
+                            queue,
+                            visited,
+                        );
+                    }
                 }
-                let mut next_stack = item.key.call_stack.clone();
-                next_stack.push(call_node);
-                if let Some(param_name_node) = param.name() {
-                    self.bind_pattern(
-                        arg_node,
-                        param,
-                        param_name_node,
-                        &item.key.field_path,
-                        &next_stack,
-                        &item.steps,
-                        &item.gap_indices,
-                        "callArgument",
+                Err((kind, message)) => {
+                    let loc = node_location_rel(self.cwd, call_node);
+                    let gap_idx = self.record_gap(GapItem {
+                        kind,
+                        message,
+                        at: loc,
+                    });
+                    encountered_gaps.insert(gap_idx);
+                    let mut next_gaps = item.gap_indices.clone();
+                    next_gaps.insert(gap_idx);
+                    Self::enqueue(
                         queue,
                         visited,
+                        TraceKey {
+                            node: call_node,
+                            field_path: item.key.field_path.clone(),
+                            call_stack: item.key.call_stack.clone(),
+                            is_gap_tainted: !next_gaps.is_empty(),
+                        },
+                        item.steps.clone(),
+                        next_gaps,
                     );
                 }
-            } else if !target.is_default_library || return_used {
-                let loc = node_location_rel(self.cwd, call_node);
-                let name = target.name.as_deref().unwrap_or("<callee>");
-                let gap_idx = self.record_gap(GapItem {
-                    kind: "missing-function-body",
-                    message: format!(
-                        "Callee '{name}' has no implementation body; value propagation across this call cannot be verified."
-                    ),
-                    at: loc,
-                });
-                encountered_gaps.insert(gap_idx);
-                let mut next_gaps = item.gap_indices.clone();
-                next_gaps.insert(gap_idx);
-                Self::enqueue(
-                    queue,
-                    visited,
-                    TraceKey {
-                        node: call_node,
-                        field_path: item.key.field_path.clone(),
-                        call_stack: item.key.call_stack.clone(),
-                        is_gap_tainted: !next_gaps.is_empty(),
-                    },
-                    item.steps.clone(),
-                    next_gaps,
-                );
             }
         }
     }
@@ -2375,7 +2505,15 @@ pub fn run_value_propagation(
 
     let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
     let cwd = snapshot.cwd.clone();
-    let mut runner = PropagationRunner::new(&cwd, program, checker, call_graph, to_specs);
+    let package_impl_cache = snapshot.package_impl_cache.clone();
+    let mut runner = PropagationRunner::new(
+        &cwd,
+        program,
+        checker,
+        call_graph,
+        package_impl_cache,
+        to_specs,
+    );
 
     let mut results = Vec::with_capacity(from_specs.len() * to_ids.len());
     for (from_id, from_spec) in from_specs {

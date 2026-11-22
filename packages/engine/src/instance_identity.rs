@@ -16,6 +16,10 @@ use crate::calls_values::{
     resolve_property_in_object_literal, unwrap_expr_wrappers,
 };
 use crate::cfg::{EvidenceItem, GapItem, resolve_enclosing_function};
+use crate::package_impl::{
+    PackageImplCache, PackageImplLookup, check_call_missing_package_gap,
+    resolve_impl_for_call_target,
+};
 use crate::projects::{is_project_source_file, relative_to_cwd};
 use crate::serve::{RpcErr, SnapshotState, SourceLocation, node_location};
 
@@ -179,34 +183,34 @@ pub struct FieldWriteIndex {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct CallFrame {
-    call_node: P<Node>,
-    callee_fn: Option<P<Node>>,
-    receiver_expr: Option<P<Node>>,
+pub struct CallFrame {
+    pub call_node: P<Node>,
+    pub callee_fn: Option<P<Node>>,
+    pub receiver_expr: Option<P<Node>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct VisitKey {
+pub struct VisitKey {
     node: P<Node>,
     call_stack: Vec<P<Node>>,
     field_name: Option<String>,
 }
 
 #[derive(Clone)]
-struct ResolvedOrigin {
-    instance_key: String,
-    origin_kind: &'static str,
-    origin_node: Option<P<Node>>,
-    allocation_location: Option<SourceLocation>,
-    model_id: Option<String>,
-    evidence: Vec<EvidenceItem>,
-    captured_stack: Vec<CallFrame>,
+pub struct ResolvedOrigin {
+    pub instance_key: String,
+    pub origin_kind: &'static str,
+    pub origin_node: Option<P<Node>>,
+    pub allocation_location: Option<SourceLocation>,
+    pub model_id: Option<String>,
+    pub evidence: Vec<EvidenceItem>,
+    pub captured_stack: Vec<CallFrame>,
 }
 
 #[derive(Default)]
-struct TraceOutcome {
-    origins: Vec<ResolvedOrigin>,
-    gaps: Vec<GapItem>,
+pub struct TraceOutcome {
+    pub origins: Vec<ResolvedOrigin>,
+    pub gaps: Vec<GapItem>,
 }
 
 impl TraceOutcome {
@@ -480,7 +484,7 @@ fn select_reaching_writes(mut writes: Vec<VarWriteSite>, anchor: P<Node>) -> Vec
         .collect()
 }
 
-fn is_external_declaration(program: &'static Program, decl: P<Node>) -> bool {
+pub fn is_external_declaration(program: &'static Program, decl: P<Node>) -> bool {
     get_source_file_of_node(decl)
         .is_some_and(|sf| sf.is_declaration_file() || !is_project_source_file(program, sf))
 }
@@ -509,20 +513,20 @@ fn module_matches(filter: &str, rel_path: &str, abs_path: &str) -> bool {
     rel_path.starts_with(&format!("{filter}/")) || rel_path.contains(&format!("/{filter}/"))
 }
 
-struct CalleeDeclMetadata {
-    member_name: Option<String>,
-    container_names: Vec<String>,
-    qualified_names: Vec<String>,
-    display_label: String,
-    rel_file: String,
-    abs_file: String,
+pub struct CalleeDeclMetadata {
+    pub member_name: Option<String>,
+    pub container_names: Vec<String>,
+    pub qualified_names: Vec<String>,
+    pub display_label: String,
+    pub rel_file: String,
+    pub abs_file: String,
 }
 
 fn strip_generic_args(raw: &str) -> &str {
     raw.split('<').next().unwrap_or(raw).trim()
 }
 
-fn collect_callee_decl_metadata(
+pub fn collect_callee_decl_metadata(
     cwd: &str,
     checker: &mut CheckerHandle,
     decl: P<Node>,
@@ -632,7 +636,10 @@ fn collect_callee_decl_metadata(
     }
 }
 
-fn score_model_match(rule: &InstanceModelMatchInput, meta: &CalleeDeclMetadata) -> Option<usize> {
+pub fn score_model_match(
+    rule: &InstanceModelMatchInput,
+    meta: &CalleeDeclMetadata,
+) -> Option<usize> {
     let mut score = 0;
 
     if let Some(ref module_filter) = rule.module {
@@ -737,19 +744,28 @@ fn prepend_step(origins: &mut [ResolvedOrigin], step: &EvidenceItem) {
     }
 }
 
-struct InstanceResolver<'a> {
-    cwd: &'a str,
-    program: &'static Program,
-    checker: &'a mut CheckerHandle,
-    call_graph: Arc<ProjectCallGraph>,
-    field_index: Arc<FieldWriteIndex>,
-    models: &'a [InstanceModelInput],
+pub struct InstanceResolver<'a> {
+    pub cwd: &'a str,
+    pub program: &'static Program,
+    pub checker: &'a mut CheckerHandle,
+    pub call_graph: Arc<ProjectCallGraph>,
+    pub field_index: Arc<FieldWriteIndex>,
+    pub package_impl_cache: PackageImplCache,
+    pub models: &'a [InstanceModelInput],
 }
 
 impl InstanceResolver<'_> {
     fn resolve_target(&mut self, node: P<Node>) -> TraceOutcome {
         let mut active = Vec::new();
         let mut out = self.resolve_node(node, &[], node, 0, &mut active);
+        out.origins
+            .sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
+        out
+    }
+
+    pub fn resolve_with_stack(&mut self, node: P<Node>, call_stack: &[CallFrame]) -> TraceOutcome {
+        let mut active = Vec::new();
+        let mut out = self.resolve_node(node, call_stack, node, 0, &mut active);
         out.origins
             .sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
         out
@@ -1553,6 +1569,10 @@ impl InstanceResolver<'_> {
         TraceOutcome::default()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Resolves source callees, package implementations, closure callees, and fallback models."
+    )]
     fn resolve_call_expression(
         &mut self,
         call_node: P<Node>,
@@ -1593,10 +1613,13 @@ impl InstanceResolver<'_> {
         if !outcome.targets.is_empty() {
             let mut combined = TraceOutcome::default();
             for target in outcome.targets {
-                let sub = if let Some(fn_node) = target.fn_node
-                    && fn_node.body().is_some()
-                    && !is_external_declaration(self.program, fn_node)
-                {
+                let has_source_body = target.fn_node.is_some_and(|fn_node| {
+                    fn_node.body().is_some()
+                        && !get_source_file_of_node(fn_node)
+                            .is_some_and(|sf| sf.is_declaration_file())
+                });
+                let sub = if has_source_body {
+                    let fn_node = target.fn_node.expect("checked has_source_body");
                     self.enter_source_function(
                         call_node,
                         fn_node,
@@ -1607,13 +1630,35 @@ impl InstanceResolver<'_> {
                         active,
                     )
                 } else {
-                    self.resolve_external_or_unbodied_target(
+                    match resolve_impl_for_call_target(
+                        &self.package_impl_cache,
+                        self.cwd,
+                        self.program,
+                        self.checker,
                         call_node,
-                        target.decl_node,
-                        call_stack,
-                        depth,
-                        active,
-                    )
+                        Some(target.decl_node),
+                        target.fn_node,
+                    ) {
+                        PackageImplLookup::ResolvedExternal { fn_node, .. }
+                        | PackageImplLookup::SourceBody { fn_node, .. } => self
+                            .enter_source_function(
+                                call_node,
+                                fn_node,
+                                receiver_expr,
+                                target.name.as_deref(),
+                                call_stack,
+                                depth,
+                                active,
+                            ),
+                        lookup => self.resolve_external_or_unbodied_target_with_lookup(
+                            call_node,
+                            target.decl_node,
+                            Some(&lookup),
+                            call_stack,
+                            depth,
+                            active,
+                        ),
+                    }
                 };
                 combined.merge(sub);
             }
@@ -1686,6 +1731,12 @@ impl InstanceResolver<'_> {
         }
 
         let mut combined = TraceOutcome::default();
+        if let Some(missing_gap) =
+            check_call_missing_package_gap(self.program, self.checker, self.cwd, call_node)
+        {
+            combined.push_gap(missing_gap);
+            return combined;
+        }
         for gap in outcome_gaps {
             combined.push_gap(gap);
         }
@@ -1815,6 +1866,51 @@ impl InstanceResolver<'_> {
         depth: usize,
         active: &mut Vec<VisitKey>,
     ) -> TraceOutcome {
+        let lookup = resolve_impl_for_call_target(
+            &self.package_impl_cache,
+            self.cwd,
+            self.program,
+            self.checker,
+            call_node,
+            Some(decl),
+            None,
+        );
+        if let PackageImplLookup::ResolvedExternal { fn_node, .. }
+        | PackageImplLookup::SourceBody { fn_node, .. } = lookup
+        {
+            let receiver_expr = call_node
+                .expression()
+                .map(unwrap_expr_wrappers)
+                .and_then(extract_call_receiver);
+            return self.enter_source_function(
+                call_node,
+                fn_node,
+                receiver_expr,
+                decl.name().and_then(node_text).as_deref(),
+                call_stack,
+                depth,
+                active,
+            );
+        }
+        self.resolve_external_or_unbodied_target_with_lookup(
+            call_node,
+            decl,
+            Some(&lookup),
+            call_stack,
+            depth,
+            active,
+        )
+    }
+
+    fn resolve_external_or_unbodied_target_with_lookup(
+        &mut self,
+        call_node: P<Node>,
+        decl: P<Node>,
+        lookup: Option<&PackageImplLookup>,
+        call_stack: &[CallFrame],
+        depth: usize,
+        active: &mut Vec<VisitKey>,
+    ) -> TraceOutcome {
         let call_loc = node_location_rel(self.cwd, call_node);
         let meta = collect_callee_decl_metadata(self.cwd, self.checker, decl, call_node);
 
@@ -1837,23 +1933,40 @@ impl InstanceResolver<'_> {
                 active,
             ),
             ModelMatchOutcome::NoMatch => {
-                let is_ext = is_external_declaration(self.program, decl);
-                let (kind, message) = if is_ext {
-                    (
+                let (kind, message) = match lookup {
+                    Some(PackageImplLookup::MissingPackage { message, .. }) => {
+                        ("missing-package", message.clone())
+                    }
+                    Some(PackageImplLookup::Ambiguous { message, .. }) => {
+                        ("ambiguous-package-implementation", message.clone())
+                    }
+                    Some(PackageImplLookup::DeclarationOnly { message, .. }) => (
                         "missing-instance-model",
                         format!(
-                            "External declaration '{}' has no source implementation body and no matching project model.",
+                            "{message} No matching project model is configured for '{}'.",
                             meta.display_label
                         ),
-                    )
-                } else {
-                    (
-                        "dynamic-callee",
-                        format!(
-                            "Call target '{}' has no static implementation body and no matching project model.",
-                            meta.display_label
-                        ),
-                    )
+                    ),
+                    _ => {
+                        let is_ext = is_external_declaration(self.program, decl);
+                        if is_ext {
+                            (
+                                "missing-instance-model",
+                                format!(
+                                    "External declaration '{}' has no source implementation body and no matching project model.",
+                                    meta.display_label
+                                ),
+                            )
+                        } else {
+                            (
+                                "dynamic-callee",
+                                format!(
+                                    "Call target '{}' has no static implementation body and no matching project model.",
+                                    meta.display_label
+                                ),
+                            )
+                        }
+                    }
                 };
                 TraceOutcome {
                     origins: Vec::new(),
@@ -2639,7 +2752,7 @@ fn match_timeline_order(
     TimelineMatch::DifferentFunction
 }
 
-fn extract_call_receiver(unwrapped_callee: P<Node>) -> Option<P<Node>> {
+pub fn extract_call_receiver(unwrapped_callee: P<Node>) -> Option<P<Node>> {
     match unwrapped_callee.kind() {
         Kind::PropertyAccessExpression => Some(
             unwrapped_callee
@@ -2720,6 +2833,7 @@ pub fn run_resolve_instances(
     let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
     let field_index = get_or_build_field_index(snapshot, project_id, program);
     let cwd = snapshot.cwd.clone();
+    let package_impl_cache = snapshot.package_impl_cache.clone();
 
     let mut outcomes = Vec::with_capacity(target_nodes.len());
     {
@@ -2729,6 +2843,7 @@ pub fn run_resolve_instances(
             checker,
             call_graph,
             field_index,
+            package_impl_cache,
             models,
         };
         for (target_id, node) in target_nodes {
