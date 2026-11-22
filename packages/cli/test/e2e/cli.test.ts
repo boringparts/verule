@@ -1358,4 +1358,166 @@ void test("runs the independently deployed CLI with its production SDK and engin
       sessionChild.kill("SIGKILL");
     }
   }
+
+  // 7. Deployed CLI E2E for inline-ignore suppression, explain, unused exit 1, and ambiguity
+  using inlineHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-inline-ignore-host-"),
+  );
+  mkdirSync(join(inlineHost.path, "src"), { recursive: true });
+  mkdirSync(join(inlineHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(inlineHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(inlineHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(inlineHost.path, "verule.config.ts"),
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "",
+      "const noLegacyCall = defineRule({",
+      '  id: "no-legacy-call",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "    for (const call of calls) {",
+      '      if (call.text.startsWith("legacy(")) {',
+      "        ctx.report({",
+      "          at: call.location,",
+      '          message: "legacy() is deprecated",',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [noLegacyCall],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): void;",
+      "",
+      "export function run(): void {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  legacy("one");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const inlineClean = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineClean.status, 0, inlineClean.stderr);
+  const inlineCleanEnv = JSON.parse(inlineClean.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineCleanEnv.variant, "clean");
+  assert.deepEqual(inlineCleanEnv.data.diagnostics, []);
+
+  const inlineExplain = invoke(
+    inlineHost.path,
+    "check",
+    "--rule",
+    "no-legacy-call",
+    "--at",
+    "src/entry.ts:5:3",
+    "--output",
+    "json",
+  );
+  assert.equal(inlineExplain.status, 0, inlineExplain.stderr);
+  const inlineExplainEnv = JSON.parse(inlineExplain.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineExplainEnv.data.explanation?.status,
+    "suppressed_by_ignore",
+  );
+  assert.equal(
+    inlineExplainEnv.data.explanation?.inlineIgnore?.reason,
+    "Approved temporary bridge.",
+  );
+
+  // Fix violation while keeping directive -> exit 1 with unused directive finding
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineUnused = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineUnused.status, 1, inlineUnused.stderr);
+  const inlineUnusedEnv = JSON.parse(inlineUnused.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineUnusedEnv.variant, "findings");
+  assert.equal(inlineUnusedEnv.data.diagnostics.length, 1);
+  assert.equal(
+    inlineUnusedEnv.data.diagnostics[0]?.ruleId,
+    sdk.INLINE_IGNORE_RULE_ID,
+  );
+
+  // Two distinct calls on same line -> ambiguous diagnostic + both violations retained
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): number;",
+      "",
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  return legacy("a") + legacy("b");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineAmbiguous = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineAmbiguous.status, 1, inlineAmbiguous.stderr);
+  const inlineAmbiguousEnv = JSON.parse(inlineAmbiguous.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === "no-legacy-call",
+    ).length,
+    2,
+  );
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === sdk.INLINE_IGNORE_RULE_ID,
+    ).length,
+    1,
+  );
 });

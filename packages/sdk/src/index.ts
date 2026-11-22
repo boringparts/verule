@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
+export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {
   defineConfig,
@@ -85,6 +86,8 @@ export {
   type ExplainStatus,
   type FindSyntaxOptions,
   type Gap,
+  type InlineIgnoreEntry,
+  type InlineIgnoreStatus,
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
