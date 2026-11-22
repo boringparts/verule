@@ -1,3 +1,4 @@
+mod call_effects;
 mod calls_values;
 mod cfg;
 mod directives;

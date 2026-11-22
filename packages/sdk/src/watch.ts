@@ -14,6 +14,7 @@ import {
   VeruleExecutionError,
   type AnalysisSession,
   type CheckReport,
+  type FactConflictDetails,
   type MemoryStats,
   type NormalizedVeruleConfig,
   type ObserveLimitInput,
@@ -33,6 +34,7 @@ import {
 export type WorkspaceFailureInfo = {
   readonly code: VeruleErrorCode;
   readonly message: string;
+  readonly conflict?: FactConflictDetails;
 };
 
 export type WorkspaceControllerOptions = {
@@ -78,7 +80,11 @@ function hashFileContent(absPath: string): string | undefined {
 
 export function toExecutionErrorInfo(err: unknown): WorkspaceFailureInfo {
   if (err instanceof VeruleExecutionError) {
-    return { code: err.code, message: err.message };
+    return {
+      code: err.code,
+      message: err.message,
+      ...(err.conflict !== undefined ? { conflict: err.conflict } : {}),
+    };
   }
   return {
     code: "ENGINE_ERROR",
@@ -687,7 +693,13 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           await applyPathsInternal(candidates);
         }
         if (lastFailure !== undefined) {
-          throw new VeruleExecutionError(lastFailure.code, lastFailure.message);
+          throw new VeruleExecutionError(
+            lastFailure.code,
+            lastFailure.message,
+            lastFailure.conflict !== undefined
+              ? { conflict: lastFailure.conflict }
+              : undefined,
+          );
         }
         if (!session) {
           throw new VeruleExecutionError(
@@ -859,6 +871,7 @@ export async function* watchProject(
         trigger: "initial",
         code: info.code,
         message: info.message,
+        ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
       };
     }
 
@@ -879,6 +892,7 @@ export async function* watchProject(
           trigger: "change",
           code: info.code,
           message: info.message,
+          ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
         };
         continue;
       }
@@ -912,6 +926,7 @@ export async function* watchProject(
           trigger: "change",
           code: info.code,
           message: info.message,
+          ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
         };
       }
     }

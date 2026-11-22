@@ -232,6 +232,9 @@ importers:
 
   packages/acceptance:
     dependencies:
+      '@verule/adapter-drizzle':
+        specifier: workspace:*
+        version: link:../adapter-drizzle
       '@verule/adapter-zod':
         specifier: workspace:*
         version: link:../adapter-zod
@@ -241,6 +244,31 @@ importers:
       '@verule/engine':
         specifier: workspace:*
         version: link:../engine
+      '@verule/rules-reference':
+        specifier: workspace:*
+        version: link:../rules-reference
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  packages/adapter-drizzle:
+    dependencies:
       '@verule/sdk':
         specifier: workspace:*
         version: link:../sdk
@@ -318,6 +346,34 @@ importers:
         version: typescript@7.0.2
 
   packages/engine:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  packages/rules-reference:
+    dependencies:
+      '@verule/adapter-drizzle':
+        specifier: workspace:*
+        version: link:../adapter-drizzle
+      '@verule/adapter-zod':
+        specifier: workspace:*
+        version: link:../adapter-zod
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../sdk
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

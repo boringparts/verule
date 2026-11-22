@@ -8,6 +8,14 @@ import type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import type {
+  CallEffectsOptions,
+  CallEffectsResult,
+  CleanupModelOperation,
+  InstanceCleanupOptions,
+  InstanceCleanupScopeResult,
+  LifecycleEventBehavior,
+} from "./call-effects.ts";
+import type {
   CallTargetsResult,
   DeclarationCallersResult,
   ValuePropagationOptions,
@@ -59,14 +67,41 @@ export type VeruleErrorCode =
   | "SESSION_CLOSED"
   | "ENGINE_ERROR";
 
+export type FactConflictParty = {
+  readonly providerId: string;
+  readonly providers: readonly string[];
+  readonly conclusion: unknown;
+  readonly conclusionSummary: string;
+  readonly evidence: readonly Evidence[];
+};
+
+export type FactConflictDetails = {
+  readonly factTypeId: string;
+  readonly projectId: string;
+  readonly snapshotId: number;
+  readonly subjectHandleId: string;
+  readonly subjectLocation?: DiagnosticLocation;
+  readonly condition?: unknown;
+  readonly reason: string;
+  readonly parties: readonly [FactConflictParty, FactConflictParty];
+};
+
 /** Execution failure raised when analysis configuration, loading, queries, or rules fail. */
 export class VeruleExecutionError extends Error {
   readonly code: VeruleErrorCode;
+  readonly conflict?: FactConflictDetails;
 
-  constructor(code: VeruleErrorCode, message: string, options?: ErrorOptions) {
+  constructor(
+    code: VeruleErrorCode,
+    message: string,
+    options?: ErrorOptions & { readonly conflict?: FactConflictDetails },
+  ) {
     super(message, options);
     this.name = "VeruleExecutionError";
     this.code = code;
+    if (options?.conflict !== undefined) {
+      this.conflict = options.conflict;
+    }
   }
 }
 
@@ -271,6 +306,8 @@ export type Model = {
   readonly description?: string;
   readonly facts?: Readonly<Record<string, unknown>>;
   readonly instanceBehaviors?: readonly InstanceModelBehavior[];
+  readonly cleanupOperations?: readonly CleanupModelOperation[];
+  readonly lifecycleEvents?: readonly LifecycleEventBehavior[];
 };
 
 export type RuleIdentitySummary = {
@@ -376,6 +413,16 @@ export type ExplainCheckpointTrace = {
   readonly detail?: unknown;
 };
 
+export type ExplainCleanupPath = {
+  readonly instanceKey: string;
+  readonly allocationLocation?: DiagnosticLocation;
+  readonly scopeLocation: DiagnosticLocation;
+  readonly cleanupLocations: readonly DiagnosticLocation[];
+  readonly modelIds: readonly string[];
+  readonly summary: string;
+  readonly evidence: readonly Evidence[];
+};
+
 export type ExplainResult = {
   readonly ruleId: string;
   readonly target: SourceTarget;
@@ -390,7 +437,7 @@ export type ExplainResult = {
   readonly checkpoints: readonly ExplainCheckpointTrace[];
   readonly gaps: readonly Gap[];
   readonly providers: readonly string[];
-  readonly cleanupPaths: readonly unknown[];
+  readonly cleanupPaths: readonly ExplainCleanupPath[];
   readonly inlineIgnore?: {
     readonly matched: boolean;
     readonly ruleId?: string;
@@ -547,6 +594,12 @@ export type RuleContext = {
     instances: readonly InstanceRef[],
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedInstanceRow<S>[]>;
+  callEffects: (
+    options: CallEffectsOptions,
+  ) => Promise<readonly CallEffectsResult[]>;
+  instanceCleanup: (
+    options: InstanceCleanupOptions,
+  ) => Promise<readonly InstanceCleanupScopeResult[]>;
   facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
     factType: FactType<SubjectKind, Condition, Value>,
     options?: FactQueryOptions<NoInfer<SubjectKind>, NoInfer<Condition>>,
@@ -705,6 +758,7 @@ export type WatchFailureEvent = {
   readonly trigger: WatchTrigger;
   readonly code: VeruleErrorCode;
   readonly message: string;
+  readonly conflict?: FactConflictDetails;
 };
 
 export type WatchEvent = WatchReportEvent | WatchFailureEvent;

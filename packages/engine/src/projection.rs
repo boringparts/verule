@@ -16,6 +16,10 @@ use tsrs_scanner::{
     get_ecma_line_and_utf16_character_of_position, get_ecma_line_starts, get_token_pos_of_node,
 };
 
+use crate::call_effects::{
+    CallEffectsRow, EffectsModelInput, InstanceCleanupScopeRow, run_call_effects,
+    run_instance_cleanup,
+};
 use crate::calls_values::{
     CallTargetsRow, DeclarationCallersRow, ValuePropagationResultPayload, run_callees_of,
     run_callers_of, run_value_propagation,
@@ -70,6 +74,10 @@ impl<T: Serialize> Serialize for ProjectedField<T> {
             Self::Value(val) => val.serialize(serializer),
         }
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -149,6 +157,26 @@ pub enum QueryStep {
     },
     ResolveImplementations {
         targets: Vec<String>,
+    },
+    CallEffects {
+        targets: Vec<String>,
+        #[serde(default = "default_true", rename = "followCallbacks")]
+        follow_callbacks: bool,
+        #[serde(default = "default_true", rename = "includeReads")]
+        include_reads: bool,
+        #[serde(default = "default_true", rename = "includeWrites")]
+        include_writes: bool,
+        #[serde(default, rename = "maxDepth")]
+        max_depth: Option<usize>,
+        #[serde(default)]
+        models: Vec<EffectsModelInput>,
+    },
+    InstanceCleanup {
+        scopes: Vec<String>,
+        #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
+        models: Vec<EffectsModelInput>,
     },
 }
 
@@ -384,6 +412,12 @@ enum StepResult {
     },
     ResolveImplementations {
         items: Vec<ImplementationResolutionRow>,
+    },
+    CallEffects {
+        items: Vec<CallEffectsRow>,
+    },
+    InstanceCleanup {
+        items: Vec<InstanceCleanupScopeRow>,
     },
 }
 
@@ -753,6 +787,59 @@ fn execute_step(
             observer.record_step("resolveImplementations", step_start, items.len(), Vec::new());
             Ok(StepResult::ResolveImplementations { items })
         }
+        other @ (QueryStep::CallEffects { .. } | QueryStep::InstanceCleanup { .. }) => {
+            execute_effects_step(
+                snapshot, project_id, program, checker, other, step_start, observer,
+            )
+        }
+    }
+}
+
+fn execute_effects_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    step: QueryStep,
+    step_start: Option<Instant>,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    match step {
+        QueryStep::CallEffects {
+            targets,
+            follow_callbacks,
+            include_reads,
+            include_writes,
+            max_depth,
+            models,
+        } => {
+            let items = run_call_effects(
+                snapshot,
+                project_id,
+                program,
+                checker,
+                &targets,
+                follow_callbacks,
+                include_reads,
+                include_writes,
+                max_depth,
+                &models,
+            )?;
+            observer.record_step("callEffects", step_start, items.len(), Vec::new());
+            Ok(StepResult::CallEffects { items })
+        }
+        QueryStep::InstanceCleanup {
+            scopes,
+            targets,
+            models,
+        } => {
+            let items = run_instance_cleanup(
+                snapshot, project_id, program, checker, &scopes, &targets, &models,
+            )?;
+            observer.record_step("instanceCleanup", step_start, items.len(), Vec::new());
+            Ok(StepResult::InstanceCleanup { items })
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -1127,11 +1214,18 @@ fn run_find_syntax(
             .collect()
     });
 
+    let explicit_file_targeted = range.is_some() || file_filter.is_some();
     let mut source_files: Vec<(String, P<SourceFile>)> = program
         .get_source_files()
         .iter()
         .copied()
-        .filter(|&sf| is_project_source_file(program, sf))
+        .filter(|&sf| {
+            if explicit_file_targeted {
+                !program.is_source_file_default_library(sf.path())
+            } else {
+                is_project_source_file(program, sf)
+            }
+        })
         .filter_map(|sf| {
             let rel = relative_to_cwd(&snapshot.cwd, sf.file_name());
             if let Some(target_file) = &range_file
