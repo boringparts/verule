@@ -1,4 +1,5 @@
 {
+  "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME"],
   "globalDependencies": [
     "oxfmt.config.ts",
     "oxlint.config.ts",
