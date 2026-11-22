@@ -7,6 +7,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -2007,5 +2008,178 @@ void test("runs the independently deployed CLI with its production SDK and engin
       ["provider-a", "id=required"],
       ["provider-conflict", "id=optional"],
     ],
+  );
+
+  // 9. Deployed CLI conditional exports (`import` vs `require`) and declaration-only fallback
+  using pkgHost = mkdtempDisposableSync(join(tmpdir(), "verule-e2e-pkg-host-"));
+  mkdirSync(join(pkgHost.path, "node_modules/dual-pkg/dist"), {
+    recursive: true,
+  });
+  mkdirSync(join(pkgHost.path, "packages/esm/src"), { recursive: true });
+  mkdirSync(join(pkgHost.path, "packages/cjs/src"), { recursive: true });
+
+  writeFileSync(
+    join(pkgHost.path, "node_modules/dual-pkg/package.json"),
+    JSON.stringify({
+      name: "dual-pkg",
+      version: "1.0.0",
+      exports: {
+        ".": {
+          types: "./dist/index.d.ts",
+          import: "./dist/index.mjs",
+          require: "./dist/index.cjs",
+        },
+      },
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "node_modules/dual-pkg/dist/index.d.ts"),
+    "export declare function adaptValue<T extends object>(x: T): T;\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "node_modules/dual-pkg/dist/index.mjs"),
+    "export function adaptValue(x) { return x; }\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "node_modules/dual-pkg/dist/index.cjs"),
+    "exports.adaptValue = function(x) { return { ...x }; };\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/esm/package.json"),
+    JSON.stringify({ name: "e2e-esm", type: "module" }),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/esm/tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+      },
+      include: ["src/**/*"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/esm/src/app.ts"),
+    [
+      'import { adaptValue } from "dual-pkg";',
+      "export function run() {",
+      "  const x = { a: 1 };",
+      "  const y = adaptValue(x);",
+      "  return y;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/cjs/package.json"),
+    JSON.stringify({ name: "e2e-cjs", type: "commonjs" }),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/cjs/tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+      },
+      include: ["src/**/*"],
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(pkgHost.path, "packages/cjs/src/app.ts"),
+    [
+      'import dual = require("dual-pkg");',
+      "export function run() {",
+      "  const x = { a: 1 };",
+      "  const y = dual.adaptValue(x);",
+      "  return y;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const pkgConfigPath = join(pkgHost.path, "verule.config.mjs");
+  writeFileSync(
+    pkgConfigPath,
+    [
+      `import { defineConfig, defineRule, isSameInstance } from ${JSON.stringify(pathToFileURL(deployedSdkEntry).href)};`,
+      "const rule = defineRule({",
+      '  id: "e2e-package-behavior",',
+      "  run: async (ctx) => {",
+      '    const vars = await ctx.findSyntax({ kinds: ["VariableDeclaration"] });',
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      '    const xDecl = vars.find((v) => v.text.startsWith("x ="));',
+      '    const yDecl = vars.find((v) => v.text.startsWith("y ="));',
+      '    const callSyn = calls.find((c) => c.text.includes("adaptValue("));',
+      "    if (!xDecl?.initializer || !yDecl?.initializer || !callSyn) return;",
+      "    const [impl] = await ctx.resolveImplementations([callSyn.ref]);",
+      "    const [xInst, yInst] = await ctx.resolveInstances([xDecl.initializer, yDecl.initializer]);",
+      "    if (xInst?.instance && yInst?.instance && !isSameInstance(xInst.instance, yInst.instance)) {",
+      "      ctx.report({",
+      "        at: yDecl.location,",
+      '        message: "Package implementation creates a copy",',
+      "        evidence: [...yInst.evidence, ...(impl?.evidence ?? [])],",
+      "      });",
+      "    }",
+      "  },",
+      "});",
+      'export default defineConfig({ projects: ["packages/esm/tsconfig.json", "packages/cjs/tsconfig.json"], rules: [rule] });',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const pkgCheck1 = invoke(
+    pkgHost.path,
+    "check",
+    "--config",
+    pkgConfigPath,
+    "--output",
+    "json",
+  );
+  assert.equal(pkgCheck1.status, 1, pkgCheck1.stderr);
+  const pkgData1 = (
+    JSON.parse(pkgCheck1.stdout) as { data: import("@verule/sdk").CheckReport }
+  ).data;
+  assert.equal(pkgData1.diagnostics.length, 1);
+  assert.equal(pkgData1.diagnostics[0]!.at.file, "packages/cjs/src/app.ts");
+  assert.ok(
+    pkgData1.diagnostics[0]!.evidence.some(
+      (e) => e.at?.file === "node_modules/dual-pkg/dist/index.cjs",
+    ),
+  );
+  assert.ok(
+    pkgData1.fileOrigins.every((o) => !o.file.includes("node_modules/")),
+  );
+
+  unlinkSync(join(pkgHost.path, "node_modules/dual-pkg/dist/index.mjs"));
+  unlinkSync(join(pkgHost.path, "node_modules/dual-pkg/dist/index.cjs"));
+  const pkgCheck2 = invoke(
+    pkgHost.path,
+    "check",
+    "--config",
+    pkgConfigPath,
+    "--output",
+    "json",
+  );
+  assert.equal(pkgCheck2.status, 0, pkgCheck2.stderr);
+  const pkgData2 = (
+    JSON.parse(pkgCheck2.stdout) as { data: import("@verule/sdk").CheckReport }
+  ).data;
+  assert.ok(pkgData2.gaps.some((g) => g.kind === "missing-instance-model"));
+  assert.ok(
+    pkgData2.gaps.some((g) => g.kind === "missing-package-implementation"),
   );
 });

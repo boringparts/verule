@@ -616,6 +616,7 @@ struct EffectsEngine<'a> {
     instance_models: Vec<InstanceModelInput>,
     models: &'a [EffectsModelInput],
     field_index: Arc<crate::instance_identity::FieldWriteIndex>,
+    package_impl_cache: crate::package_impl::PackageImplCache,
     cleanup_index: Option<CleanupProjectIndex>,
 }
 
@@ -644,6 +645,7 @@ impl<'a> EffectsEngine<'a> {
             instance_models,
             models,
             field_index,
+            package_impl_cache: snapshot.package_impl_cache.clone(),
             cleanup_index,
         }
     }
@@ -659,6 +661,7 @@ impl<'a> EffectsEngine<'a> {
             checker: self.checker,
             call_graph: Arc::clone(&self.call_graph),
             field_index: Arc::clone(&self.field_index),
+            package_impl_cache: self.package_impl_cache.clone(),
             models: &self.instance_models,
         };
         resolver.resolve_with_stack(expr, call_stack).origins
@@ -686,6 +689,7 @@ impl<'a> EffectsEngine<'a> {
             checker: self.checker,
             call_graph: Arc::clone(&self.call_graph),
             field_index: Arc::clone(&self.field_index),
+            package_impl_cache: self.package_impl_cache.clone(),
             models: &self.instance_models,
         }
         .resolve_with_stack(expr, call_stack);

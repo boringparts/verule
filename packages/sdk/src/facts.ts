@@ -125,6 +125,7 @@ export type AdapterContext = {
   syntaxOf: RuleContext["syntaxOf"];
   callersOf: RuleContext["callersOf"];
   calleesOf: RuleContext["calleesOf"];
+  resolveImplementations: RuleContext["resolveImplementations"];
   valuePropagation: RuleContext["valuePropagation"];
   callEffects: RuleContext["callEffects"];
   instanceCleanup: RuleContext["instanceCleanup"];

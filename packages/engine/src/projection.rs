@@ -30,6 +30,7 @@ use crate::instance_identity::{
     run_project_instances, run_resolve_instances,
 };
 use crate::observe::{EngineStepDetail, ObserveCollector};
+use crate::package_impl::{ImplementationResolutionRow, run_resolve_implementations};
 use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
 use crate::serve::{
     BranchCoverageItem, FunctionBranchesItem, HandlePayload, RpcErr, SnapshotState,
@@ -153,6 +154,9 @@ pub enum QueryStep {
         targets: Vec<String>,
         #[serde(default)]
         select: Option<InstanceSelect>,
+    },
+    ResolveImplementations {
+        targets: Vec<String>,
     },
     CallEffects {
         targets: Vec<String>,
@@ -405,6 +409,9 @@ enum StepResult {
     },
     ProjectInstances {
         items: Vec<InstanceProjectionRow>,
+    },
+    ResolveImplementations {
+        items: Vec<ImplementationResolutionRow>,
     },
     CallEffects {
         items: Vec<CallEffectsRow>,
@@ -773,6 +780,17 @@ fn execute_step(
                 run_project_instances(snapshot, project_id, &targets, &select.unwrap_or_default())?;
             observer.record_step("projectInstances", step_start, items.len(), Vec::new());
             Ok(StepResult::ProjectInstances { items })
+        }
+        QueryStep::ResolveImplementations { targets } => {
+            let items =
+                run_resolve_implementations(snapshot, project_id, program, checker, &targets)?;
+            observer.record_step(
+                "resolveImplementations",
+                step_start,
+                items.len(),
+                Vec::new(),
+            );
+            Ok(StepResult::ResolveImplementations { items })
         }
         other @ (QueryStep::CallEffects { .. } | QueryStep::InstanceCleanup { .. }) => {
             execute_effects_step(
