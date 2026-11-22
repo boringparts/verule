@@ -179,34 +179,34 @@ pub struct FieldWriteIndex {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct CallFrame {
-    call_node: P<Node>,
-    callee_fn: Option<P<Node>>,
-    receiver_expr: Option<P<Node>>,
+pub struct CallFrame {
+    pub call_node: P<Node>,
+    pub callee_fn: Option<P<Node>>,
+    pub receiver_expr: Option<P<Node>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct VisitKey {
+pub struct VisitKey {
     node: P<Node>,
     call_stack: Vec<P<Node>>,
     field_name: Option<String>,
 }
 
 #[derive(Clone)]
-struct ResolvedOrigin {
-    instance_key: String,
-    origin_kind: &'static str,
-    origin_node: Option<P<Node>>,
-    allocation_location: Option<SourceLocation>,
-    model_id: Option<String>,
-    evidence: Vec<EvidenceItem>,
-    captured_stack: Vec<CallFrame>,
+pub struct ResolvedOrigin {
+    pub instance_key: String,
+    pub origin_kind: &'static str,
+    pub origin_node: Option<P<Node>>,
+    pub allocation_location: Option<SourceLocation>,
+    pub model_id: Option<String>,
+    pub evidence: Vec<EvidenceItem>,
+    pub captured_stack: Vec<CallFrame>,
 }
 
 #[derive(Default)]
-struct TraceOutcome {
-    origins: Vec<ResolvedOrigin>,
-    gaps: Vec<GapItem>,
+pub struct TraceOutcome {
+    pub origins: Vec<ResolvedOrigin>,
+    pub gaps: Vec<GapItem>,
 }
 
 impl TraceOutcome {
@@ -480,7 +480,7 @@ fn select_reaching_writes(mut writes: Vec<VarWriteSite>, anchor: P<Node>) -> Vec
         .collect()
 }
 
-fn is_external_declaration(program: &'static Program, decl: P<Node>) -> bool {
+pub fn is_external_declaration(program: &'static Program, decl: P<Node>) -> bool {
     get_source_file_of_node(decl)
         .is_some_and(|sf| sf.is_declaration_file() || !is_project_source_file(program, sf))
 }
@@ -509,20 +509,20 @@ fn module_matches(filter: &str, rel_path: &str, abs_path: &str) -> bool {
     rel_path.starts_with(&format!("{filter}/")) || rel_path.contains(&format!("/{filter}/"))
 }
 
-struct CalleeDeclMetadata {
-    member_name: Option<String>,
-    container_names: Vec<String>,
-    qualified_names: Vec<String>,
-    display_label: String,
-    rel_file: String,
-    abs_file: String,
+pub struct CalleeDeclMetadata {
+    pub member_name: Option<String>,
+    pub container_names: Vec<String>,
+    pub qualified_names: Vec<String>,
+    pub display_label: String,
+    pub rel_file: String,
+    pub abs_file: String,
 }
 
 fn strip_generic_args(raw: &str) -> &str {
     raw.split('<').next().unwrap_or(raw).trim()
 }
 
-fn collect_callee_decl_metadata(
+pub fn collect_callee_decl_metadata(
     cwd: &str,
     checker: &mut CheckerHandle,
     decl: P<Node>,
@@ -632,7 +632,10 @@ fn collect_callee_decl_metadata(
     }
 }
 
-fn score_model_match(rule: &InstanceModelMatchInput, meta: &CalleeDeclMetadata) -> Option<usize> {
+pub fn score_model_match(
+    rule: &InstanceModelMatchInput,
+    meta: &CalleeDeclMetadata,
+) -> Option<usize> {
     let mut score = 0;
 
     if let Some(ref module_filter) = rule.module {
@@ -737,19 +740,27 @@ fn prepend_step(origins: &mut [ResolvedOrigin], step: &EvidenceItem) {
     }
 }
 
-struct InstanceResolver<'a> {
-    cwd: &'a str,
-    program: &'static Program,
-    checker: &'a mut CheckerHandle,
-    call_graph: Arc<ProjectCallGraph>,
-    field_index: Arc<FieldWriteIndex>,
-    models: &'a [InstanceModelInput],
+pub struct InstanceResolver<'a> {
+    pub cwd: &'a str,
+    pub program: &'static Program,
+    pub checker: &'a mut CheckerHandle,
+    pub call_graph: Arc<ProjectCallGraph>,
+    pub field_index: Arc<FieldWriteIndex>,
+    pub models: &'a [InstanceModelInput],
 }
 
 impl InstanceResolver<'_> {
     fn resolve_target(&mut self, node: P<Node>) -> TraceOutcome {
         let mut active = Vec::new();
         let mut out = self.resolve_node(node, &[], node, 0, &mut active);
+        out.origins
+            .sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
+        out
+    }
+
+    pub fn resolve_with_stack(&mut self, node: P<Node>, call_stack: &[CallFrame]) -> TraceOutcome {
+        let mut active = Vec::new();
+        let mut out = self.resolve_node(node, call_stack, node, 0, &mut active);
         out.origins
             .sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
         out
@@ -2639,7 +2650,7 @@ fn match_timeline_order(
     TimelineMatch::DifferentFunction
 }
 
-fn extract_call_receiver(unwrapped_callee: P<Node>) -> Option<P<Node>> {
+pub fn extract_call_receiver(unwrapped_callee: P<Node>) -> Option<P<Node>> {
     match unwrapped_callee.kind() {
         Kind::PropertyAccessExpression => Some(
             unwrapped_callee

@@ -85,6 +85,22 @@ impl CoverageStatus {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CleanupCfgStatus {
+    Covered,
+    Partial,
+    NotCleaned,
+    Unknown,
+}
+
+pub struct CleanupCfgOutcome {
+    pub status: CleanupCfgStatus,
+    pub cleaned_on_all_paths: bool,
+    pub cleaned_on_any_path: bool,
+    pub evidence: Vec<EvidenceItem>,
+    pub gaps: Vec<GapItem>,
+}
+
 pub struct CoverageOutcome {
     pub status: CoverageStatus,
     pub evidence: Vec<EvidenceItem>,
@@ -281,6 +297,136 @@ impl FunctionCfg {
             evidence,
             gaps: Vec::new(),
         }
+    }
+
+    pub fn evaluate_cleanup_coverage(
+        &self,
+        disposal_nodes: &[P<Node>],
+        dynamic_nodes: &[P<Node>],
+        scope_location: &SourceLocation,
+    ) -> CleanupCfgOutcome {
+        let mut disposal_vertices = FxHashSet::default();
+        for &node in disposal_nodes {
+            if let Some(&v) = self.ast_to_cfg.get(&node) {
+                disposal_vertices.insert(v);
+            }
+        }
+        let mut dynamic_vertices = FxHashSet::default();
+        for &node in dynamic_nodes {
+            if let Some(&v) = self.ast_to_cfg.get(&node) {
+                dynamic_vertices.insert(v);
+            }
+        }
+
+        let reachable_all = self.reachable(&FxHashSet::default());
+        let cleaned_on_any_path = disposal_vertices.iter().any(|&v| reachable_all[v]);
+
+        if !self.gaps.is_empty() {
+            let evidence = self
+                .gaps
+                .iter()
+                .map(|g| EvidenceItem::simple("note", g.message.clone(), g.at.clone()))
+                .collect();
+            return CleanupCfgOutcome {
+                status: CleanupCfgStatus::Unknown,
+                cleaned_on_all_paths: false,
+                cleaned_on_any_path,
+                evidence,
+                gaps: self.gaps.clone(),
+            };
+        }
+
+        let reachable_without_disposal = self.reachable_blocking(&disposal_vertices);
+        if !reachable_without_disposal[0] {
+            return CleanupCfgOutcome {
+                status: CleanupCfgStatus::Covered,
+                cleaned_on_all_paths: true,
+                cleaned_on_any_path: true,
+                evidence: Vec::new(),
+                gaps: Vec::new(),
+            };
+        }
+
+        let has_dynamic_on_bypass = dynamic_vertices
+            .iter()
+            .any(|&v| reachable_without_disposal[v]);
+        let witness = self
+            .find_bypass_witness_blocking(&disposal_vertices)
+            .unwrap_or_default();
+        let evidence = self.build_bypass_evidence(&witness, scope_location);
+
+        let status = if has_dynamic_on_bypass {
+            CleanupCfgStatus::Unknown
+        } else if cleaned_on_any_path {
+            CleanupCfgStatus::Partial
+        } else {
+            CleanupCfgStatus::NotCleaned
+        };
+
+        CleanupCfgOutcome {
+            status,
+            cleaned_on_all_paths: false,
+            cleaned_on_any_path,
+            evidence,
+            gaps: Vec::new(),
+        }
+    }
+
+    fn reachable_blocking(&self, blocked_vertices: &FxHashSet<usize>) -> Vec<bool> {
+        let mut visited = vec![false; self.successors.len()];
+        let mut queue = VecDeque::new();
+        visited[self.entry] = true;
+        queue.push_back(self.entry);
+
+        while let Some(u) = queue.pop_front() {
+            if blocked_vertices.contains(&u) {
+                continue;
+            }
+            for &(v, _) in &self.successors[u] {
+                if !visited[v] {
+                    visited[v] = true;
+                    queue.push_back(v);
+                }
+            }
+        }
+        visited
+    }
+
+    fn find_bypass_witness_blocking(
+        &self,
+        blocked_vertices: &FxHashSet<usize>,
+    ) -> Option<Vec<EdgeKind>> {
+        let mut visited = vec![false; self.successors.len()];
+        let mut parent: Vec<Option<(usize, EdgeKind)>> = vec![None; self.successors.len()];
+        let mut queue = VecDeque::new();
+
+        visited[self.entry] = true;
+        queue.push_back(self.entry);
+
+        while let Some(u) = queue.pop_front() {
+            if u == 0 {
+                let mut edges = Vec::new();
+                let mut cursor = u;
+                while let Some((prev, edge)) = parent[cursor] {
+                    edges.push(edge);
+                    cursor = prev;
+                }
+                edges.reverse();
+                return Some(edges);
+            }
+            if blocked_vertices.contains(&u) {
+                continue;
+            }
+            for &(v, edge) in &self.successors[u] {
+                if !visited[v] {
+                    visited[v] = true;
+                    parent[v] = Some((u, edge));
+                    queue.push_back(v);
+                }
+            }
+        }
+
+        None
     }
 
     fn reachable(&self, cut_set: &FxHashSet<usize>) -> Vec<bool> {

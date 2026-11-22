@@ -8,6 +8,14 @@ import type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import type {
+  CallEffectsOptions,
+  CallEffectsResult,
+  CleanupModelOperation,
+  InstanceCleanupOptions,
+  InstanceCleanupScopeResult,
+  LifecycleEventBehavior,
+} from "./call-effects.ts";
+import type {
   CallTargetsResult,
   DeclarationCallersResult,
   ValuePropagationOptions,
@@ -267,6 +275,8 @@ export type Model = {
   readonly description?: string;
   readonly facts?: Readonly<Record<string, unknown>>;
   readonly instanceBehaviors?: readonly InstanceModelBehavior[];
+  readonly cleanupOperations?: readonly CleanupModelOperation[];
+  readonly lifecycleEvents?: readonly LifecycleEventBehavior[];
 };
 
 export type RuleIdentitySummary = {
@@ -372,6 +382,16 @@ export type ExplainCheckpointTrace = {
   readonly detail?: unknown;
 };
 
+export type ExplainCleanupPath = {
+  readonly instanceKey: string;
+  readonly allocationLocation?: DiagnosticLocation;
+  readonly scopeLocation: DiagnosticLocation;
+  readonly cleanupLocations: readonly DiagnosticLocation[];
+  readonly modelIds: readonly string[];
+  readonly summary: string;
+  readonly evidence: readonly Evidence[];
+};
+
 export type ExplainResult = {
   readonly ruleId: string;
   readonly target: SourceTarget;
@@ -386,7 +406,7 @@ export type ExplainResult = {
   readonly checkpoints: readonly ExplainCheckpointTrace[];
   readonly gaps: readonly Gap[];
   readonly providers: readonly string[];
-  readonly cleanupPaths: readonly unknown[];
+  readonly cleanupPaths: readonly ExplainCleanupPath[];
   readonly inlineIgnore?: {
     readonly matched: boolean;
     readonly ruleId?: string;
@@ -540,6 +560,12 @@ export type RuleContext = {
     instances: readonly InstanceRef[],
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedInstanceRow<S>[]>;
+  callEffects: (
+    options: CallEffectsOptions,
+  ) => Promise<readonly CallEffectsResult[]>;
+  instanceCleanup: (
+    options: InstanceCleanupOptions,
+  ) => Promise<readonly InstanceCleanupScopeResult[]>;
   facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
     factType: FactType<SubjectKind, Condition, Value>,
     options?: FactQueryOptions<NoInfer<SubjectKind>, NoInfer<Condition>>,
