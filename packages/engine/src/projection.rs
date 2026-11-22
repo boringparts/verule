@@ -15,10 +15,8 @@ use tsrs_scanner::{
 };
 
 use crate::observe::{EngineStepDetail, ObserveCollector};
-use crate::serve::{
-    HandlePayload, RpcErr, SnapshotState, is_project_source_file, relative_to_cwd,
-    resolve_against_cwd,
-};
+use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
+use crate::serve::{HandlePayload, RpcErr, SnapshotState};
 
 /// Three-state projected field distinguishing omitted keys, explicit `null`, and present values.
 #[derive(Default)]
