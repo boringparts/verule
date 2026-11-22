@@ -65,10 +65,40 @@ const diagnosticSchema = z.object({
   projects: z.array(z.string()),
 });
 
+const compilerOptionsSummarySchema = z.object({
+  strict: z.boolean(),
+  allowJs: z.boolean(),
+  checkJs: z.boolean(),
+  composite: z.boolean(),
+  target: z.string().optional(),
+  module: z.string().optional(),
+  moduleResolution: z.string().optional(),
+  jsx: z.string().optional(),
+  paths: z.record(z.string(), z.array(z.string())),
+  customConditions: z.array(z.string()),
+});
+
 const projectSummarySchema = z.object({
   projectId: z.string(),
   configFile: z.string(),
+  entryConfig: z.string(),
+  entryChain: z.array(z.string()),
+  referencedBy: z.array(z.string()),
+  projectReferences: z.array(z.string()),
+  compilerOptions: compilerOptionsSummarySchema,
   sourceFiles: z.array(z.string()),
+});
+
+const sourceFileProjectOriginSchema = z.object({
+  projectId: z.string(),
+  configFile: z.string(),
+  entryConfig: z.string(),
+  entryChain: z.array(z.string()),
+});
+
+const sourceFileOriginSchema = z.object({
+  file: z.string(),
+  projects: z.array(sourceFileProjectOriginSchema),
 });
 
 const observationDetailEntrySchema = z.object({
@@ -185,6 +215,7 @@ const checkReportSchema = z.object({
   reportVersion: z.literal(REPORT_SCHEMA_VERSION),
   status: z.enum(["clean", "findings"]),
   projects: z.array(projectSummarySchema),
+  fileOrigins: z.array(sourceFileOriginSchema),
   diagnostics: z.array(diagnosticSchema),
   gaps: z.array(gapSchema),
   observation: observationSchema.optional(),
@@ -321,7 +352,45 @@ function toWireReport(report: CheckReport): WireCheckReport {
     projects: report.projects.map((project) => ({
       projectId: project.projectId,
       configFile: project.configFile,
+      entryConfig: project.entryConfig,
+      entryChain: [...project.entryChain],
+      referencedBy: [...project.referencedBy],
+      projectReferences: [...project.projectReferences],
+      compilerOptions: {
+        strict: project.compilerOptions.strict,
+        allowJs: project.compilerOptions.allowJs,
+        checkJs: project.compilerOptions.checkJs,
+        composite: project.compilerOptions.composite,
+        ...(project.compilerOptions.target !== undefined
+          ? { target: project.compilerOptions.target }
+          : {}),
+        ...(project.compilerOptions.module !== undefined
+          ? { module: project.compilerOptions.module }
+          : {}),
+        ...(project.compilerOptions.moduleResolution !== undefined
+          ? { moduleResolution: project.compilerOptions.moduleResolution }
+          : {}),
+        ...(project.compilerOptions.jsx !== undefined
+          ? { jsx: project.compilerOptions.jsx }
+          : {}),
+        paths: Object.fromEntries(
+          Object.entries(project.compilerOptions.paths).map(([key, vals]) => [
+            key,
+            [...vals],
+          ]),
+        ),
+        customConditions: [...project.compilerOptions.customConditions],
+      },
       sourceFiles: [...project.sourceFiles],
+    })),
+    fileOrigins: report.fileOrigins.map((origin) => ({
+      file: origin.file,
+      projects: origin.projects.map((proj) => ({
+        projectId: proj.projectId,
+        configFile: proj.configFile,
+        entryConfig: proj.entryConfig,
+        entryChain: [...proj.entryChain],
+      })),
     })),
     diagnostics: report.diagnostics.map((diag) => ({
       id: diag.id,
@@ -419,21 +488,53 @@ function appendExtrasText(lines: string[], report: WireCheckReport): void {
   }
 }
 
+function formatScopeLines(report: WireCheckReport): string[] {
+  const lines: string[] = [`Projects (${report.projects.length}):`];
+  for (const project of report.projects) {
+    const chain = project.entryChain.join(" -> ");
+    const flags = [
+      `strict=${project.compilerOptions.strict}`,
+      `allowJs=${project.compilerOptions.allowJs}`,
+      `checkJs=${project.compilerOptions.checkJs}`,
+      ...(project.compilerOptions.module !== undefined
+        ? [`module=${project.compilerOptions.module}`]
+        : []),
+      `files=${project.sourceFiles.length}`,
+    ];
+    const refsSuffix =
+      project.projectReferences.length > 0
+        ? `, references=[${project.projectReferences.join(", ")}]`
+        : "";
+    lines.push(
+      `  - ${project.configFile} (chain: ${chain}, ${flags.join(", ")}${refsSuffix})`,
+    );
+  }
+  lines.push(`Files (${report.fileOrigins.length}):`);
+  for (const origin of report.fileOrigins) {
+    const sources = origin.projects.map(
+      (proj) => `${proj.projectId} (via ${proj.entryChain.join(" -> ")})`,
+    );
+    lines.push(`  - ${origin.file} <- ${sources.join(", ")}`);
+  }
+  return lines;
+}
+
 function formatCheckCleanText(report: WireCheckReport) {
+  const scopeLines = formatScopeLines(report);
   const summary = `No violations found across ${report.projects.length} project(s).`;
   const extras: string[] = [];
   appendExtrasText(extras, report);
-  if (extras.length === 0) {
-    return text.line(summary);
-  }
-  return text.lines([summary, ...extras]);
+  const [first, ...rest] = [...scopeLines, summary, ...extras];
+  return first !== undefined
+    ? text.lines([first, ...rest])
+    : text.line(summary);
 }
 
 function formatCheckFindingsText(report: WireCheckReport) {
-  const lines: string[] = [];
+  const lines: string[] = formatScopeLines(report);
   for (const diag of report.diagnostics) {
     lines.push(
-      `${diag.at.file}:${diag.at.line}:${diag.at.column} [${diag.ruleId}] (${diag.id}) ${diag.message}`,
+      `${diag.at.file}:${diag.at.line}:${diag.at.column} [${diag.ruleId}] (${diag.id}) ${diag.message} [projects: ${diag.projects.join(", ")}]`,
     );
     for (const item of diag.evidence) {
       const locSuffix = item.at

@@ -142,10 +142,40 @@ export type Diagnostic = {
   readonly projects: readonly string[];
 };
 
+export type CompilerOptionsSummary = {
+  readonly strict: boolean;
+  readonly allowJs: boolean;
+  readonly checkJs: boolean;
+  readonly composite: boolean;
+  readonly target?: string;
+  readonly module?: string;
+  readonly moduleResolution?: string;
+  readonly jsx?: string;
+  readonly paths: Readonly<Record<string, readonly string[]>>;
+  readonly customConditions: readonly string[];
+};
+
 export type ProjectSummary = {
   readonly projectId: string;
   readonly configFile: string;
+  readonly entryConfig: string;
+  readonly entryChain: readonly string[];
+  readonly referencedBy: readonly string[];
+  readonly projectReferences: readonly string[];
+  readonly compilerOptions: CompilerOptionsSummary;
   readonly sourceFiles: readonly string[];
+};
+
+export type SourceFileProjectOrigin = {
+  readonly projectId: string;
+  readonly configFile: string;
+  readonly entryConfig: string;
+  readonly entryChain: readonly string[];
+};
+
+export type SourceFileOrigin = {
+  readonly file: string;
+  readonly projects: readonly SourceFileProjectOrigin[];
 };
 
 export type ObservationPhases = {
@@ -258,6 +288,7 @@ export type CheckReport = {
   readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
   readonly status: "clean" | "findings";
   readonly projects: readonly ProjectSummary[];
+  readonly fileOrigins: readonly SourceFileOrigin[];
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
   readonly observation?: ObservationReport;
@@ -366,6 +397,7 @@ export type RunCheckOptions = OpenSessionOptions & {
 export type AnalysisSession = {
   readonly snapshotId: number;
   readonly projects: readonly ProjectSummary[];
+  readonly fileOrigins: readonly SourceFileOrigin[];
   check: (
     optionsOrRules?: readonly Rule[] | SessionCheckOptions,
   ) => Promise<CheckReport>;

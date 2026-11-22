@@ -39,7 +39,7 @@
       "tags": ["work:lifecycle"]
     },
     "test": {
-      "dependsOn": [],
+      "dependsOn": ["^build"],
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]
