@@ -352,8 +352,12 @@ fn serves_list_branches_and_branch_coverage_statuses() {
 
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
-    let (snapshot_id, project_id, _) =
-        open_snapshot(&mut stdin, &mut reader, &cwd_str, &normalized(&tsconfig_path));
+    let (snapshot_id, project_id, _) = open_snapshot(
+        &mut stdin,
+        &mut reader,
+        &cwd_str,
+        &normalized(&tsconfig_path),
+    );
 
     let syntax_resp = rpc_call(
         &mut stdin,
@@ -405,7 +409,11 @@ fn serves_list_branches_and_branch_coverage_statuses() {
             }
         }),
     );
-    assert_eq!(branches_resp["ok"], json!(true), "listBranches failed: {branches_resp}");
+    assert_eq!(
+        branches_resp["ok"],
+        json!(true),
+        "listBranches failed: {branches_resp}"
+    );
     let branch_groups = branches_resp["result"]["results"][0]["items"]
         .as_array()
         .expect("branch groups");
@@ -470,7 +478,11 @@ fn serves_list_branches_and_branch_coverage_statuses() {
             }
         }),
     );
-    assert_eq!(cov_resp["ok"], json!(true), "branchCoverage failed: {cov_resp}");
+    assert_eq!(
+        cov_resp["ok"],
+        json!(true),
+        "branchCoverage failed: {cov_resp}"
+    );
     let results = cov_resp["result"]["results"].as_array().expect("results");
     assert_eq!(results[0]["items"][0]["status"], json!("bypass"));
     assert_eq!(results[1]["items"][0]["status"], json!("covered"));
@@ -479,6 +491,153 @@ fn serves_list_branches_and_branch_coverage_statuses() {
     assert_eq!(
         results[3]["items"][0]["gaps"][0]["kind"],
         json!("unmodeled-try-catch")
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn emits_observation_metrics_in_summary_and_omits_when_off() {
+    let temp = TempDirGuard::new("verule-engine-serve-observe-summary");
+    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+
+    let open_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 1,
+            "method": "snapshot.open",
+            "params": { "cwd": cwd_str, "entries": [tsconfig_str] },
+            "observe": { "mode": "summary" }
+        }),
+    );
+    assert_eq!(open_resp["ok"], json!(true), "open failed: {open_resp}");
+    assert!(open_resp["metrics"]["durationMs"].as_f64().is_some());
+    assert!(open_resp["metrics"]["encodeMs"].as_f64().is_some());
+    let snapshot_id = open_resp["result"]["snapshotId"]
+        .as_u64()
+        .expect("snapshotId");
+    let project_id = open_resp["result"]["projects"][0]["projectId"]
+        .as_str()
+        .expect("projectId")
+        .to_string();
+
+    let summary_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "findSyntax", "kinds": ["CallExpression"] }]
+            },
+            "observe": { "mode": "summary" }
+        }),
+    );
+    assert_eq!(summary_resp["ok"], json!(true));
+    let summary_step = &summary_resp["metrics"]["steps"][0];
+    assert_eq!(summary_step["op"], json!("findSyntax"));
+    assert_eq!(summary_step["provider"], json!("engine"));
+    assert_eq!(summary_step["cacheStatus"], json!("computed"));
+    assert!(summary_step["candidateCount"].as_u64().unwrap_or(0) >= 2);
+    assert!(summary_step.get("details").is_none());
+    assert_eq!(summary_resp["metrics"]["truncated"], json!(false));
+    assert_eq!(summary_resp["metrics"]["droppedCount"], json!(0));
+
+    let off_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "findSyntax", "kinds": ["CallExpression"] }]
+            },
+            "observe": { "mode": "off" }
+        }),
+    );
+    assert_eq!(off_resp["ok"], json!(true));
+    assert!(off_resp.get("metrics").is_none());
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn truncates_observation_details_by_items_and_bytes() {
+    let temp = TempDirGuard::new("verule-engine-serve-observe-limit");
+    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+
+    let (snapshot_id, project_id, _) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+
+    let item_limited_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "findSyntax", "kinds": ["CallExpression"] }]
+            },
+            "observe": { "mode": "detail", "maxItems": 1 }
+        }),
+    );
+    assert_eq!(item_limited_resp["ok"], json!(true));
+    assert_eq!(item_limited_resp["metrics"]["truncated"], json!(true));
+    assert!(
+        item_limited_resp["metrics"]["droppedCount"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+    let details = item_limited_resp["metrics"]["steps"][0]["details"]
+        .as_array()
+        .expect("detail items array");
+    assert_eq!(details.len(), 1);
+
+    let byte_limited_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "findSyntax", "kinds": ["CallExpression"] }]
+            },
+            "observe": { "mode": "detail", "maxBytes": 120 }
+        }),
+    );
+    assert_eq!(byte_limited_resp["ok"], json!(true));
+    assert_eq!(byte_limited_resp["metrics"]["truncated"], json!(true));
+    assert!(
+        byte_limited_resp["metrics"]["droppedCount"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
     );
 
     drop(stdin);

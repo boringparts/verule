@@ -3,6 +3,7 @@ use std::{
     io::{self, Write},
     path::Path,
     sync::Arc,
+    time::Instant,
 };
 
 use rustc_hash::FxHashMap;
@@ -24,6 +25,9 @@ use tsrs_vfs::{FS, bundled, osvfs};
 use crate::cfg::{
     EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
 };
+use crate::observe::{
+    EngineRpcMetrics, EngineStepDetail, ObserveCollector, ObserveRequestConfig, elapsed_ms,
+};
 
 #[derive(Deserialize)]
 struct RpcRequest {
@@ -31,6 +35,8 @@ struct RpcRequest {
     method: String,
     #[serde(default)]
     params: Value,
+    #[serde(default)]
+    observe: Option<ObserveRequestConfig>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +44,8 @@ struct RpcSuccessResponse<'a, T> {
     id: &'a Value,
     ok: bool,
     result: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<EngineRpcMetrics>,
 }
 
 #[derive(Serialize)]
@@ -368,20 +376,42 @@ impl EngineServer {
             }
         };
 
-        match self.dispatch(&request.method, request.params) {
-            Ok(result) => serde_json::to_string(&RpcSuccessResponse {
-                id: &request.id,
-                ok: true,
-                result,
-            })
-            .unwrap_or_else(|err| {
-                serialize_error(&request.id, "SERIALIZATION_ERROR", err.to_string())
-            }),
+        let mut observer = ObserveCollector::from_request(request.observe);
+        match self.dispatch(&request.method, request.params, &mut observer) {
+            Ok(result) => {
+                if observer.is_active() {
+                    let encode_start = Instant::now();
+                    let encoded = serde_json::to_string(&result);
+                    observer.add_encode_ms(elapsed_ms(encode_start));
+                    if let Err(err) = encoded {
+                        return serialize_error(
+                            &request.id,
+                            "SERIALIZATION_ERROR",
+                            err.to_string(),
+                        );
+                    }
+                }
+                let metrics = observer.finish();
+                serde_json::to_string(&RpcSuccessResponse {
+                    id: &request.id,
+                    ok: true,
+                    result,
+                    metrics,
+                })
+                .unwrap_or_else(|err| {
+                    serialize_error(&request.id, "SERIALIZATION_ERROR", err.to_string())
+                })
+            }
             Err(err) => serialize_error(&request.id, err.code, err.message),
         }
     }
 
-    fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, RpcErr> {
+    fn dispatch(
+        &mut self,
+        method: &str,
+        params: Value,
+        observer: &mut ObserveCollector,
+    ) -> Result<Value, RpcErr> {
         match method {
             "snapshot.open" => {
                 let parsed: SnapshotOpenParams = serde_json::from_value(params)
@@ -400,7 +430,7 @@ impl EngineServer {
             "query.batch" => {
                 let parsed: QueryBatchParams = serde_json::from_value(params)
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
-                let result = self.query_batch(parsed)?;
+                let result = self.query_batch(parsed, observer)?;
                 serde_json::to_value(result)
                     .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
             }
@@ -535,7 +565,11 @@ impl EngineServer {
         Ok(SnapshotReleaseResult { released: true })
     }
 
-    fn query_batch(&mut self, params: QueryBatchParams) -> Result<QueryBatchResult, RpcErr> {
+    fn query_batch(
+        &mut self,
+        params: QueryBatchParams,
+        observer: &mut ObserveCollector,
+    ) -> Result<QueryBatchResult, RpcErr> {
         let Some(snapshot) = self.snapshots.get_mut(&params.snapshot_id) else {
             return Err(RpcErr::new(
                 "STALE_SNAPSHOT",
@@ -560,6 +594,7 @@ impl EngineServer {
 
         let mut results = Vec::with_capacity(params.steps.len());
         for step in params.steps {
+            let step_start = observer.start_step();
             match step {
                 QueryStep::FindSyntax { files, kinds } => {
                     let items = run_find_syntax(
@@ -569,15 +604,65 @@ impl EngineServer {
                         files.as_deref(),
                         &kinds,
                     )?;
+                    let raw_details = if observer.is_detail() {
+                        items
+                            .iter()
+                            .map(|item| EngineStepDetail {
+                                kind: "candidate",
+                                file: Some(item.location.file.clone()),
+                                line: Some(item.location.line),
+                                column: Some(item.location.column),
+                                summary: format!("{} {}", item.kind, item.text),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    observer.record_step("findSyntax", step_start, items.len(), raw_details);
                     results.push(StepResult::FindSyntax { items });
                 }
                 QueryStep::TypeAtLocation { targets } => {
                     let items =
                         run_type_at_location(snapshot, &params.project_id, program, &targets)?;
+                    let raw_details = if observer.is_detail() {
+                        items
+                            .iter()
+                            .map(|item| EngineStepDetail {
+                                kind: "typeAtLocation",
+                                file: None,
+                                line: None,
+                                column: None,
+                                summary: format!("{} -> {}", item.target, item.type_text),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    observer.record_step("typeAtLocation", step_start, items.len(), raw_details);
                     results.push(StepResult::TypeAtLocation { items });
                 }
                 QueryStep::ListBranches { targets } => {
                     let items = run_list_branches(snapshot, &params.project_id, &targets)?;
+                    let raw_details = if observer.is_detail() {
+                        items
+                            .iter()
+                            .map(|item| EngineStepDetail {
+                                kind: "listBranches",
+                                file: None,
+                                line: None,
+                                column: None,
+                                summary: format!(
+                                    "{} -> {} branch(es), {} gap(s)",
+                                    item.target,
+                                    item.branches.len(),
+                                    item.gaps.len()
+                                ),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    observer.record_step("listBranches", step_start, items.len(), raw_details);
                     results.push(StepResult::ListBranches { items });
                 }
                 QueryStep::BranchCoverage {
@@ -592,6 +677,21 @@ impl EngineServer {
                         &branches,
                         &targets,
                     )?;
+                    let raw_details = if observer.is_detail() {
+                        items
+                            .iter()
+                            .map(|item| EngineStepDetail {
+                                kind: "branchCoverage",
+                                file: None,
+                                line: None,
+                                column: None,
+                                summary: format!("{} -> {}", item.target, item.status),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    observer.record_step("branchCoverage", step_start, items.len(), raw_details);
                     results.push(StepResult::BranchCoverage { items });
                 }
             }

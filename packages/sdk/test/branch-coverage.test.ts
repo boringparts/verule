@@ -16,7 +16,7 @@ import {
   type SyntaxRef,
 } from "@verule/sdk";
 
-function _verifyBranchTypeContracts(
+function verifyBranchTypeContracts(
   ctx: RuleContext,
   syntaxRef: SyntaxRef,
   branchRef: BranchRef,
@@ -34,6 +34,8 @@ function _verifyBranchTypeContracts(
   // @ts-expect-error BranchRef cannot be passed to listBranches
   void ctx.listBranches([branchRef]);
 }
+
+void verifyBranchTypeContracts;
 
 function createTempProject(sourceText: string): string {
   const root = mkdtempSync(join(tmpdir(), "verule-branch-coverage-test-"));
@@ -235,7 +237,11 @@ function insideSpan(
 void describe("@verule/sdk branchCoverage", () => {
   void it("distinguishes covered early-return guard from bypass path via listBranches and branchCoverage", async () => {
     const root = createTempProject(SLICE_1_SOURCE);
-    const observed: Array<{ fn: string; status: string; evidenceCount: number }> = [];
+    const observed: Array<{
+      fn: string;
+      status: string;
+      evidenceCount: number;
+    }> = [];
 
     const rule = defineRule({
       id: "require-auth-before-execute",
@@ -283,7 +289,8 @@ void describe("@verule/sdk branchCoverage", () => {
             if (item.status === "bypass") {
               ctx.report({
                 at: executeCalls[0]!.location,
-                message: "execute() can be reached without passing authorization.",
+                message:
+                  "execute() can be reached without passing authorization.",
                 findingKey: "auth-bypass",
                 evidence: item.evidence,
               });
@@ -325,7 +332,9 @@ void describe("@verule/sdk branchCoverage", () => {
         const branchGroups = await ctx.listBranches(fns.map((fn) => fn.ref));
 
         const fnByName = (name: string) => {
-          const idx = fns.findIndex((fn) => fn.text.includes(`function ${name}(`));
+          const idx = fns.findIndex((fn) =>
+            fn.text.includes(`function ${name}(`),
+          );
           assert.ok(idx >= 0, `expected function ${name}`);
           const fn = fns[idx]!;
           const executeCall = calls.find(
@@ -344,10 +353,12 @@ void describe("@verule/sdk branchCoverage", () => {
         {
           const { fn, branches, executeCall } = fnByName("multiAuthIfElse");
           const apiKeyTrue = branches.find(
-            (b) => b.conditionText === "hasApiKey(req)" && b.direction === "true",
+            (b) =>
+              b.conditionText === "hasApiKey(req)" && b.direction === "true",
           )!;
           const sessionTrue = branches.find(
-            (b) => b.conditionText === "hasSession(req)" && b.direction === "true",
+            (b) =>
+              b.conditionText === "hasSession(req)" && b.direction === "true",
           )!;
 
           const [onlyApi] = await ctx.branchCoverage({
@@ -435,9 +446,8 @@ void describe("@verule/sdk branchCoverage", () => {
             targets: [executeCall.ref],
           });
           results["switchNoDefault:onlyBearer"] = onlyBearer!.status;
-          witnessMessages["switchNoDefault:onlyBearer"] = onlyBearer!.evidence.map(
-            (e) => e.message,
-          );
+          witnessMessages["switchNoDefault:onlyBearer"] =
+            onlyBearer!.evidence.map((e) => e.message);
         }
       },
     });
@@ -636,7 +646,8 @@ void describe("@verule/sdk branchCoverage", () => {
 
         // Querying the inner arrow function directly works
         const innerArrow = fns.find(
-          (fn) => fn.kind === "ArrowFunction" && fn.text.includes("execute(req)"),
+          (fn) =>
+            fn.kind === "ArrowFunction" && fn.text.includes("execute(req)"),
         )!;
         const [innerRes] = await ctx.branchCoverage({
           function: innerArrow.ref,

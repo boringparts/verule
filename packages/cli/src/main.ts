@@ -1,9 +1,14 @@
+import { performance } from "node:perf_hooks";
+
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
   getEngineVersion,
+  parseObserveLimit,
   runCheck,
   type CheckReport,
+  type ExplainResult,
+  type ObservationReport,
 } from "@verule/sdk";
 import {
   CliWriteError,
@@ -66,21 +71,248 @@ const projectSummarySchema = z.object({
   sourceFiles: z.array(z.string()),
 });
 
+const observationDetailEntrySchema = z.object({
+  kind: z.enum(["query", "checkpoint", "engineStep"]),
+  ruleId: z.string().optional(),
+  projectId: z.string().optional(),
+  provider: z.string().optional(),
+  name: z.string().optional(),
+  outcome: z.enum(["pass", "exclude", "info"]).optional(),
+  cacheStatus: z.enum(["computed", "reused"]).optional(),
+  candidateCount: z.number().int().nonnegative().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  at: locationSchema.optional(),
+  summary: z.string(),
+  detail: z.unknown().optional(),
+});
+
+const observationSchema = z.object({
+  mode: z.enum(["summary", "detail"]),
+  phases: z.object({
+    configAndOpenMs: z.number().nonnegative(),
+    engineQueryMs: z.number().nonnegative(),
+    ruleExecutionMs: z.number().nonnegative(),
+    totalMs: z.number().nonnegative(),
+  }),
+  rpc: z.object({
+    batches: z.number().int().nonnegative(),
+    queryBatches: z.number().int().nonnegative(),
+    bytesSent: z.number().int().nonnegative(),
+    bytesReceived: z.number().int().nonnegative(),
+  }),
+  overhead: z.object({
+    checkpointMs: z.number().nonnegative(),
+    encodeMs: z.number().nonnegative(),
+    writeMs: z.number().nonnegative(),
+  }),
+  queryCount: z.number().int().nonnegative(),
+  computedQueryCount: z.number().int().nonnegative(),
+  reusedQueryCount: z.number().int().nonnegative(),
+  candidateCount: z.number().int().nonnegative(),
+  checkpointCount: z.number().int().nonnegative(),
+  providers: z.array(z.string()),
+  limit: z
+    .object({
+      maxItems: z.number().int().nonnegative().optional(),
+      maxBytes: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+  truncated: z.boolean(),
+  droppedCount: z.number().int().nonnegative(),
+  details: z.array(observationDetailEntrySchema).optional(),
+});
+
+const explainQueryStepSchema = z.object({
+  queryIndex: z.number().int().positive(),
+  op: z.string(),
+  projectId: z.string(),
+  provider: z.string(),
+  cacheStatus: z.enum(["computed", "reused"]),
+  candidateCount: z.number().int().nonnegative(),
+  matchedTarget: z.boolean(),
+  durationMs: z.number().nonnegative(),
+  summary: z.string().optional(),
+  detail: z.unknown().optional(),
+});
+
+const explainCheckpointTraceSchema = z.object({
+  name: z.string(),
+  ruleId: z.string(),
+  projectId: z.string(),
+  outcome: z.enum(["pass", "exclude", "info"]),
+  at: locationSchema.optional(),
+  detail: z.unknown().optional(),
+});
+
+const explainResultSchema = z.object({
+  ruleId: z.string(),
+  target: z.object({
+    file: z.string(),
+    line: z.number().int().positive().optional(),
+    column: z.number().int().positive().optional(),
+  }),
+  status: z.enum([
+    "reported",
+    "excluded_by_checkpoint",
+    "excluded_by_query",
+    "not_in_candidates",
+    "target_not_in_project",
+    "suppressed_by_ignore",
+    "blocked_by_gap",
+    "covered_by_cleanup",
+    "rule_filtered",
+  ]),
+  inCandidates: z.boolean(),
+  summary: z.string(),
+  projectsChecked: z.array(z.string()),
+  matchingCandidates: z.array(locationSchema),
+  excludedByQuery: explainQueryStepSchema.optional(),
+  excludedByCheckpoint: explainCheckpointTraceSchema.optional(),
+  queries: z.array(explainQueryStepSchema),
+  checkpoints: z.array(explainCheckpointTraceSchema),
+  gaps: z.array(gapSchema),
+  providers: z.array(z.string()),
+  cleanupPaths: z.array(z.unknown()),
+  inlineIgnore: z
+    .object({
+      matched: z.boolean(),
+      reason: z.string().optional(),
+    })
+    .optional(),
+});
+
 const checkReportSchema = z.object({
   reportVersion: z.literal(REPORT_SCHEMA_VERSION),
   status: z.enum(["clean", "findings"]),
   projects: z.array(projectSummarySchema),
   diagnostics: z.array(diagnosticSchema),
   gaps: z.array(gapSchema),
+  observation: observationSchema.optional(),
+  explanation: explainResultSchema.optional(),
+  explanations: z.array(explainResultSchema).optional(),
 });
 
 type WireCheckReport = z.infer<typeof checkReportSchema>;
+type WireObservation = z.infer<typeof observationSchema>;
+type WireExplainResult = z.infer<typeof explainResultSchema>;
 
 const checkFailureSchema = z.object({
   reportVersion: z.literal(REPORT_SCHEMA_VERSION),
   code: z.string(),
   message: z.string(),
 });
+
+function toWireObservation(obs: ObservationReport): WireObservation {
+  return {
+    mode: obs.mode,
+    phases: { ...obs.phases },
+    rpc: { ...obs.rpc },
+    overhead: { ...obs.overhead },
+    queryCount: obs.queryCount,
+    computedQueryCount: obs.computedQueryCount,
+    reusedQueryCount: obs.reusedQueryCount,
+    candidateCount: obs.candidateCount,
+    checkpointCount: obs.checkpointCount,
+    providers: [...obs.providers],
+    ...(obs.limit !== undefined
+      ? {
+          limit: {
+            ...(obs.limit.maxItems !== undefined
+              ? { maxItems: obs.limit.maxItems }
+              : {}),
+            ...(obs.limit.maxBytes !== undefined
+              ? { maxBytes: obs.limit.maxBytes }
+              : {}),
+          },
+        }
+      : {}),
+    truncated: obs.truncated,
+    droppedCount: obs.droppedCount,
+    ...(obs.details !== undefined
+      ? {
+          details: obs.details.map((entry) => ({
+            kind: entry.kind,
+            summary: entry.summary,
+            ...(entry.ruleId !== undefined ? { ruleId: entry.ruleId } : {}),
+            ...(entry.projectId !== undefined
+              ? { projectId: entry.projectId }
+              : {}),
+            ...(entry.provider !== undefined
+              ? { provider: entry.provider }
+              : {}),
+            ...(entry.name !== undefined ? { name: entry.name } : {}),
+            ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
+            ...(entry.cacheStatus !== undefined
+              ? { cacheStatus: entry.cacheStatus }
+              : {}),
+            ...(entry.candidateCount !== undefined
+              ? { candidateCount: entry.candidateCount }
+              : {}),
+            ...(entry.durationMs !== undefined
+              ? { durationMs: entry.durationMs }
+              : {}),
+            ...(entry.at !== undefined ? { at: { ...entry.at } } : {}),
+            ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
+function toWireExplainResult(exp: ExplainResult): WireExplainResult {
+  return {
+    ruleId: exp.ruleId,
+    target: {
+      file: exp.target.file,
+      ...(exp.target.line !== undefined ? { line: exp.target.line } : {}),
+      ...(exp.target.column !== undefined ? { column: exp.target.column } : {}),
+    },
+    status: exp.status,
+    inCandidates: exp.inCandidates,
+    summary: exp.summary,
+    projectsChecked: [...exp.projectsChecked],
+    matchingCandidates: exp.matchingCandidates.map((loc) => ({ ...loc })),
+    ...(exp.excludedByQuery !== undefined
+      ? {
+          excludedByQuery: {
+            ...exp.excludedByQuery,
+          },
+        }
+      : {}),
+    ...(exp.excludedByCheckpoint !== undefined
+      ? {
+          excludedByCheckpoint: {
+            ...exp.excludedByCheckpoint,
+            ...(exp.excludedByCheckpoint.at !== undefined
+              ? { at: { ...exp.excludedByCheckpoint.at } }
+              : {}),
+          },
+        }
+      : {}),
+    queries: exp.queries.map((q) => ({ ...q })),
+    checkpoints: exp.checkpoints.map((cp) => ({
+      ...cp,
+      ...(cp.at !== undefined ? { at: { ...cp.at } } : {}),
+    })),
+    gaps: exp.gaps.map((g) => ({
+      kind: g.kind,
+      message: g.message,
+      ...(g.at !== undefined ? { at: { ...g.at } } : {}),
+    })),
+    providers: [...exp.providers],
+    cleanupPaths: [...exp.cleanupPaths],
+    ...(exp.inlineIgnore !== undefined
+      ? {
+          inlineIgnore: {
+            matched: exp.inlineIgnore.matched,
+            ...(exp.inlineIgnore.reason !== undefined
+              ? { reason: exp.inlineIgnore.reason }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
 
 function toWireReport(report: CheckReport): WireCheckReport {
   return {
@@ -108,6 +340,17 @@ function toWireReport(report: CheckReport): WireCheckReport {
       message: gap.message,
       ...(gap.at !== undefined ? { at: { ...gap.at } } : {}),
     })),
+    ...(report.observation !== undefined
+      ? { observation: toWireObservation(report.observation) }
+      : {}),
+    ...(report.explanation !== undefined
+      ? { explanation: toWireExplainResult(report.explanation) }
+      : {}),
+    ...(report.explanations !== undefined
+      ? {
+          explanations: report.explanations.map(toWireExplainResult),
+        }
+      : {}),
   };
 }
 
@@ -120,18 +363,83 @@ function appendGapLines(lines: string[], gaps: WireCheckReport["gaps"]): void {
   }
 }
 
+function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
+  const linePart = exp.target.line !== undefined ? `:${exp.target.line}` : "";
+  const colPart =
+    exp.target.column !== undefined ? `:${exp.target.column}` : "";
+  lines.push(
+    `Explanation [${exp.ruleId}] @ ${exp.target.file}${linePart}${colPart}: ${exp.status} (inCandidates=${String(exp.inCandidates)})`,
+  );
+  lines.push(`  summary: ${exp.summary}`);
+  if (exp.excludedByCheckpoint) {
+    const detailSuffix =
+      exp.excludedByCheckpoint.detail !== undefined
+        ? ` detail=${JSON.stringify(exp.excludedByCheckpoint.detail)}`
+        : "";
+    lines.push(
+      `  excludedByCheckpoint: ${exp.excludedByCheckpoint.name} (${exp.excludedByCheckpoint.outcome})${detailSuffix}`,
+    );
+  }
+  if (exp.excludedByQuery) {
+    lines.push(
+      `  excludedByQuery: ${exp.excludedByQuery.op} (provider=${exp.excludedByQuery.provider}, cache=${exp.excludedByQuery.cacheStatus}, candidates=${exp.excludedByQuery.candidateCount})`,
+    );
+  }
+  for (const query of exp.queries) {
+    lines.push(
+      `  query #${query.queryIndex}: ${query.op} [${query.cacheStatus}] candidates=${query.candidateCount} matchedTarget=${String(query.matchedTarget)}`,
+    );
+  }
+}
+
+function appendObservationLines(lines: string[], obs: WireObservation): void {
+  lines.push(
+    `Observation (${obs.mode}): total=${obs.phases.totalMs}ms (configOpen=${obs.phases.configAndOpenMs}ms, engineQuery=${obs.phases.engineQueryMs}ms, ruleExec=${obs.phases.ruleExecutionMs}ms)`,
+  );
+  lines.push(
+    `  rpc: batches=${obs.rpc.batches} (queryBatches=${obs.rpc.queryBatches}), bytesSent=${obs.rpc.bytesSent}, bytesReceived=${obs.rpc.bytesReceived}`,
+  );
+  lines.push(
+    `  overhead: checkpoint=${obs.overhead.checkpointMs}ms, encode=${obs.overhead.encodeMs}ms, write=${obs.overhead.writeMs}ms`,
+  );
+  lines.push(
+    `  queries: total=${obs.queryCount}, computed=${obs.computedQueryCount}, reused=${obs.reusedQueryCount}, candidates=${obs.candidateCount}, checkpoints=${obs.checkpointCount}`,
+  );
+  if (obs.truncated) {
+    lines.push(`  truncated: true (dropped=${obs.droppedCount})`);
+  }
+  if (obs.details) {
+    for (const detail of obs.details) {
+      lines.push(`  detail [${detail.kind}]: ${detail.summary}`);
+    }
+  }
+}
+
+function appendExtrasText(lines: string[], report: WireCheckReport): void {
+  if (report.explanation) {
+    appendExplanationLines(lines, report.explanation);
+  } else if (report.explanations) {
+    for (const exp of report.explanations) {
+      appendExplanationLines(lines, exp);
+    }
+  }
+  if (report.observation) {
+    appendObservationLines(lines, report.observation);
+  }
+}
+
 function formatCheckCleanText(report: WireCheckReport) {
   const summary =
     report.gaps.length > 0
       ? `No violations found across ${report.projects.length} project(s) (${report.gaps.length} gap(s)).`
       : `No violations found across ${report.projects.length} project(s).`;
-  if (report.gaps.length === 0) {
+  const lines: string[] = [];
+  appendGapLines(lines, report.gaps);
+  appendExtrasText(lines, report);
+  if (lines.length === 0) {
     return text.line(summary);
   }
-  const lines = [summary];
-  appendGapLines(lines, report.gaps);
-  const [first, ...rest] = lines;
-  return first !== undefined ? text.lines([first, ...rest]) : text.line(summary);
+  return text.lines([summary, ...lines]);
 }
 
 function formatCheckFindingsText(report: WireCheckReport) {
@@ -152,11 +460,21 @@ function formatCheckFindingsText(report: WireCheckReport) {
     report.gaps.length > 0
       ? `Found ${report.diagnostics.length} violation(s) (${report.gaps.length} gap(s)).`
       : `Found ${report.diagnostics.length} violation(s).`;
+  const extras: string[] = [];
+  appendExtrasText(extras, report);
   const [first, ...rest] = lines;
   return first !== undefined
-    ? text.lines([first, ...rest, summary])
-    : text.line(summary);
+    ? text.lines([first, ...rest, summary, ...extras])
+    : text.lines([summary, ...extras]);
 }
+
+type CheckCliInput = {
+  readonly config?: string | undefined;
+  readonly rule?: string | undefined;
+  readonly at?: string | undefined;
+  readonly observe?: "off" | "summary" | "detail" | undefined;
+  readonly observeLimit?: string | undefined;
+};
 
 function createCliContract(
   identity: CliCommandIdentity,
@@ -166,9 +484,13 @@ function createCliContract(
   const versionInput = z.object({});
   const checkInput = z.object({
     config: z.string().min(1).optional(),
+    rule: z.string().min(1).optional(),
+    at: z.string().min(1).optional(),
+    observe: z.enum(["off", "summary", "detail"]).optional(),
+    observeLimit: z.string().min(1).optional(),
   });
 
-  async function executeCheck(configOption?: string): Promise<
+  async function executeCheck(input: CheckCliInput): Promise<
     | { readonly ok: true; readonly report: WireCheckReport }
     | {
         readonly ok: false;
@@ -180,8 +502,24 @@ function createCliContract(
       }
   > {
     try {
-      const config = await loadProjectConfig(workingDirectory, configOption);
-      const report = await runCheck({ cwd: workingDirectory, config });
+      const observeLimit =
+        input.observeLimit !== undefined
+          ? parseObserveLimit(input.observeLimit)
+          : undefined;
+
+      const configStart = performance.now();
+      const config = await loadProjectConfig(workingDirectory, input.config);
+      const configLoadMs = performance.now() - configStart;
+
+      const report = await runCheck({
+        cwd: workingDirectory,
+        config,
+        configLoadMs,
+        ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
+        ...(input.at !== undefined ? { at: input.at } : {}),
+        ...(input.observe !== undefined ? { observe: input.observe } : {}),
+        ...(observeLimit !== undefined ? { observeLimit } : {}),
+      });
       return { ok: true, report: toWireReport(report) };
     } catch (err) {
       if (err instanceof VeruleExecutionError) {
@@ -286,6 +624,28 @@ function createCliContract(
             shortAlias: "-c",
             description: "Path to the Verule configuration file.",
           },
+          rule: {
+            kind: "valueOption",
+            longOption: "--rule",
+            description: "Run only the specified rule ID.",
+          },
+          at: {
+            kind: "valueOption",
+            longOption: "--at",
+            description:
+              "Explain why diagnostics did or did not trigger at <file[:line[:column]]>.",
+          },
+          observe: {
+            kind: "valueOption",
+            longOption: "--observe",
+            description:
+              "Observation verbosity level (off, summary, or detail).",
+          },
+          observeLimit: {
+            kind: "valueOption",
+            longOption: "--observe-limit",
+            description: "Limit detail observation entries (e.g. 20 or 4096b).",
+          },
         },
         input: checkInput,
         outputs: define.outputModes("check", checkInput, (mode) => ({
@@ -322,7 +682,7 @@ function createCliContract(
                 },
               },
               handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input.config);
+                const outcomeResult = await executeCheck(input);
                 if (!outcomeResult.ok) {
                   return outcome.failure.failed(outcomeResult.failure);
                 }
@@ -358,7 +718,7 @@ function createCliContract(
                 },
               },
               handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input.config);
+                const outcomeResult = await executeCheck(input);
                 if (!outcomeResult.ok) {
                   return outcome.failure.failed(outcomeResult.failure);
                 }

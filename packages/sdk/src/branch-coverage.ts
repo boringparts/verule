@@ -96,7 +96,10 @@ export function assertValidProgramRef(
   snapshotId: number,
   projectId: string,
 ): void {
-  if (getRefSessionToken(ref) !== sessionToken || ref.snapshotId !== snapshotId) {
+  if (
+    getRefSessionToken(ref) !== sessionToken ||
+    ref.snapshotId !== snapshotId
+  ) {
     throw new VeruleExecutionError(
       "STALE_REFERENCE",
       `Program reference "${ref.handleId}" belongs to a closed or stale snapshot.`,

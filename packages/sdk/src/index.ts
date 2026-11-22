@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
+export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export { defineConfig, defineRule, openSession, runCheck } from "./session.ts";
 export type {
   BranchCoverageItem,
@@ -19,14 +20,30 @@ export {
   type AnalysisSession,
   type BranchRef,
   type CheckReport,
+  type CheckpointOutcome,
+  type CheckpointTarget,
   type Diagnostic,
   type DiagnosticInput,
   type DiagnosticLocation,
   type Evidence,
+  type ExplainCheckpointTrace,
+  type ExplainOptions,
+  type ExplainQueryStep,
+  type ExplainReport,
+  type ExplainResult,
+  type ExplainStatus,
   type FindSyntaxOptions,
   type Gap,
   type NormalizedVeruleConfig,
+  type ObservationDetailEntry,
+  type ObservationOverhead,
+  type ObservationPhases,
+  type ObservationReport,
+  type ObservationRpcMetrics,
+  type ObserveLimit,
+  type ObserveLimitInput,
   type ObserveMode,
+  type ObserveOptions,
   type OpenSessionOptions,
   type ProgramObjectKind,
   type ProgramRef,
@@ -34,6 +51,8 @@ export {
   type Rule,
   type RuleContext,
   type RunCheckOptions,
+  type SessionCheckOptions,
+  type SourceTarget,
   type SyntaxKind,
   type SyntaxNodeResult,
   type SyntaxRef,
