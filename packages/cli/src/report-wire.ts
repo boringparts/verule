@@ -197,9 +197,28 @@ export const explainResultSchema = z.object({
   inlineIgnore: z
     .object({
       matched: z.boolean(),
+      ruleId: z.string().optional(),
       reason: z.string().optional(),
+      commentAt: locationSchema.optional(),
     })
     .optional(),
+});
+
+export const inlineIgnoreEntrySchema = z.object({
+  status: z.enum([
+    "suppressed",
+    "unused",
+    "ambiguous",
+    "malformed",
+    "unknown_rule",
+    "undetermined",
+  ]),
+  at: locationSchema,
+  targetLine: z.number().int().positive().optional(),
+  ruleId: z.string().optional(),
+  reason: z.string().optional(),
+  matchedLocations: z.array(locationSchema).optional(),
+  message: z.string().optional(),
 });
 
 export const checkReportSchema = z.object({
@@ -210,6 +229,7 @@ export const checkReportSchema = z.object({
   diagnostics: z.array(diagnosticSchema),
   gaps: z.array(gapSchema),
   identity: reportIdentitySchema,
+  inlineIgnores: z.array(inlineIgnoreEntrySchema).optional(),
   observation: observationSchema.optional(),
   explanation: explainResultSchema.optional(),
   explanations: z.array(explainResultSchema).optional(),
@@ -329,8 +349,14 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
       ? {
           inlineIgnore: {
             matched: exp.inlineIgnore.matched,
+            ...(exp.inlineIgnore.ruleId !== undefined
+              ? { ruleId: exp.inlineIgnore.ruleId }
+              : {}),
             ...(exp.inlineIgnore.reason !== undefined
               ? { reason: exp.inlineIgnore.reason }
+              : {}),
+            ...(exp.inlineIgnore.commentAt !== undefined
+              ? { commentAt: { ...exp.inlineIgnore.commentAt } }
               : {}),
           },
         }
@@ -421,6 +447,27 @@ export function toWireReport(report: CheckReport): WireCheckReport {
         digest: model.digest,
       })),
     },
+    ...(report.inlineIgnores !== undefined
+      ? {
+          inlineIgnores: report.inlineIgnores.map((entry) => ({
+            status: entry.status,
+            at: { ...entry.at },
+            ...(entry.targetLine !== undefined
+              ? { targetLine: entry.targetLine }
+              : {}),
+            ...(entry.ruleId !== undefined ? { ruleId: entry.ruleId } : {}),
+            ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            ...(entry.matchedLocations !== undefined
+              ? {
+                  matchedLocations: entry.matchedLocations.map((loc) => ({
+                    ...loc,
+                  })),
+                }
+              : {}),
+            ...(entry.message !== undefined ? { message: entry.message } : {}),
+          })),
+        }
+      : {}),
     ...(report.observation !== undefined
       ? { observation: toWireObservation(report.observation) }
       : {}),

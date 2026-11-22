@@ -18,6 +18,7 @@ use tsrs_vfs::{FS, bundled, osvfs};
 use crate::cfg::{
     EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
 };
+use crate::directives::{ScannedDirective, scan_snapshot_directives};
 use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
 use crate::projection::{QueryStep, execute_query_batch};
 pub use crate::projection::{SourceLocation, node_location, slice_source_text};
@@ -101,6 +102,17 @@ struct QueryBatchParams {
     snapshot_id: u64,
     project_id: String,
     steps: Vec<QueryStep>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectivesScanParams {
+    snapshot_id: u64,
+}
+
+#[derive(Serialize)]
+struct DirectivesScanResult {
+    directives: Vec<ScannedDirective>,
 }
 
 #[derive(Serialize)]
@@ -483,6 +495,11 @@ impl EngineServer {
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
                 self.query_batch(parsed, observer)
             }
+            "directives.scan" => {
+                let parsed: DirectivesScanParams = serde_json::from_value(params)
+                    .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
+                self.scan_directives(parsed.snapshot_id)
+            }
             _ => Err(RpcErr::new(
                 "METHOD_NOT_FOUND",
                 format!("Unknown method: {method}"),
@@ -660,6 +677,18 @@ impl EngineServer {
             observer,
         )?;
         serde_json::to_value(result)
+            .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
+    }
+
+    fn scan_directives(&self, snapshot_id: u64) -> Result<Value, RpcErr> {
+        let Some(snapshot) = self.snapshots.get(&snapshot_id) else {
+            return Err(RpcErr::new(
+                "STALE_SNAPSHOT",
+                format!("Snapshot {snapshot_id} is expired or unknown."),
+            ));
+        };
+        let directives = scan_snapshot_directives(snapshot);
+        serde_json::to_value(DirectivesScanResult { directives })
             .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
     }
 
