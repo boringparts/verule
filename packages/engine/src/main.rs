@@ -1,3 +1,4 @@
+mod observe;
 mod projection;
 mod serve;
 

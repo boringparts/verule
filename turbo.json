@@ -78,6 +78,11 @@
         "dependencies": {
           "deny": ["app", "library", "native"]
         }
+      },
+      "verification": {
+        "dependencies": {
+          "allow": ["app", "library", "native", "tooling"]
+        }
       }
     }
   }

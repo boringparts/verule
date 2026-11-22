@@ -3,6 +3,7 @@ use std::{
     io::{self, Write},
     path::Path,
     sync::Arc,
+    time::Instant,
 };
 
 use rustc_hash::FxHashMap;
@@ -17,6 +18,7 @@ use tsrs_diagnostics::Category;
 use tsrs_project::ID as ProjectId;
 use tsrs_vfs::{FS, bundled, osvfs};
 
+use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
 use crate::projection::{QueryStep, execute_query_batch};
 
 #[derive(Deserialize)]
@@ -25,6 +27,8 @@ struct RpcRequest {
     method: String,
     #[serde(default)]
     params: Value,
+    #[serde(default)]
+    observe: Option<ObserveRequestConfig>,
 }
 
 #[derive(Serialize)]
@@ -32,6 +36,8 @@ struct RpcSuccessResponse<'a, T> {
     id: &'a Value,
     ok: bool,
     result: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<EngineRpcMetrics>,
 }
 
 #[derive(Serialize)]
@@ -321,20 +327,42 @@ impl EngineServer {
             }
         };
 
-        match self.dispatch(&request.method, request.params) {
-            Ok(result) => serde_json::to_string(&RpcSuccessResponse {
-                id: &request.id,
-                ok: true,
-                result,
-            })
-            .unwrap_or_else(|err| {
-                serialize_error(&request.id, "SERIALIZATION_ERROR", err.to_string())
-            }),
+        let mut observer = ObserveCollector::from_request(request.observe);
+        match self.dispatch(&request.method, request.params, &mut observer) {
+            Ok(result) => {
+                if observer.is_active() {
+                    let encode_start = Instant::now();
+                    let encoded = serde_json::to_string(&result);
+                    observer.add_encode_ms(elapsed_ms(encode_start));
+                    if let Err(err) = encoded {
+                        return serialize_error(
+                            &request.id,
+                            "SERIALIZATION_ERROR",
+                            err.to_string(),
+                        );
+                    }
+                }
+                let metrics = observer.finish();
+                serde_json::to_string(&RpcSuccessResponse {
+                    id: &request.id,
+                    ok: true,
+                    result,
+                    metrics,
+                })
+                .unwrap_or_else(|err| {
+                    serialize_error(&request.id, "SERIALIZATION_ERROR", err.to_string())
+                })
+            }
             Err(err) => serialize_error(&request.id, err.code, err.message),
         }
     }
 
-    fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, RpcErr> {
+    fn dispatch(
+        &mut self,
+        method: &str,
+        params: Value,
+        observer: &mut ObserveCollector,
+    ) -> Result<Value, RpcErr> {
         match method {
             "snapshot.open" => {
                 let parsed: SnapshotOpenParams = serde_json::from_value(params)
@@ -353,7 +381,7 @@ impl EngineServer {
             "query.batch" => {
                 let parsed: QueryBatchParams = serde_json::from_value(params)
                     .map_err(|err| RpcErr::new("INVALID_PARAMS", err.to_string()))?;
-                let result = self.query_batch(parsed)?;
+                let result = self.query_batch(parsed, observer)?;
                 serde_json::to_value(result)
                     .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
             }
@@ -487,7 +515,11 @@ impl EngineServer {
         Ok(SnapshotReleaseResult { released: true })
     }
 
-    fn query_batch(&mut self, params: QueryBatchParams) -> Result<Value, RpcErr> {
+    fn query_batch(
+        &mut self,
+        params: QueryBatchParams,
+        observer: &mut ObserveCollector,
+    ) -> Result<Value, RpcErr> {
         let Some(snapshot) = self.snapshots.get_mut(&params.snapshot_id) else {
             return Err(RpcErr::new(
                 "STALE_SNAPSHOT",
@@ -510,7 +542,13 @@ impl EngineServer {
             .get_program(&pid)
             .map_err(|err| RpcErr::new("ENGINE_ERROR", err.to_string()))?;
 
-        let result = execute_query_batch(snapshot, &params.project_id, program, params.steps)?;
+        let result = execute_query_batch(
+            snapshot,
+            &params.project_id,
+            program,
+            params.steps,
+            observer,
+        )?;
         serde_json::to_value(result)
             .map_err(|err| RpcErr::new("SERIALIZATION_ERROR", err.to_string()))
     }

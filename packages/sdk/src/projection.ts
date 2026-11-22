@@ -1,4 +1,4 @@
-import type { EngineClient } from "./engine-client.ts";
+import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
 import {
   VeruleExecutionError,
   getRefSessionToken,
@@ -490,6 +490,7 @@ export function createProjectionQueries(deps: {
   readonly projectId: string;
   readonly assertOpen: () => void;
   readonly recordGaps: (gaps: readonly Gap[]) => void;
+  readonly getRpcOptions?: () => RpcRequestOptions | undefined;
 }) {
   const {
     client,
@@ -498,14 +499,21 @@ export function createProjectionQueries(deps: {
     projectId,
     assertOpen,
     recordGaps,
+    getRpcOptions,
   } = deps;
 
-  async function runStep<T>(step: Record<string, unknown>): Promise<readonly T[]> {
-    const batch = await client.request<EngineBatchResult>("query.batch", {
-      snapshotId,
-      projectId,
-      steps: [step],
-    });
+  async function runStep<T>(
+    step: Record<string, unknown>,
+  ): Promise<readonly T[]> {
+    const batch = await client.request<EngineBatchResult>(
+      "query.batch",
+      {
+        snapshotId,
+        projectId,
+        steps: [step],
+      },
+      getRpcOptions?.(),
+    );
     return (batch.results[0]?.items ?? []) as readonly T[];
   }
 

@@ -13,7 +13,6 @@ import {
   type CallRef,
   type DeclarationRef,
   type SignatureRef,
-  type SyntaxRef,
   type TypeRef,
 } from "@verule/sdk";
 
@@ -132,7 +131,7 @@ void describe("@verule/sdk typed call projection", () => {
         assert.deepEqual(callRow.gaps, []);
 
         const declResolutions = await ctx.resolveDeclarations(
-          [callSyntax.expression as SyntaxRef],
+          [callSyntax.expression],
           {
             select: {
               name: true,
@@ -344,8 +343,8 @@ void describe("@verule/sdk typed call projection", () => {
         );
 
         // Compare narrowed parameter types and generic return types with isAssignableTo
-        const strParamType = wrapStrCall.instantiatedParameterTypes[0]!.type.ref;
-        const numParamType = wrapNumCall.instantiatedParameterTypes[0]!.type.ref;
+        const strParamType = wrapStrCall.instantiatedParameterTypes[0].type.ref;
+        const numParamType = wrapNumCall.instantiatedParameterTypes[0].type.ref;
         const paramDecls = await ctx.findSyntax({
           range: { file: "src/overloads.ts", startLine: 11, endLine: 11 },
           kinds: ["Parameter"],
@@ -459,11 +458,7 @@ void describe("@verule/sdk typed call projection", () => {
         });
         assert.ok(arrowDecl);
         const [arrowLookup] = await ctx.syntaxOf(
-          [
-            (
-              await ctx.resolveCalls([callNodes[0]!.ref])
-            )[0]!.call!,
-          ],
+          [(await ctx.resolveCalls([callNodes[0]!.ref]))[0]!.call!],
           { select: { body: true } },
         );
         // CallExpression has no body -> requested `body` is present and null with no gaps
@@ -669,7 +664,9 @@ void describe("@verule/sdk typed call projection", () => {
       for (const [label, fn] of [
         [
           "stale CallRef",
-          async (ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0]) => {
+          async (
+            ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0],
+          ) => {
             await ctx.projectCalls([capturedCall!], {
               select: { location: true },
             });
@@ -677,7 +674,9 @@ void describe("@verule/sdk typed call projection", () => {
         ],
         [
           "stale SignatureRef",
-          async (ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0]) => {
+          async (
+            ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0],
+          ) => {
             await ctx.projectSignatures([capturedSig!], {
               select: { returnType: true },
             });
@@ -685,13 +684,17 @@ void describe("@verule/sdk typed call projection", () => {
         ],
         [
           "stale DeclarationRef",
-          async (ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0]) => {
+          async (
+            ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0],
+          ) => {
             await ctx.syntaxOf([capturedDecl!], { select: { location: true } });
           },
         ],
         [
           "stale TypeRef",
-          async (ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0]) => {
+          async (
+            ctx: Parameters<Parameters<typeof defineRule>[0]["run"]>[0],
+          ) => {
             await ctx.projectTypes([capturedType!], {
               select: { typeText: true },
             });

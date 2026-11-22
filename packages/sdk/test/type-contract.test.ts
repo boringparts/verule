@@ -11,8 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const tscBin = join(sdkRoot, "node_modules", ".bin", "tsc");

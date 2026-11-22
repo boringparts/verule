@@ -14,6 +14,7 @@ use tsrs_scanner::{
     get_ecma_line_and_utf16_character_of_position, get_ecma_line_starts, get_token_pos_of_node,
 };
 
+use crate::observe::{EngineStepDetail, ObserveCollector};
 use crate::serve::{
     HandlePayload, RpcErr, SnapshotState, is_project_source_file, relative_to_cwd,
     resolve_against_cwd,
@@ -558,6 +559,7 @@ pub fn execute_query_batch(
     project_id: &str,
     program: &'static Program,
     steps: Vec<QueryStep>,
+    observer: &mut ObserveCollector,
 ) -> Result<QueryBatchResult, RpcErr> {
     // Hold one CheckerLifetime::API instance across every step in the batch so
     // handles, signatures, instantiated types, and assignability share one checker.
@@ -572,6 +574,7 @@ pub fn execute_query_batch(
             program,
             &mut checker,
             step,
+            observer,
         )?);
     }
 
@@ -585,59 +588,107 @@ fn execute_step(
     program: &'static Program,
     checker: &mut CheckerHandle,
     step: QueryStep,
+    observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
+    let step_start = observer.start_step();
     match step {
         QueryStep::FindSyntax {
             files,
             kinds,
             range,
-        } => Ok(StepResult::FindSyntax {
-            items: run_find_syntax(
+        } => {
+            let items = run_find_syntax(
                 snapshot,
                 project_id,
                 program,
                 files.as_deref(),
                 kinds.as_deref(),
                 range.as_ref(),
-            )?,
-        }),
-        QueryStep::TypeAtLocation { targets } => Ok(StepResult::TypeAtLocation {
-            items: run_type_at_location(snapshot, project_id, checker, &targets)?,
-        }),
-        QueryStep::ResolveDeclarations { targets, select } => Ok(StepResult::ResolveDeclarations {
-            items: run_resolve_declarations(
+            )?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "candidate",
+                        file: Some(item.location.file.clone()),
+                        line: Some(item.location.line),
+                        column: Some(item.location.column),
+                        summary: format!("{} {}", item.kind, item.text),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("findSyntax", step_start, items.len(), raw_details);
+            Ok(StepResult::FindSyntax { items })
+        }
+        QueryStep::TypeAtLocation { targets } => {
+            let items = run_type_at_location(snapshot, project_id, checker, &targets)?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "typeAtLocation",
+                        file: None,
+                        line: None,
+                        column: None,
+                        summary: format!("{} -> {}", item.target, item.type_text),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("typeAtLocation", step_start, items.len(), raw_details);
+            Ok(StepResult::TypeAtLocation { items })
+        }
+        QueryStep::ResolveDeclarations { targets, select } => {
+            let items = run_resolve_declarations(
                 snapshot,
                 project_id,
                 program,
                 checker,
                 &targets,
                 &select.unwrap_or_default(),
-            )?,
-        }),
-        QueryStep::ResolveCalls { targets, select } => Ok(StepResult::ResolveCalls {
-            items: run_resolve_calls(
+            )?;
+            observer.record_step("resolveDeclarations", step_start, items.len(), Vec::new());
+            Ok(StepResult::ResolveDeclarations { items })
+        }
+        QueryStep::ResolveCalls { targets, select } => {
+            let items = run_resolve_calls(
                 snapshot,
                 project_id,
                 checker,
                 &targets,
                 &select.unwrap_or_default(),
-            )?,
-        }),
-        QueryStep::ProjectCalls { targets, select } => Ok(StepResult::ProjectCalls {
-            items: run_project_calls(snapshot, project_id, checker, &targets, &select)?,
-        }),
-        QueryStep::ProjectSignatures { targets, select } => Ok(StepResult::ProjectSignatures {
-            items: run_project_signatures(snapshot, project_id, checker, &targets, &select)?,
-        }),
-        QueryStep::ProjectTypes { targets, select } => Ok(StepResult::ProjectTypes {
-            items: run_project_types(snapshot, project_id, checker, &targets, &select)?,
-        }),
-        QueryStep::IsAssignableTo { pairs } => Ok(StepResult::IsAssignableTo {
-            items: run_is_assignable_to(snapshot, project_id, checker, &pairs)?,
-        }),
-        QueryStep::SyntaxOf { targets, select } => Ok(StepResult::SyntaxOf {
-            items: run_syntax_of(snapshot, project_id, &targets, &select.unwrap_or_default())?,
-        }),
+            )?;
+            observer.record_step("resolveCalls", step_start, items.len(), Vec::new());
+            Ok(StepResult::ResolveCalls { items })
+        }
+        QueryStep::ProjectCalls { targets, select } => {
+            let items = run_project_calls(snapshot, project_id, checker, &targets, &select)?;
+            observer.record_step("projectCalls", step_start, items.len(), Vec::new());
+            Ok(StepResult::ProjectCalls { items })
+        }
+        QueryStep::ProjectSignatures { targets, select } => {
+            let items = run_project_signatures(snapshot, project_id, checker, &targets, &select)?;
+            observer.record_step("projectSignatures", step_start, items.len(), Vec::new());
+            Ok(StepResult::ProjectSignatures { items })
+        }
+        QueryStep::ProjectTypes { targets, select } => {
+            let items = run_project_types(snapshot, project_id, checker, &targets, &select)?;
+            observer.record_step("projectTypes", step_start, items.len(), Vec::new());
+            Ok(StepResult::ProjectTypes { items })
+        }
+        QueryStep::IsAssignableTo { pairs } => {
+            let items = run_is_assignable_to(snapshot, project_id, checker, &pairs)?;
+            observer.record_step("isAssignableTo", step_start, items.len(), Vec::new());
+            Ok(StepResult::IsAssignableTo { items })
+        }
+        QueryStep::SyntaxOf { targets, select } => {
+            let items = run_syntax_of(snapshot, project_id, &targets, &select.unwrap_or_default())?;
+            observer.record_step("syntaxOf", step_start, items.len(), Vec::new());
+            Ok(StepResult::SyntaxOf { items })
+        }
     }
 }
 

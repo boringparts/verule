@@ -39,6 +39,26 @@ export class VeruleExecutionError extends Error {
 
 export type ObserveMode = "off" | "summary" | "detail";
 
+export type ObserveLimit = {
+  readonly maxItems?: number;
+  readonly maxBytes?: number;
+};
+
+export type ObserveLimitInput = number | ObserveLimit;
+
+export type ObserveOptions = {
+  readonly mode: ObserveMode;
+  readonly limit?: ObserveLimitInput;
+};
+
+export type SourceTarget = {
+  readonly file: string;
+  readonly line?: number;
+  readonly column?: number;
+};
+
+export type CheckpointOutcome = "pass" | "exclude" | "info";
+
 export type SyntaxKind =
   | "Identifier"
   | "CallExpression"
@@ -129,6 +149,11 @@ export type DiagnosticLocation = {
   readonly end: number;
 };
 
+export type CheckpointTarget =
+  | DiagnosticLocation
+  | SyntaxRef
+  | { readonly location: DiagnosticLocation };
+
 export type Evidence = {
   readonly kind: "source" | "type" | "note";
   readonly message: string;
@@ -163,12 +188,125 @@ export type ProjectSummary = {
   readonly sourceFiles: readonly string[];
 };
 
+export type ObservationPhases = {
+  readonly configAndOpenMs: number;
+  readonly engineQueryMs: number;
+  readonly ruleExecutionMs: number;
+  readonly totalMs: number;
+};
+
+export type ObservationRpcMetrics = {
+  readonly batches: number;
+  readonly queryBatches: number;
+  readonly bytesSent: number;
+  readonly bytesReceived: number;
+};
+
+export type ObservationOverhead = {
+  readonly checkpointMs: number;
+  readonly encodeMs: number;
+  readonly writeMs: number;
+};
+
+export type ObservationDetailEntry = {
+  readonly kind: "query" | "checkpoint" | "engineStep";
+  readonly ruleId?: string;
+  readonly projectId?: string;
+  readonly provider?: string;
+  readonly name?: string;
+  readonly outcome?: CheckpointOutcome;
+  readonly cacheStatus?: "computed" | "reused";
+  readonly candidateCount?: number;
+  readonly durationMs?: number;
+  readonly at?: DiagnosticLocation;
+  readonly summary: string;
+  readonly detail?: unknown;
+};
+
+export type ObservationReport = {
+  readonly mode: Exclude<ObserveMode, "off">;
+  readonly phases: ObservationPhases;
+  readonly rpc: ObservationRpcMetrics;
+  readonly overhead: ObservationOverhead;
+  readonly queryCount: number;
+  readonly computedQueryCount: number;
+  readonly reusedQueryCount: number;
+  readonly candidateCount: number;
+  readonly checkpointCount: number;
+  readonly providers: readonly string[];
+  readonly limit?: ObserveLimit;
+  readonly truncated: boolean;
+  readonly droppedCount: number;
+  readonly details?: readonly ObservationDetailEntry[];
+};
+
+export type ExplainStatus =
+  | "reported"
+  | "excluded_by_checkpoint"
+  | "excluded_by_query"
+  | "not_in_candidates"
+  | "target_not_in_project"
+  | "suppressed_by_ignore"
+  | "blocked_by_gap"
+  | "covered_by_cleanup"
+  | "rule_filtered";
+
+export type ExplainQueryStep = {
+  readonly queryIndex: number;
+  readonly op: string;
+  readonly projectId: string;
+  readonly provider: string;
+  readonly cacheStatus: "computed" | "reused";
+  readonly candidateCount: number;
+  readonly matchedTarget: boolean;
+  readonly durationMs: number;
+  readonly summary?: string;
+  readonly detail?: unknown;
+};
+
+export type ExplainCheckpointTrace = {
+  readonly name: string;
+  readonly ruleId: string;
+  readonly projectId: string;
+  readonly outcome: CheckpointOutcome;
+  readonly at?: DiagnosticLocation;
+  readonly detail?: unknown;
+};
+
+export type ExplainResult = {
+  readonly ruleId: string;
+  readonly target: SourceTarget;
+  readonly status: ExplainStatus;
+  readonly inCandidates: boolean;
+  readonly summary: string;
+  readonly projectsChecked: readonly string[];
+  readonly matchingCandidates: readonly DiagnosticLocation[];
+  readonly excludedByQuery?: ExplainQueryStep;
+  readonly excludedByCheckpoint?: ExplainCheckpointTrace;
+  readonly queries: readonly ExplainQueryStep[];
+  readonly checkpoints: readonly ExplainCheckpointTrace[];
+  readonly gaps: readonly Gap[];
+  readonly providers: readonly string[];
+  readonly cleanupPaths: readonly unknown[];
+  readonly inlineIgnore?: {
+    readonly matched: boolean;
+    readonly reason?: string;
+  };
+};
+
 export type CheckReport = {
   readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
   readonly status: "clean" | "findings";
   readonly projects: readonly ProjectSummary[];
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
+  readonly observation?: ObservationReport;
+  readonly explanation?: ExplainResult;
+  readonly explanations?: readonly ExplainResult[];
+};
+
+export type ExplainReport = CheckReport & {
+  readonly explanation: ExplainResult;
 };
 
 export type SourceRange = {
@@ -250,6 +388,16 @@ export type RuleContext = {
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedSyntaxLookupRow<S>[]>;
   report: (diagnostic: DiagnosticInput) => void;
+  /**
+   * Records a named TS judgment checkpoint for explainability and detail observation.
+   * When observation and explanation are disabled, `detail` is never invoked.
+   */
+  checkpoint: (
+    name: string,
+    target: CheckpointTarget,
+    outcome: CheckpointOutcome,
+    detail?: () => unknown,
+  ) => void;
 };
 
 export type Rule = {
@@ -270,17 +418,42 @@ export type NormalizedVeruleConfig = {
   readonly rules: readonly Rule[];
 };
 
+export type SessionCheckOptions = {
+  readonly rulesOverride?: readonly Rule[];
+  readonly ruleIds?: readonly string[];
+  readonly at?: string | SourceTarget;
+  readonly observe?: ObserveMode | ObserveOptions;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly configLoadMs?: number;
+};
+
+export type ExplainOptions = {
+  readonly ruleId?: string;
+  readonly at: string | SourceTarget;
+  readonly observe?: ObserveMode | ObserveOptions;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly rulesOverride?: readonly Rule[];
+};
+
 export type OpenSessionOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig;
-  readonly observe?: ObserveMode;
+  readonly observe?: ObserveMode | ObserveOptions;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly configLoadMs?: number;
 };
 
-export type RunCheckOptions = OpenSessionOptions;
+export type RunCheckOptions = OpenSessionOptions & {
+  readonly ruleIds?: readonly string[];
+  readonly at?: string | SourceTarget;
+};
 
 export type AnalysisSession = {
   readonly snapshotId: number;
   readonly projects: readonly ProjectSummary[];
-  check: (rulesOverride?: readonly Rule[]) => Promise<CheckReport>;
+  check: (
+    optionsOrRules?: readonly Rule[] | SessionCheckOptions,
+  ) => Promise<CheckReport>;
+  explain: (options: ExplainOptions) => Promise<ExplainReport>;
   close: () => Promise<void>;
 };
