@@ -876,10 +876,6 @@ fn probe_sibling_implementations(decl_file: &str, mode: PackageResolutionMode) -
     found
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Resolves manifest exports, main/module fallbacks, and sibling products in priority order."
-)]
 fn resolve_package_file_from_manifest(
     program: &'static Program,
     pkg_dir: &str,
