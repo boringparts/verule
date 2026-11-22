@@ -20,6 +20,7 @@ use crate::cfg::{
     EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
 };
 use crate::directives::{ScannedDirective, scan_snapshot_directives};
+use crate::instance_identity::{FieldWriteIndex, InstanceHandleData};
 use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
 use crate::projection::{QueryStep, execute_query_batch};
 pub use crate::projection::{SourceLocation, node_location, slice_source_text};
@@ -199,6 +200,7 @@ pub enum HandlePayload {
         enclosing: Option<P<Node>>,
     },
     Branch(BranchHandle),
+    Instance(usize),
 }
 
 pub struct HandleEntry {
@@ -215,8 +217,11 @@ pub struct SnapshotState {
     pub snapshot_data: Arc<SnapshotData>,
     pub project_ids: BTreeMap<String, ProjectId>,
     pub handles: FxHashMap<String, HandleEntry>,
+    pub instances: Vec<InstanceHandleData>,
+    pub instance_handles: FxHashMap<(String, String), String>,
     pub cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
     pub call_graph_cache: FxHashMap<String, Arc<ProjectCallGraph>>,
+    pub field_write_index: FxHashMap<String, Arc<FieldWriteIndex>>,
     pub next_handle_id: u64,
 }
 
@@ -279,6 +284,38 @@ impl SnapshotState {
 
     pub fn alloc_branch(&mut self, project_id: &str, branch: BranchHandle) -> String {
         self.alloc_handle("brn", project_id, HandlePayload::Branch(branch))
+    }
+
+    pub fn alloc_instance(&mut self, project_id: &str, data: InstanceHandleData) -> String {
+        let key = (project_id.to_string(), data.instance_key.clone());
+        if let Some(existing) = self.instance_handles.get(&key) {
+            return existing.clone();
+        }
+        let idx = self.instances.len();
+        self.instances.push(data);
+        let handle_id = self.alloc_handle("ins", project_id, HandlePayload::Instance(idx));
+        self.instance_handles.insert(key, handle_id.clone());
+        handle_id
+    }
+
+    pub fn get_instance(
+        &self,
+        project_id: &str,
+        handle_id: &str,
+    ) -> Result<&InstanceHandleData, RpcErr> {
+        let entry = self.get_entry(project_id, handle_id)?;
+        let HandlePayload::Instance(idx) = entry.payload else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not an instance reference."),
+            ));
+        };
+        self.instances.get(idx).ok_or_else(|| {
+            RpcErr::new(
+                "STALE_REFERENCE",
+                format!("Instance payload for {handle_id} is missing."),
+            )
+        })
     }
 
     pub fn get_entry(&self, project_id: &str, handle_id: &str) -> Result<&HandleEntry, RpcErr> {
@@ -528,8 +565,11 @@ impl EngineServer {
                 snapshot_data: opened.snapshot_data,
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
+                instances: Vec::new(),
+                instance_handles: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
+                field_write_index: FxHashMap::default(),
                 next_handle_id: 0,
             },
         );
@@ -612,8 +652,11 @@ impl EngineServer {
                 snapshot_data: opened.snapshot_data,
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
+                instances: Vec::new(),
+                instance_handles: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
+                field_write_index: FxHashMap::default(),
                 next_handle_id: 0,
             },
         );

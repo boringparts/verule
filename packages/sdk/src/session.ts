@@ -24,6 +24,11 @@ import {
   type EngineDirectivesScanResult,
 } from "./inline-ignore.ts";
 import {
+  createInstanceIdentityCache,
+  createInstanceIdentityQueries,
+  validateInstanceBehaviors,
+} from "./instance-identity.ts";
+import {
   ObservationCollector,
   locationMatchesTarget,
   normalizeObserveConfig,
@@ -167,6 +172,7 @@ function validateModels(models: readonly Model[]): readonly Model[] {
         `Model "${model.id}" version must be a string when provided.`,
       );
     }
+    validateInstanceBehaviors(model.id, model.instanceBehaviors);
     if (seen.has(model.id)) {
       throw new VeruleExecutionError(
         "INVALID_CONFIG",
@@ -192,6 +198,7 @@ export function defineModel(model: Model): Model {
       `Model "${model.id}" version must be a string when provided.`,
     );
   }
+  validateInstanceBehaviors(model.id, model.instanceBehaviors);
   return model;
 }
 
@@ -306,6 +313,9 @@ function summarizeModel(model: Model): ModelIdentitySummary {
         version: model.version ?? null,
         description: model.description ?? null,
         facts: model.facts ?? null,
+        ...(model.instanceBehaviors !== undefined
+          ? { instanceBehaviors: model.instanceBehaviors }
+          : {}),
       }),
     ),
   };
@@ -653,6 +663,7 @@ export async function openSession(
   const typeCache = new Map<string, Promise<TypeAtResult>>();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const callsValuesCache = createCallsValuesCache();
+  const instanceCache = createInstanceIdentityCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
   let cachedDirectives:
     | {
@@ -774,12 +785,45 @@ export async function openSession(
         : {}),
     });
 
+    const instanceQueries = createInstanceIdentityQueries({
+      client,
+      cache: instanceCache,
+      models,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus,
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
     return {
       project,
       models,
       getModel: (id: string) => models.find((model) => model.id === id),
       ...projectionQueries,
       ...callsValuesQueries,
+      ...instanceQueries,
       findSyntax: async (query: FindSyntaxOptions) => {
         assertActiveSnapshot();
         const cacheKey = JSON.stringify([
@@ -1416,6 +1460,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       callsValuesCache.clear();
+      instanceCache.clear();
       cachedDirectives = undefined;
 
       const recomputation: RecomputationScope = {
@@ -1471,6 +1516,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       callsValuesCache.clear();
+      instanceCache.clear();
       cachedDirectives = undefined;
       try {
         await client.request("snapshot.release", {

@@ -23,6 +23,41 @@ pub struct EvidenceItem {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<SourceLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<String>,
+}
+
+impl EvidenceItem {
+    pub const fn simple(
+        kind: &'static str,
+        message: String,
+        at: Option<SourceLocation>,
+    ) -> Self {
+        Self {
+            kind,
+            message,
+            at,
+            model_id: None,
+            declaration: None,
+        }
+    }
+
+    pub const fn model(
+        message: String,
+        at: Option<SourceLocation>,
+        model_id: String,
+        declaration: String,
+    ) -> Self {
+        Self {
+            kind: "model",
+            message,
+            at,
+            model_id: Some(model_id),
+            declaration: Some(declaration),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -181,11 +216,11 @@ impl FunctionCfg {
         if !combined_gaps.is_empty() {
             let mut evidence = Vec::new();
             for gap in &combined_gaps {
-                evidence.push(EvidenceItem {
-                    kind: "note",
-                    message: gap.message.clone(),
-                    at: gap.at.clone(),
-                });
+                evidence.push(EvidenceItem::simple(
+                    "note",
+                    gap.message.clone(),
+                    gap.at.clone(),
+                ));
             }
             return CoverageOutcome {
                 status: CoverageStatus::Unknown,
@@ -198,12 +233,12 @@ impl FunctionCfg {
         if !reachable_all[target_vertex] {
             return CoverageOutcome {
                 status: CoverageStatus::Unreachable,
-                evidence: vec![EvidenceItem {
-                    kind: "source",
-                    message: "Target is unreachable from function entry in modeled control flow."
+                evidence: vec![EvidenceItem::simple(
+                    "source",
+                    "Target is unreachable from function entry in modeled control flow."
                         .to_string(),
-                    at: Some(target_location.clone()),
-                }],
+                    Some(target_location.clone()),
+                )],
                 gaps: Vec::new(),
             };
         }
@@ -223,14 +258,14 @@ impl FunctionCfg {
                 for &edge_idx in selected_edges {
                     if edge_idx < self.branches.len() && seen.insert(edge_idx) {
                         let branch = &self.branches[edge_idx];
-                        evidence.push(EvidenceItem {
-                            kind: "source",
-                            message: format!(
+                        evidence.push(EvidenceItem::simple(
+                            "source",
+                            format!(
                                 "Path covered via {} branch of \"{}\".",
                                 branch.direction, branch.condition_text
                             ),
-                            at: Some(branch.location.clone()),
-                        });
+                            Some(branch.location.clone()),
+                        ));
                     }
                 }
                 return CoverageOutcome {
@@ -326,42 +361,42 @@ impl FunctionCfg {
                 EdgeKind::Ordinary => {}
                 EdgeKind::Branch(idx) => {
                     if let Some(branch) = self.branches.get(idx) {
-                        evidence.push(EvidenceItem {
-                            kind: "source",
-                            message: format!(
+                        evidence.push(EvidenceItem::simple(
+                            "source",
+                            format!(
                                 "Bypass path takes {} branch of \"{}\".",
                                 branch.direction, branch.condition_text
                             ),
-                            at: Some(branch.location.clone()),
-                        });
+                            Some(branch.location.clone()),
+                        ));
                     }
                 }
                 EdgeKind::SwitchNoMatch(sw_idx) => {
                     if let Some(loc) = self.switch_locations.get(sw_idx) {
-                        evidence.push(EvidenceItem {
-                            kind: "source",
-                            message: "Switch statement has no default clause; unmatched values bypass all cases.".to_string(),
-                            at: Some(loc.clone()),
-                        });
+                        evidence.push(EvidenceItem::simple(
+                            "source",
+                            "Switch statement has no default clause; unmatched values bypass all cases.".to_string(),
+                            Some(loc.clone()),
+                        ));
                     }
                 }
             }
         }
 
         if evidence.is_empty() {
-            evidence.push(EvidenceItem {
-                kind: "source",
-                message: "Control flow reaches target directly from function entry without passing selected branches.".to_string(),
-                at: Some(self.fn_location.clone()),
-            });
+            evidence.push(EvidenceItem::simple(
+                "source",
+                "Control flow reaches target directly from function entry without passing selected branches.".to_string(),
+                Some(self.fn_location.clone()),
+            ));
         }
 
-        evidence.push(EvidenceItem {
-            kind: "source",
-            message: "Target reached along bypass path without passing selected branches."
+        evidence.push(EvidenceItem::simple(
+            "source",
+            "Target reached along bypass path without passing selected branches."
                 .to_string(),
-            at: Some(target_location.clone()),
-        });
+            Some(target_location.clone()),
+        ));
         evidence
     }
 }
