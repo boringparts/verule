@@ -4,6 +4,7 @@ mod cfg;
 mod directives;
 mod instance_identity;
 mod observe;
+mod package_impl;
 mod projection;
 mod projects;
 mod serve;

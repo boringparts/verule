@@ -57,6 +57,10 @@ import {
   normalizeTargetSpec,
   type EngineCallIoMetrics,
 } from "./observation.ts";
+import {
+  createPackageImplCache,
+  createPackageImplQueries,
+} from "./package-impl.ts";
 import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
 import {
   buildDiagnostics,
@@ -769,6 +773,7 @@ export async function openSession(
   const callsValuesCache = createCallsValuesCache();
   const callEffectsCache = createCallEffectsCache();
   const instanceCache = createInstanceIdentityCache();
+  const packageImplCache = createPackageImplCache();
   const factCache = new FactCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
   let cachedDirectives:
@@ -1041,6 +1046,63 @@ export async function openSession(
     const adapterCallsValuesQueries = createCallsValuesQueries({
       client,
       cache: callsValuesCache,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (
+              _op,
+              cacheStatus,
+              _candidateCount,
+              durationMs,
+            ) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+            },
+          }
+        : {}),
+    });
+
+    const packageImplQueries = createPackageImplQueries({
+      client,
+      cache: packageImplCache,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus,
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
+    const adapterPackageImplQueries = createPackageImplQueries({
+      client,
+      cache: packageImplCache,
       sessionToken,
       snapshotId: activeSnapshotId,
       projectId: project.projectId,
@@ -1533,6 +1595,7 @@ export async function openSession(
         getModel: (id: string) => models.find((model) => model.id === id),
         ...adapterProjectionQueries,
         ...adapterCallsValuesQueries,
+        ...adapterPackageImplQueries,
         ...adapterCallEffectsQueries,
         findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
         typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
@@ -1572,6 +1635,7 @@ export async function openSession(
       ...callsValuesQueries,
       ...callEffectsQueries,
       ...instanceQueries,
+      ...packageImplQueries,
       findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, true),
       typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, true),
       facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
@@ -1893,6 +1957,7 @@ export async function openSession(
       callsValuesCache.clear();
       callEffectsCache.clear();
       instanceCache.clear();
+      packageImplCache.clear();
       factCache.clear();
       cachedDirectives = undefined;
       sessionRegistry = buildSessionRegistry(
@@ -1958,6 +2023,7 @@ export async function openSession(
       callsValuesCache.clear();
       callEffectsCache.clear();
       instanceCache.clear();
+      packageImplCache.clear();
       factCache.clear();
       cachedDirectives = undefined;
       try {

@@ -23,6 +23,7 @@ use crate::cfg::{
 use crate::directives::{ScannedDirective, scan_snapshot_directives};
 use crate::instance_identity::{FieldWriteIndex, InstanceHandleData};
 use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
+use crate::package_impl::PackageImplCache;
 use crate::projection::{QueryStep, execute_query_batch};
 pub use crate::projection::{SourceLocation, node_location, slice_source_text};
 use crate::projects::{
@@ -250,6 +251,7 @@ pub struct SnapshotState {
     pub cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
     pub call_graph_cache: FxHashMap<String, Arc<ProjectCallGraph>>,
     pub field_write_index: FxHashMap<String, Arc<FieldWriteIndex>>,
+    pub package_impl_cache: PackageImplCache,
     pub next_handle_id: u64,
 }
 
@@ -652,6 +654,7 @@ impl EngineServer {
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
                 field_write_index: FxHashMap::default(),
+                package_impl_cache: PackageImplCache::default(),
                 next_handle_id: 0,
             },
         );
@@ -740,6 +743,7 @@ impl EngineServer {
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
                 field_write_index: FxHashMap::default(),
+                package_impl_cache: PackageImplCache::default(),
                 next_handle_id: 0,
             },
         );
