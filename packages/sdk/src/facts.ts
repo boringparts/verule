@@ -227,10 +227,12 @@ export function defineFactProvider<
   factType: FactType<SubjectKind, Condition, Value>,
   extract: (
     ctx: AdapterContext,
-    request: FactExtractionRequest<SubjectKind, Condition>,
+    request: FactExtractionRequest<NoInfer<SubjectKind>, NoInfer<Condition>>,
   ) =>
-    | readonly FactContribution<SubjectKind, Value>[]
-    | Promise<readonly FactContribution<SubjectKind, Value>[]>,
+    | readonly FactContribution<NoInfer<SubjectKind>, NoInfer<Value>>[]
+    | Promise<
+        readonly FactContribution<NoInfer<SubjectKind>, NoInfer<Value>>[]
+      >,
 ): FactProvider<SubjectKind, Condition, Value> {
   return {
     factType,
@@ -386,7 +388,10 @@ type SubjectAccumulator<SubjectKind extends ProgramObjectKind, Value> = {
   gaps: Gap[];
 };
 
-function buildFactConflictError<SubjectKind extends ProgramObjectKind, Value>(params: {
+function buildFactConflictError<
+  SubjectKind extends ProgramObjectKind,
+  Value,
+>(params: {
   readonly factTypeId: string;
   readonly projectId: string;
   readonly snapshotId: number;
@@ -529,13 +534,19 @@ function mergeContributions<
             existingProviders: existing.providers,
             existingValue: existing.value,
             ...(outcome.conflict.existingConclusion !== undefined
-              ? { existingConclusionSummary: outcome.conflict.existingConclusion }
+              ? {
+                  existingConclusionSummary:
+                    outcome.conflict.existingConclusion,
+                }
               : {}),
             existingEvidence: existingEv,
             incomingProviderId: entry.adapterId,
             incomingValue: contribution.value,
             ...(outcome.conflict.incomingConclusion !== undefined
-              ? { incomingConclusionSummary: outcome.conflict.incomingConclusion }
+              ? {
+                  incomingConclusionSummary:
+                    outcome.conflict.incomingConclusion,
+                }
               : {}),
             incomingEvidence: incomingEv,
           });

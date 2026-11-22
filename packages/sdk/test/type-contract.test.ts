@@ -459,7 +459,6 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           expectedPattern: /TS2322|TS2345/u,
         },
         {
-        {
           name: "non-string providerId passed to facts",
           body: `
             declare const syntaxFact: FactType<"syntax", undefined, string>;

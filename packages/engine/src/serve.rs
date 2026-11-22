@@ -253,6 +253,19 @@ pub struct SnapshotState {
 }
 
 impl SnapshotState {
+    fn alloc_handle(&mut self, prefix: &str, project_id: &str, payload: HandlePayload) -> String {
+        self.next_handle_id += 1;
+        let id = format!("{prefix}:{}:{}", self.snapshot_id, self.next_handle_id);
+        self.handles.insert(
+            id.clone(),
+            HandleEntry {
+                project_id: project_id.to_string(),
+                payload,
+            },
+        );
+        id
+    }
+
     fn alloc_interned_handle(
         &mut self,
         prefix: &str,
@@ -263,15 +276,7 @@ impl SnapshotState {
         if let Some(existing) = self.handle_intern.get(&key) {
             return existing.clone();
         }
-        self.next_handle_id += 1;
-        let id = format!("{prefix}:{}:{}", self.snapshot_id, self.next_handle_id);
-        self.handles.insert(
-            id.clone(),
-            HandleEntry {
-                project_id: project_id.to_string(),
-                payload,
-            },
-        );
+        let id = self.alloc_handle(prefix, project_id, payload);
         self.handle_intern.insert(key, id.clone());
         id
     }

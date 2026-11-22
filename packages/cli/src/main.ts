@@ -437,25 +437,25 @@ function createCliContract(
                     const loc = conflict.subjectLocation
                       ? ` (${conflict.subjectLocation.file}:${conflict.subjectLocation.line}:${conflict.subjectLocation.column})`
                       : "";
-                    const lines = [
-                      `Check failed [${code}]: ${message}`,
+                    const head = `Check failed [${code}]: ${message}`;
+                    const tail = [
                       `  factType: ${conflict.factTypeId}`,
                       `  subject: ${conflict.subjectHandleId}${loc}`,
                     ];
                     for (const party of conflict.parties) {
-                      lines.push(
+                      tail.push(
                         `  provider [${party.providerId}]: ${party.conclusionSummary}`,
                       );
                       for (const ev of party.evidence) {
                         const evLoc = ev.at
                           ? ` (${ev.at.file}:${ev.at.line}:${ev.at.column})`
                           : "";
-                        lines.push(
+                        tail.push(
                           `    evidence (${ev.kind}): ${ev.message}${evLoc}`,
                         );
                       }
                     }
-                    return text.lines(lines);
+                    return text.lines([head, ...tail]);
                   },
                 },
               },

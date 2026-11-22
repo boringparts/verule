@@ -171,7 +171,8 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
               gaps: [
                 {
                   kind: "dynamic-role-expression",
-                  message: "Additional role expression could not be resolved statically",
+                  message:
+                    "Additional role expression could not be resolved statically",
                   at: target.location,
                 },
               ],
@@ -199,7 +200,8 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
               evidence: [
                 {
                   kind: "note",
-                  message: "Policy requires editor role and disables anonymous access",
+                  message:
+                    "Policy requires editor role and disables anonymous access",
                   at: target.location,
                 },
               ],
@@ -228,7 +230,8 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
               evidence: [
                 {
                   kind: "source",
-                  message: "Override sets allowAnonymous=true and denies reader",
+                  message:
+                    "Override sets allowAnonymous=true and denies reader",
                   at: target.location,
                 },
               ],
@@ -248,7 +251,7 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
           return [
             {
               subject: target.ref,
-              value: { method: "GET" },
+              value: { method: "GET" as const },
               evidence: [
                 {
                   kind: "source",
@@ -272,7 +275,7 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
           return [
             {
               subject: target.ref,
-              value: { method: "POST" },
+              value: { method: "POST" as const },
               evidence: [
                 {
                   kind: "source",
@@ -299,7 +302,10 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
 
       const makeRule = (
         onResult: (
-          items: readonly FactResult<"call" | "syntax", EndpointAuthFactValue>[],
+          items: readonly FactResult<
+            "call" | "syntax",
+            EndpointAuthFactValue
+          >[],
         ) => void,
       ) =>
         defineRule({
@@ -310,7 +316,10 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
             });
             onResult(items);
             for (const item of items) {
-              if (item.value.roles.includes("reader") && item.value.roles.includes("editor")) {
+              if (
+                item.value.roles.includes("reader") &&
+                item.value.roles.includes("editor")
+              ) {
                 const firstEv = item.evidence[0];
                 if (firstEv?.at) {
                   ctx.report({
@@ -330,7 +339,11 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
         config: defineConfig({
           tsconfig: "tsconfig.json",
           adapters: [partialProviderA, partialProviderB],
-          rules: [makeRule((items) => { capturedForward = items; })],
+          rules: [
+            makeRule((items) => {
+              capturedForward = items;
+            }),
+          ],
         }),
       });
       const reportReverse = await runCheck({
@@ -338,7 +351,11 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
         config: defineConfig({
           tsconfig: "tsconfig.json",
           adapters: [partialProviderB, partialProviderA],
-          rules: [makeRule((items) => { capturedReverse = items; })],
+          rules: [
+            makeRule((items) => {
+              capturedReverse = items;
+            }),
+          ],
         }),
       });
 
@@ -415,14 +432,20 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
       assert.equal(authErrForward.message, authErrReverse.message);
       assert.ok(authErrForward.conflict);
       assert.deepEqual(authErrForward.conflict, authErrReverse.conflict);
-      assert.equal(authErrForward.conflict.factTypeId, "thirdparty.endpoint.auth");
+      assert.equal(
+        authErrForward.conflict.factTypeId,
+        "thirdparty.endpoint.auth",
+      );
       assert.deepEqual(
         authErrForward.conflict.parties.map((p) => p.providerId),
         ["auth-override-provider", "auth-policy-provider"],
       );
       assert.match(authErrForward.message, /allowAnonymous=true/u);
       assert.match(authErrForward.message, /allowAnonymous=false/u);
-      assert.match(authErrForward.message, /Override sets allowAnonymous=true/u);
+      assert.match(
+        authErrForward.message,
+        /Override sets allowAnonymous=true/u,
+      );
       assert.match(authErrForward.message, /Policy requires editor role/u);
 
       // 3. Default conflict (FactType without custom merge) includes both conclusions & evidence
@@ -541,7 +564,11 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
       },
     });
 
-    const UnrelatedFact = defineFactType<"syntax", undefined, { readonly ok: true }>({
+    const UnrelatedFact = defineFactType<
+      "syntax",
+      undefined,
+      { readonly ok: true }
+    >({
       id: "thirdparty.unrelated",
       subjectKind: "syntax",
     });
@@ -603,23 +630,33 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
           zodExtracts += 1;
           const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
           const resolved = await ctx.resolveCalls(calls.map((c) => c.ref));
-          return resolved
-            .filter((_, idx) => calls[idx]!.text.startsWith("zParse("))
-            .map((row, idx) => ({
-              subject: row.call,
-              value: {
-                requiredFields: ["name"],
-                optionalFields: [],
-                schemaName: "userSchema",
-              },
-              evidence: [
-                {
-                  kind: "source" as const,
-                  message: "Extracted from zParse(userSchema, ...)",
-                  at: calls.filter((c) => c.text.startsWith("zParse("))[idx]!.location,
+          return resolved.flatMap((row, idx) => {
+            const callSyntax = calls[idx];
+            if (
+              !callSyntax ||
+              !callSyntax.text.startsWith("zParse(") ||
+              row.call === null
+            ) {
+              return [];
+            }
+            return [
+              {
+                subject: row.call,
+                value: {
+                  requiredFields: ["name"],
+                  optionalFields: [],
+                  schemaName: "userSchema",
                 },
-              ],
-            }));
+                evidence: [
+                  {
+                    kind: "source" as const,
+                    message: "Extracted from zParse(userSchema, ...)",
+                    at: callSyntax.location,
+                  },
+                ],
+              },
+            ];
+          });
         }),
       ],
     });
@@ -631,33 +668,40 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
           valibotExtracts += 1;
           const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
           const resolved = await ctx.resolveCalls(calls.map((c) => c.ref));
-          const matchedCalls = calls.filter((c) => c.text.startsWith("vParse("));
-          return resolved
-            .filter((_, idx) => calls[idx]!.text.startsWith("vParse("))
-            .map((row, idx) => ({
-              subject: row.call,
-              value: {
-                requiredFields: ["name"],
-                optionalFields: [],
-                schemaName: "userValibot",
-              },
-              evidence: [
-                {
-                  kind: "source" as const,
-                  message: "Extracted from vParse(userValibot, ...)",
-                  at: matchedCalls[idx]!.location,
+          return resolved.flatMap((row, idx) => {
+            const callSyntax = calls[idx];
+            if (
+              !callSyntax ||
+              !callSyntax.text.startsWith("vParse(") ||
+              row.call === null
+            ) {
+              return [];
+            }
+            return [
+              {
+                subject: row.call,
+                value: {
+                  requiredFields: ["name"],
+                  optionalFields: [],
+                  schemaName: "userValibot",
                 },
-              ],
-            }));
+                evidence: [
+                  {
+                    kind: "source" as const,
+                    message: "Extracted from vParse(userValibot, ...)",
+                    at: callSyntax.location,
+                  },
+                ],
+              },
+            ];
+          });
         }),
       ],
     });
 
     const unrelatedAdapter = defineAdapter({
       id: "unrelated-provider",
-      provides: [
-        defineFactProvider(UnrelatedFact, () => []),
-      ],
+      provides: [defineFactProvider(UnrelatedFact, () => [])],
     });
 
     try {
@@ -672,7 +716,10 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
       });
       assert.equal(repZod.status, "findings");
       assert.equal(repZod.diagnostics.length, 1);
-      assert.match(repZod.diagnostics[0]!.message, /userSchema.*zod-like-provider/u);
+      assert.match(
+        repZod.diagnostics[0]!.message,
+        /userSchema.*zod-like-provider/u,
+      );
 
       // 2. Replace provider with valibotLikeProvider; zero rule changes!
       const repValibot = await runCheck({

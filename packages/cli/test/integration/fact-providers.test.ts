@@ -262,11 +262,18 @@ void test("verule check supports provider replacement without rule changes and e
     assert.equal(alphaRes.status, 1, alphaRes.stderr);
     const alphaEnv = JSON.parse(alphaRes.stdout) as {
       data: {
-        diagnostics: { message: string; at: { line: number }; evidence: { message: string }[] }[];
+        diagnostics: {
+          message: string;
+          at: { line: number };
+          evidence: { message: string }[];
+        }[];
       };
     };
     assert.equal(alphaEnv.data.diagnostics.length, 1);
-    assert.match(alphaEnv.data.diagnostics[0]!.message, /alphaSchema.*alpha-validator/u);
+    assert.match(
+      alphaEnv.data.diagnostics[0]!.message,
+      /alphaSchema.*alpha-validator/u,
+    );
     assert.equal(alphaEnv.data.diagnostics[0]!.at.line, 4);
 
     // Swap provider to betaProvider while shared-rule.mjs is untouched
@@ -277,11 +284,18 @@ void test("verule check supports provider replacement without rule changes and e
     assert.equal(betaRes.status, 1, betaRes.stderr);
     const betaEnv = JSON.parse(betaRes.stdout) as {
       data: {
-        diagnostics: { message: string; at: { line: number }; evidence: { message: string }[] }[];
+        diagnostics: {
+          message: string;
+          at: { line: number };
+          evidence: { message: string }[];
+        }[];
       };
     };
     assert.equal(betaEnv.data.diagnostics.length, 1);
-    assert.match(betaEnv.data.diagnostics[0]!.message, /betaSchema.*beta-validator/u);
+    assert.match(
+      betaEnv.data.diagnostics[0]!.message,
+      /betaSchema.*beta-validator/u,
+    );
     assert.equal(betaEnv.data.diagnostics[0]!.at.line, 7);
 
     // Explicit providerId filtering reflected in observation & explanation
@@ -304,13 +318,25 @@ void test("verule check supports provider replacement without rule changes and e
       data: {
         diagnostics: { message: string }[];
         observation: { providers: string[] };
-        explanation: { providers: string[]; queries: { op: string; provider: string; candidateCount: number }[] };
+        explanation: {
+          providers: string[];
+          queries: { op: string; provider: string; candidateCount: number }[];
+        };
       };
     };
     assert.equal(scopedEnv.data.diagnostics.length, 1);
-    assert.equal(scopedEnv.data.diagnostics[0]!.message, "Scoped to [beta-validator]");
-    assert.equal(scopedEnv.data.observation.providers.includes("beta-validator"), true);
-    assert.equal(scopedEnv.data.observation.providers.includes("alpha-validator"), false);
+    assert.equal(
+      scopedEnv.data.diagnostics[0]!.message,
+      "Scoped to [beta-validator]",
+    );
+    assert.equal(
+      scopedEnv.data.observation.providers.includes("beta-validator"),
+      true,
+    );
+    assert.equal(
+      scopedEnv.data.observation.providers.includes("alpha-validator"),
+      false,
+    );
     assert.deepEqual(scopedEnv.data.explanation.providers, ["beta-validator"]);
     assert.equal(
       scopedEnv.data.explanation.queries.find((q) => q.op.startsWith("facts:"))
@@ -439,8 +465,16 @@ void test("verule check merges complementary partial facts identically and exits
       ["check", "--config", "verule.merge.ba.mjs", "--output", "json"],
       root,
     );
-    assert.equal(mergeAB.status, 1, `stdout=${mergeAB.stdout}\nstderr=${mergeAB.stderr}`);
-    assert.equal(mergeBA.status, 1, `stdout=${mergeBA.stdout}\nstderr=${mergeBA.stderr}`);
+    assert.equal(
+      mergeAB.status,
+      1,
+      `stdout=${mergeAB.stdout}\nstderr=${mergeAB.stderr}`,
+    );
+    assert.equal(
+      mergeBA.status,
+      1,
+      `stdout=${mergeBA.stdout}\nstderr=${mergeBA.stderr}`,
+    );
     assert.equal(mergeAB.stdout, mergeBA.stdout);
 
     const mergeEnv = JSON.parse(mergeAB.stdout) as {
@@ -449,8 +483,15 @@ void test("verule check merges complementary partial facts identically and exits
         gaps: { kind: string }[];
       };
     };
-    assert.equal(mergeEnv.data.diagnostics.length, 1, JSON.stringify(mergeEnv.data.diagnostics));
-    assert.match(mergeEnv.data.diagnostics[0]!.message, /\[provider-a, provider-b\]/u);
+    assert.equal(
+      mergeEnv.data.diagnostics.length,
+      1,
+      JSON.stringify(mergeEnv.data.diagnostics),
+    );
+    assert.match(
+      mergeEnv.data.diagnostics[0]!.message,
+      /\[provider-a, provider-b\]/u,
+    );
     assert.equal(mergeEnv.data.diagnostics[0]!.evidence.length, 2);
     assert.equal(mergeEnv.data.gaps.length, 1);
 
@@ -490,7 +531,10 @@ void test("verule check merges complementary partial facts identically and exits
     assert.equal(errEnv.variant, "failed");
     assert.equal(errEnv.data.code, "FACT_CONFLICT");
     assert.ok(errEnv.data.conflict);
-    assert.equal(errEnv.data.conflict.factTypeId, "thirdparty.validator.contract");
+    assert.equal(
+      errEnv.data.conflict.factTypeId,
+      "thirdparty.validator.contract",
+    );
     assert.deepEqual(
       errEnv.data.conflict.parties.map((p) => p.providerId),
       ["provider-a", "provider-c"],

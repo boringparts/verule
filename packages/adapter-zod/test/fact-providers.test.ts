@@ -242,7 +242,7 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
             {
               subject: target.ref,
               value: {
-                siteKind: "call",
+                siteKind: "call" as const,
                 schemaName: "UserInput",
                 requiredFields: ["id"],
                 optionalFields: [],
@@ -250,11 +250,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
                 fields: {
                   id: {
                     name: "id",
-                    requirement: "required",
+                    requirement: "required" as const,
                     nullable: false,
                     evidence: [
                       {
-                        kind: "source",
+                        kind: "source" as const,
                         message: "part-a resolved field id as required",
                         at: target.location,
                       },
@@ -294,7 +294,7 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
             {
               subject: target.ref,
               value: {
-                siteKind: "call",
+                siteKind: "call" as const,
                 schemaName: "UserInput",
                 requiredFields: ["age"],
                 optionalFields: ["bio"],
@@ -302,11 +302,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
                 fields: {
                   age: {
                     name: "age",
-                    requirement: "required",
+                    requirement: "required" as const,
                     nullable: false,
                     evidence: [
                       {
-                        kind: "source",
+                        kind: "source" as const,
                         message: "part-b resolved field age as required",
                         at: target.location,
                       },
@@ -314,11 +314,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
                   },
                   bio: {
                     name: "bio",
-                    requirement: "optional",
+                    requirement: "optional" as const,
                     nullable: false,
                     evidence: [
                       {
-                        kind: "source",
+                        kind: "source" as const,
                         message: "part-b resolved field bio as optional",
                         at: target.location,
                       },
@@ -351,7 +351,7 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
             {
               subject: target.ref,
               value: {
-                siteKind: "call",
+                siteKind: "call" as const,
                 schemaName: "UserInput",
                 requiredFields: [],
                 optionalFields: ["age"],
@@ -359,11 +359,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
                 fields: {
                   age: {
                     name: "age",
-                    requirement: "optional",
+                    requirement: "optional" as const,
                     nullable: false,
                     evidence: [
                       {
-                        kind: "source",
+                        kind: "source" as const,
                         message: "conflict-c resolved field age as optional",
                         at: target.location,
                       },
@@ -415,7 +415,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
         config: defineConfig({
           tsconfig: "tsconfig.json",
           adapters: [partialValidatorA, partialValidatorB],
-          rules: [makeRule((items) => { mergedForward = items; })],
+          rules: [
+            makeRule((items) => {
+              mergedForward = items;
+            }),
+          ],
         }),
       });
       const repReverse = await runCheck({
@@ -423,7 +427,11 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
         config: defineConfig({
           tsconfig: "tsconfig.json",
           adapters: [partialValidatorB, partialValidatorA],
-          rules: [makeRule((items) => { mergedReverse = items; })],
+          rules: [
+            makeRule((items) => {
+              mergedReverse = items;
+            }),
+          ],
         }),
       });
 

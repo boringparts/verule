@@ -1911,7 +1911,7 @@ void test("runs the independently deployed CLI with its production SDK and engin
     ["verule.ba.mjs", "[providerB, providerA]"],
     ["verule.conflict.ac.mjs", "[providerA, providerConflict]"],
     ["verule.conflict.ca.mjs", "[providerConflict, providerA]"],
-  ]) {
+  ] as const) {
     writeFileSync(
       join(factHost.path, name),
       [
@@ -1925,34 +1925,84 @@ void test("runs the independently deployed CLI with its production SDK and engin
     );
   }
 
-  const swapA = invoke(factHost.path, "check", "--config", "verule.a.mjs", "--output", "json");
-  const swapB = invoke(factHost.path, "check", "--config", "verule.b.mjs", "--output", "json");
+  const swapA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.a.mjs",
+    "--output",
+    "json",
+  );
+  const swapB = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.b.mjs",
+    "--output",
+    "json",
+  );
   assert.equal(swapA.status, 1, swapA.stderr);
   assert.equal(swapB.status, 1, swapB.stderr);
   assert.match(swapA.stdout, /\[provider-a\]/u);
   assert.match(swapB.stdout, /\[provider-b\]/u);
 
-  const mergeAB = invoke(factHost.path, "check", "--config", "verule.ab.mjs", "--output", "json");
-  const mergeBA = invoke(factHost.path, "check", "--config", "verule.ba.mjs", "--output", "json");
+  const mergeAB = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.ab.mjs",
+    "--output",
+    "json",
+  );
+  const mergeBA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.ba.mjs",
+    "--output",
+    "json",
+  );
   assert.equal(mergeAB.status, 1, mergeAB.stderr);
   assert.equal(mergeBA.status, 1, mergeBA.stderr);
   assert.equal(mergeAB.stdout, mergeBA.stdout);
   assert.match(mergeAB.stdout, /\[provider-a, provider-b\]/u);
 
-  const conflictAC = invoke(factHost.path, "check", "--config", "verule.conflict.ac.mjs", "--output", "json");
-  const conflictCA = invoke(factHost.path, "check", "--config", "verule.conflict.ca.mjs", "--output", "json");
+  const conflictAC = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.conflict.ac.mjs",
+    "--output",
+    "json",
+  );
+  const conflictCA = invoke(
+    factHost.path,
+    "check",
+    "--config",
+    "verule.conflict.ca.mjs",
+    "--output",
+    "json",
+  );
   assert.equal(conflictAC.status, 2);
   assert.equal(conflictCA.status, 2);
   assert.equal(conflictAC.stdout, "");
   assert.equal(conflictAC.stderr, conflictCA.stderr);
   const conflictEnv = JSON.parse(conflictAC.stderr) as {
     kind: string;
-    data: { code: string; conflict: { parties: { providerId: string; conclusionSummary: string }[] } };
+    data: {
+      code: string;
+      conflict: {
+        parties: { providerId: string; conclusionSummary: string }[];
+      };
+    };
   };
   assert.equal(conflictEnv.kind, "failure");
   assert.equal(conflictEnv.data.code, "FACT_CONFLICT");
   assert.deepEqual(
-    conflictEnv.data.conflict.parties.map((p) => [p.providerId, p.conclusionSummary]),
+    conflictEnv.data.conflict.parties.map((p) => [
+      p.providerId,
+      p.conclusionSummary,
+    ]),
     [
       ["provider-a", "id=required"],
       ["provider-conflict", "id=optional"],
