@@ -53,5 +53,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal --default-toolchain none \
     && "${CARGO_HOME}/bin/rustup" toolchain install ${RUST_TOOLCHAIN} --profile minimal --component rustfmt --component clippy \
     && "${CARGO_HOME}/bin/rustup" default ${RUST_TOOLCHAIN} \
-    && find "${CARGO_HOME}/bin" -maxdepth 1 -type f -exec ln -sf {} /usr/local/bin/ \; \
     && chmod -R a+w ${RUSTUP_HOME} ${CARGO_HOME}
+
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
