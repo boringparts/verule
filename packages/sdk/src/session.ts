@@ -546,7 +546,6 @@ function buildDiagnostics(
   });
 }
 
-<<<<<<< HEAD
 function resolveNextConfig(
   current: NormalizedVeruleConfig,
   options?: SessionUpdateOptions,
