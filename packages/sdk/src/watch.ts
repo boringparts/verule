@@ -13,16 +13,44 @@ import { defineConfig, openSession } from "./session.ts";
 import {
   VeruleExecutionError,
   type AnalysisSession,
+  type CheckReport,
   type MemoryStats,
   type NormalizedVeruleConfig,
+  type ObserveLimitInput,
+  type ObserveMode,
+  type ObserveOptions,
   type RecomputationScope,
+  type SessionCheckOptions,
+  type SessionUpdateResult,
+  type SourceTarget,
+  type VeruleConfig,
   type VeruleErrorCode,
+  type WatchConfigLoadResult,
   type WatchEvent,
   type WatchProjectOptions,
 } from "./types.ts";
 
-type PendingBatch = {
-  readonly paths: readonly string[];
+export type WorkspaceFailureInfo = {
+  readonly code: VeruleErrorCode;
+  readonly message: string;
+};
+
+export type WorkspaceControllerOptions = {
+  readonly cwd: string;
+  readonly config?: VeruleConfig;
+  readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
+  readonly watchFiles?: readonly string[];
+  readonly observe?: ObserveMode;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly debounceMs?: number;
+  readonly onBatchReady?: () => void;
+};
+
+export type WorkspaceCheckParams = {
+  readonly ruleIds?: readonly string[];
+  readonly at?: string | SourceTarget;
+  readonly observe?: ObserveMode | ObserveOptions;
+  readonly observeLimit?: ObserveLimitInput;
 };
 
 function normalizeRelPath(absCwd: string, absPath: string): string {
@@ -48,10 +76,7 @@ function hashFileContent(absPath: string): string | undefined {
   }
 }
 
-function toExecutionErrorInfo(err: unknown): {
-  readonly code: VeruleErrorCode;
-  readonly message: string;
-} {
+export function toExecutionErrorInfo(err: unknown): WorkspaceFailureInfo {
   if (err instanceof VeruleExecutionError) {
     return { code: err.code, message: err.message };
   }
@@ -61,7 +86,7 @@ function toExecutionErrorInfo(err: unknown): {
   };
 }
 
-function initialRecomputationScope(
+export function initialRecomputationScope(
   session: AnalysisSession,
 ): RecomputationScope {
   const files = new Set<string>();
@@ -84,19 +109,47 @@ function recordSessionFiles(
   absCwd: string,
   session: AnalysisSession,
   knownFileHashes: Map<string, string>,
+  knownWorkspaceFiles: Set<string>,
 ): void {
   for (const project of session.projects) {
     const configAbs = normalizeAbsPath(resolve(absCwd, project.configFile));
     const configHash = hashFileContent(configAbs);
     if (configHash !== undefined) {
       knownFileHashes.set(configAbs, configHash);
+      knownWorkspaceFiles.add(configAbs);
     }
     for (const relFile of project.sourceFiles) {
       const fileAbs = normalizeAbsPath(resolve(absCwd, relFile));
       const fileHash = hashFileContent(fileAbs);
       if (fileHash !== undefined) {
         knownFileHashes.set(fileAbs, fileHash);
+        knownWorkspaceFiles.add(fileAbs);
       }
+    }
+  }
+}
+
+function collectWorkspaceFiles(
+  absCwd: string,
+  dir: string,
+  out: Set<string>,
+): void {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const absChild = normalizeAbsPath(resolve(dir, entry.name));
+    const rel = normalizeRelPath(absCwd, absChild);
+    if (isIgnoredRelativePath(rel)) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      collectWorkspaceFiles(absCwd, absChild, out);
+    } else if (entry.isFile()) {
+      out.add(absChild);
     }
   }
 }
@@ -132,19 +185,25 @@ function createAbortPromise(signal: AbortSignal | undefined): {
   };
 }
 
+export type WorkspaceApplyResult =
+  | { readonly applied: false }
+  | {
+      readonly applied: true;
+      readonly trigger: "initial" | "change";
+      readonly session: AnalysisSession;
+      readonly recomputation: RecomputationScope;
+      readonly memory: MemoryStats;
+    };
+
 /**
- * Watches a project directory (and any external config dependency files), updating an
- * {@link AnalysisSession} incrementally and yielding a complete report or failure record
- * after each initial check and subsequent save.
+ * Shared incremental workspace controller used by both `watchProject` and `startSharedSession`.
+ * Serializes filesystem watcher updates, synchronous disk checks, config reloads, and checks
+ * on a single underlying `AnalysisSession`.
  */
-export async function* watchProject(
-  options: WatchProjectOptions,
-): AsyncGenerator<WatchEvent, void, void> {
+export function createWorkspaceController(options: WorkspaceControllerOptions) {
   const absCwd = resolve(options.cwd);
   const debounceMs = options.debounceMs ?? 50;
-  const signal = options.signal;
 
-  let sequence = 0;
   let session: AnalysisSession | undefined;
   let lastConfig: NormalizedVeruleConfig | undefined;
   const configWatchFiles = new Set<string>(
@@ -153,38 +212,58 @@ export async function* watchProject(
     ),
   );
   const knownFileHashes = new Map<string, string>();
+  const knownWorkspaceFiles = new Set<string>();
   for (const file of configWatchFiles) {
     const hash = hashFileContent(file);
     if (hash !== undefined) {
       knownFileHashes.set(file, hash);
+      knownWorkspaceFiles.add(file);
     }
   }
+  if (existsSync(absCwd)) {
+    collectWorkspaceFiles(absCwd, absCwd, knownWorkspaceFiles);
+  }
+
   const externalWatchers = new Map<string, FSWatcher>();
   let rootWatcher: FSWatcher | undefined;
 
   const pendingPaths = new Set<string>();
-  const batchQueue: PendingBatch[] = [];
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-  let wakeQueue: (() => void) | undefined;
+  let closed = false;
 
-  function notifyQueue(): void {
-    if (wakeQueue) {
-      const wake = wakeQueue;
-      wakeQueue = undefined;
-      wake();
+  let lastFailure: WorkspaceFailureInfo | undefined;
+  let pendingRetryConfig = false;
+  const pendingRetryChanged = new Set<string>();
+  const pendingRetryCreated = new Set<string>();
+  const pendingRetryDeleted = new Set<string>();
+  let cachedDefaultReport:
+    | {
+        readonly snapshotId: number;
+        readonly configDigest: string;
+        readonly report: CheckReport;
+      }
+    | undefined;
+
+  let queue: Promise<void> = Promise.resolve();
+
+  function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+    const next = queue.then(fn, fn);
+    queue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  function clearDebounce(): void {
+    if (debounceTimer !== undefined) {
+      clearTimeout(debounceTimer);
+      debounceTimer = undefined;
     }
   }
 
-  function flushDebounce(): void {
-    debounceTimer = undefined;
-    if (pendingPaths.size === 0) return;
-    const paths = [...pendingPaths];
-    pendingPaths.clear();
-    batchQueue.push({ paths });
-    notifyQueue();
-  }
-
   function schedulePath(absPath: string): void {
+    if (closed) return;
     const normalized = normalizeAbsPath(absPath);
     const rel = normalizeRelPath(absCwd, normalized);
     const isExplicitWatchFile = configWatchFiles.has(normalized);
@@ -218,13 +297,15 @@ export async function* watchProject(
       pendingPaths.add(normalized);
     }
 
-    if (debounceTimer !== undefined) {
-      clearTimeout(debounceTimer);
-    }
-    debounceTimer = setTimeout(flushDebounce, debounceMs);
+    clearDebounce();
+    debounceTimer = setTimeout(() => {
+      debounceTimer = undefined;
+      options.onBatchReady?.();
+    }, debounceMs);
   }
 
   function syncWatchers(): void {
+    if (closed) return;
     if (!rootWatcher && existsSync(absCwd)) {
       rootWatcher = watch(absCwd, { recursive: true }, (_event, filename) => {
         if (typeof filename === "string" && filename.length > 0) {
@@ -284,6 +365,7 @@ export async function* watchProject(
           const hash = hashFileContent(absFile);
           if (hash !== undefined) {
             knownFileHashes.set(absFile, hash);
+            knownWorkspaceFiles.add(absFile);
           }
         }
       }
@@ -292,9 +374,395 @@ export async function* watchProject(
     return options.config ? defineConfig(options.config) : defineConfig({});
   }
 
-  async function waitForNextBatch(): Promise<PendingBatch | undefined> {
-    if (signal?.aborted) return undefined;
-    if (batchQueue.length > 0) return batchQueue.shift();
+  function classifyPaths(paths: Iterable<string>): {
+    readonly changed: string[];
+    readonly created: string[];
+    readonly deleted: string[];
+    readonly touchedConfig: boolean;
+  } {
+    const changed: string[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    let touchedConfig = false;
+
+    const uniquePaths = new Set(paths);
+    for (const absPath of uniquePaths) {
+      const rel = normalizeRelPath(absCwd, absPath);
+      const prevHash = knownFileHashes.get(absPath);
+      const nextHash = hashFileContent(absPath);
+
+      if (nextHash !== undefined) {
+        knownWorkspaceFiles.add(absPath);
+        if (prevHash === undefined) {
+          if (configWatchFiles.has(absPath)) {
+            touchedConfig = true;
+          }
+          knownFileHashes.set(absPath, nextHash);
+          created.push(rel);
+        } else if (nextHash !== prevHash) {
+          if (configWatchFiles.has(absPath)) {
+            touchedConfig = true;
+          }
+          knownFileHashes.set(absPath, nextHash);
+          changed.push(rel);
+        }
+      } else {
+        knownWorkspaceFiles.delete(absPath);
+        if (prevHash !== undefined) {
+          if (configWatchFiles.has(absPath)) {
+            touchedConfig = true;
+          }
+          knownFileHashes.delete(absPath);
+          deleted.push(rel);
+        }
+      }
+    }
+
+    return { changed, created, deleted, touchedConfig };
+  }
+
+  function drainPendingPaths(): readonly string[] {
+    if (pendingPaths.size === 0) return [];
+    const paths = [...pendingPaths];
+    pendingPaths.clear();
+    return paths;
+  }
+
+  function recordPendingFailure(
+    err: unknown,
+    changed: readonly string[],
+    created: readonly string[],
+    deleted: readonly string[],
+    reloadConfigNeeded: boolean,
+  ): never {
+    for (const file of changed) pendingRetryChanged.add(file);
+    for (const file of created) pendingRetryCreated.add(file);
+    for (const file of deleted) pendingRetryDeleted.add(file);
+    if (reloadConfigNeeded) {
+      pendingRetryConfig = true;
+    }
+    lastFailure = toExecutionErrorInfo(err);
+    cachedDefaultReport = undefined;
+    throw err;
+  }
+
+  function clearFailureState(): void {
+    lastFailure = undefined;
+    pendingRetryConfig = false;
+    pendingRetryChanged.clear();
+    pendingRetryCreated.clear();
+    pendingRetryDeleted.clear();
+  }
+
+  async function applyPathsInternal(
+    paths: readonly string[],
+  ): Promise<WorkspaceApplyResult> {
+    const classified = classifyPaths(paths);
+    const mergedChanged = [
+      ...new Set([...pendingRetryChanged, ...classified.changed]),
+    ];
+    const mergedCreated = [
+      ...new Set([...pendingRetryCreated, ...classified.created]),
+    ];
+    const mergedDeleted = [
+      ...new Set([...pendingRetryDeleted, ...classified.deleted]),
+    ];
+    const needConfigReload =
+      classified.touchedConfig || pendingRetryConfig || !lastConfig;
+
+    const hasFileChanges =
+      mergedChanged.length > 0 ||
+      mergedCreated.length > 0 ||
+      mergedDeleted.length > 0;
+
+    if (!hasFileChanges && !classified.touchedConfig) {
+      return { applied: false };
+    }
+
+    let reloadedConfig: NormalizedVeruleConfig | undefined;
+    if (needConfigReload) {
+      try {
+        reloadedConfig = await resolveCurrentConfig();
+        lastConfig = reloadedConfig;
+        syncWatchers();
+      } catch (err) {
+        syncWatchers();
+        recordPendingFailure(
+          err,
+          mergedChanged,
+          mergedCreated,
+          mergedDeleted,
+          true,
+        );
+      }
+    }
+
+    if (!session) {
+      try {
+        session = await openSession({
+          cwd: absCwd,
+          config: lastConfig!,
+          ...(options.observe !== undefined
+            ? { observe: options.observe }
+            : {}),
+          ...(options.observeLimit !== undefined
+            ? { observeLimit: options.observeLimit }
+            : {}),
+        });
+        recordSessionFiles(
+          absCwd,
+          session,
+          knownFileHashes,
+          knownWorkspaceFiles,
+        );
+        clearFailureState();
+        cachedDefaultReport = undefined;
+        return {
+          applied: true,
+          trigger: "initial",
+          session,
+          recomputation: initialRecomputationScope(session),
+          memory: session.memory,
+        };
+      } catch (err) {
+        syncWatchers();
+        recordPendingFailure(
+          err,
+          mergedChanged,
+          mergedCreated,
+          mergedDeleted,
+          reloadedConfig !== undefined,
+        );
+      }
+    }
+
+    let updateResult: SessionUpdateResult;
+    try {
+      updateResult = await session.update({
+        changed: mergedChanged,
+        created: mergedCreated,
+        deleted: mergedDeleted,
+        ...(reloadedConfig !== undefined ? { config: reloadedConfig } : {}),
+      });
+    } catch (err) {
+      syncWatchers();
+      recordPendingFailure(
+        err,
+        mergedChanged,
+        mergedCreated,
+        mergedDeleted,
+        reloadedConfig !== undefined,
+      );
+    }
+
+    recordSessionFiles(absCwd, session, knownFileHashes, knownWorkspaceFiles);
+    clearFailureState();
+    cachedDefaultReport = undefined;
+    return {
+      applied: true,
+      trigger: "change",
+      session,
+      recomputation: updateResult.recomputation,
+      memory: updateResult.memory,
+    };
+  }
+
+  /**
+   * Synchronously inspects all tracked files and scans for newly added workspace files
+   * so an immediate query after saving never races with OS watcher debounce.
+   */
+  function collectDiskSyncCandidates(): readonly string[] {
+    clearDebounce();
+    const candidates = new Set<string>(drainPendingPaths());
+    for (const file of knownFileHashes.keys()) {
+      candidates.add(file);
+    }
+    for (const file of configWatchFiles) {
+      candidates.add(file);
+    }
+    if (existsSync(absCwd)) {
+      const currentDiskFiles = new Set<string>();
+      collectWorkspaceFiles(absCwd, absCwd, currentDiskFiles);
+      for (const diskFile of currentDiskFiles) {
+        if (!knownWorkspaceFiles.has(diskFile)) {
+          candidates.add(diskFile);
+        }
+      }
+    }
+    return [...candidates];
+  }
+
+  return {
+    absCwd,
+    get session() {
+      return session;
+    },
+    syncWatchers,
+    openInitial: () =>
+      runSerialized(async () => {
+        syncWatchers();
+        try {
+          lastConfig = await resolveCurrentConfig();
+          syncWatchers();
+          session = await openSession({
+            cwd: absCwd,
+            config: lastConfig,
+            ...(options.observe !== undefined
+              ? { observe: options.observe }
+              : {}),
+            ...(options.observeLimit !== undefined
+              ? { observeLimit: options.observeLimit }
+              : {}),
+          });
+          recordSessionFiles(
+            absCwd,
+            session,
+            knownFileHashes,
+            knownWorkspaceFiles,
+          );
+          clearFailureState();
+          cachedDefaultReport = undefined;
+          return {
+            session,
+            recomputation: initialRecomputationScope(session),
+            memory: session.memory,
+          };
+        } catch (err) {
+          syncWatchers();
+          lastFailure = toExecutionErrorInfo(err);
+          throw err;
+        }
+      }),
+    applyPendingBatch: () =>
+      runSerialized(async () => {
+        const paths = drainPendingPaths();
+        if (paths.length === 0) {
+          return { applied: false } satisfies WorkspaceApplyResult;
+        }
+        return applyPathsInternal(paths);
+      }),
+    checkLatest: (params?: WorkspaceCheckParams) =>
+      runSerialized(async (): Promise<CheckReport> => {
+        const candidates = collectDiskSyncCandidates();
+        if (candidates.length > 0) {
+          await applyPathsInternal(candidates);
+        }
+        if (lastFailure !== undefined) {
+          throw new VeruleExecutionError(lastFailure.code, lastFailure.message);
+        }
+        if (!session) {
+          throw new VeruleExecutionError(
+            "SESSION_CLOSED",
+            "Analysis session is not open.",
+          );
+        }
+
+        const isDefaultQuery =
+          !params?.ruleIds?.length &&
+          params?.at === undefined &&
+          (params?.observe === undefined || params.observe === "off") &&
+          params?.observeLimit === undefined;
+
+        if (
+          isDefaultQuery &&
+          cachedDefaultReport !== undefined &&
+          cachedDefaultReport.snapshotId === session.snapshotId
+        ) {
+          const checkReport = cachedDefaultReport.report;
+          return checkReport;
+        }
+
+        const checkOptions: SessionCheckOptions | undefined =
+          params !== undefined
+            ? {
+                ...(params.ruleIds !== undefined
+                  ? { ruleIds: params.ruleIds }
+                  : {}),
+                ...(params.at !== undefined ? { at: params.at } : {}),
+                ...(params.observe !== undefined
+                  ? { observe: params.observe }
+                  : {}),
+                ...(params.observeLimit !== undefined
+                  ? { observeLimit: params.observeLimit }
+                  : {}),
+              }
+            : undefined;
+        const report = await session.check(checkOptions);
+        if (isDefaultQuery) {
+          cachedDefaultReport = {
+            snapshotId: session.snapshotId,
+            configDigest: report.identity.configDigest,
+            report,
+          };
+        }
+        return report;
+      }),
+    close: async () => {
+      closed = true;
+      clearDebounce();
+      rootWatcher?.close();
+      rootWatcher = undefined;
+      for (const watcher of externalWatchers.values()) {
+        watcher.close();
+      }
+      externalWatchers.clear();
+      await runSerialized(async () => {
+        if (session) {
+          const toClose = session;
+          session = undefined;
+          await toClose.close();
+        }
+      });
+    },
+  };
+}
+
+/**
+ * Watches a project directory (and any external config dependency files), updating an
+ * {@link AnalysisSession} incrementally and yielding a complete report or failure record
+ * after each initial check and subsequent save.
+ */
+export async function* watchProject(
+  options: WatchProjectOptions,
+): AsyncGenerator<WatchEvent, void, void> {
+  const signal = options.signal;
+  let sequence = 0;
+  let wakeQueue: (() => void) | undefined;
+  let pendingBatchReady = false;
+
+  function notifyQueue(): void {
+    if (wakeQueue) {
+      const wake = wakeQueue;
+      wakeQueue = undefined;
+      wake();
+    }
+  }
+
+  const controller = createWorkspaceController({
+    cwd: options.cwd,
+    ...(options.config !== undefined ? { config: options.config } : {}),
+    ...(options.loadConfig !== undefined
+      ? { loadConfig: options.loadConfig }
+      : {}),
+    ...(options.watchFiles !== undefined
+      ? { watchFiles: options.watchFiles }
+      : {}),
+    ...(options.observe !== undefined ? { observe: options.observe } : {}),
+    ...(options.debounceMs !== undefined
+      ? { debounceMs: options.debounceMs }
+      : {}),
+    onBatchReady: () => {
+      pendingBatchReady = true;
+      notifyQueue();
+    },
+  });
+
+  async function waitForBatchReady(): Promise<boolean> {
+    if (signal?.aborted) return false;
+    if (pendingBatchReady) {
+      pendingBatchReady = false;
+      return true;
+    }
 
     const abortHandle = createAbortPromise(signal);
     try {
@@ -309,46 +777,10 @@ export async function* watchProject(
       abortHandle.dispose();
     }
 
-    if (signal?.aborted) return undefined;
-    return batchQueue.shift();
-  }
-
-  function classifyBatch(paths: readonly string[]): {
-    readonly changed: string[];
-    readonly created: string[];
-    readonly deleted: string[];
-    readonly touchedConfig: boolean;
-  } {
-    const changed: string[] = [];
-    const created: string[] = [];
-    const deleted: string[] = [];
-    let touchedConfig = false;
-
-    for (const absPath of paths) {
-      const rel = normalizeRelPath(absCwd, absPath);
-      const wasKnown = knownFileHashes.has(absPath);
-      const nextHash = hashFileContent(absPath);
-
-      if (nextHash !== undefined) {
-        if (configWatchFiles.has(absPath)) {
-          touchedConfig = true;
-        }
-        knownFileHashes.set(absPath, nextHash);
-        if (wasKnown) {
-          changed.push(rel);
-        } else {
-          created.push(rel);
-        }
-      } else if (wasKnown) {
-        if (configWatchFiles.has(absPath)) {
-          touchedConfig = true;
-        }
-        knownFileHashes.delete(absPath);
-        deleted.push(rel);
-      }
-    }
-
-    return { changed, created, deleted, touchedConfig };
+    if (signal?.aborted) return false;
+    const ready = pendingBatchReady;
+    pendingBatchReady = false;
+    return ready;
   }
 
   const abortSignalListener = () => notifyQueue();
@@ -357,30 +789,20 @@ export async function* watchProject(
   try {
     if (signal?.aborted) return;
 
-    syncWatchers();
     sequence += 1;
     try {
-      lastConfig = await resolveCurrentConfig();
-      syncWatchers();
-      session = await openSession({
-        cwd: absCwd,
-        config: lastConfig,
-        ...(options.observe !== undefined ? { observe: options.observe } : {}),
-      });
-      recordSessionFiles(absCwd, session, knownFileHashes);
-      const report = await session.check();
-      const memory: MemoryStats = session.memory;
+      const initial = await controller.openInitial();
+      const report = await initial.session.check();
       yield {
         kind: "report",
         sequence,
         trigger: "initial",
-        snapshotId: session.snapshotId,
+        snapshotId: initial.session.snapshotId,
         report,
-        recomputation: initialRecomputationScope(session),
-        memory,
+        recomputation: initial.recomputation,
+        memory: initial.memory,
       };
     } catch (err) {
-      syncWatchers();
       const info = toExecutionErrorInfo(err);
       yield {
         kind: "failed",
@@ -393,68 +815,42 @@ export async function* watchProject(
 
     while (true) {
       if (signal?.aborted) break;
-      const batch = await waitForNextBatch();
-      if (!batch) break;
+      const ready = await waitForBatchReady();
+      if (!ready) break;
 
-      const classified = classifyBatch(batch.paths);
-      if (
-        classified.changed.length === 0 &&
-        classified.created.length === 0 &&
-        classified.deleted.length === 0
-      ) {
+      let applied: WorkspaceApplyResult;
+      try {
+        applied = await controller.applyPendingBatch();
+      } catch (err) {
+        sequence += 1;
+        const info = toExecutionErrorInfo(err);
+        yield {
+          kind: "failed",
+          sequence,
+          trigger: "change",
+          code: info.code,
+          message: info.message,
+        };
+        continue;
+      }
+
+      if (!applied.applied) {
         continue;
       }
 
       sequence += 1;
       try {
-        let reloadedConfig: NormalizedVeruleConfig | undefined;
-        if (classified.touchedConfig || !lastConfig) {
-          reloadedConfig = await resolveCurrentConfig();
-          lastConfig = reloadedConfig;
-          syncWatchers();
-        }
-
-        if (!session) {
-          session = await openSession({
-            cwd: absCwd,
-            config: lastConfig,
-            ...(options.observe !== undefined
-              ? { observe: options.observe }
-              : {}),
-          });
-          recordSessionFiles(absCwd, session, knownFileHashes);
-          const report = await session.check();
-          yield {
-            kind: "report",
-            sequence,
-            trigger: "change",
-            snapshotId: session.snapshotId,
-            report,
-            recomputation: initialRecomputationScope(session),
-            memory: session.memory,
-          };
-          continue;
-        }
-
-        const updateResult = await session.update({
-          changed: classified.changed,
-          created: classified.created,
-          deleted: classified.deleted,
-          ...(reloadedConfig !== undefined ? { config: reloadedConfig } : {}),
-        });
-        recordSessionFiles(absCwd, session, knownFileHashes);
-        const report = await session.check();
+        const report = await applied.session.check();
         yield {
           kind: "report",
           sequence,
           trigger: "change",
-          snapshotId: updateResult.snapshotId,
+          snapshotId: applied.session.snapshotId,
           report,
-          recomputation: updateResult.recomputation,
-          memory: updateResult.memory,
+          recomputation: applied.recomputation,
+          memory: applied.memory,
         };
       } catch (err) {
-        syncWatchers();
         const info = toExecutionErrorInfo(err);
         yield {
           kind: "failed",
@@ -467,17 +863,6 @@ export async function* watchProject(
     }
   } finally {
     signal?.removeEventListener("abort", abortSignalListener);
-    if (debounceTimer !== undefined) {
-      clearTimeout(debounceTimer);
-      debounceTimer = undefined;
-    }
-    rootWatcher?.close();
-    for (const watcher of externalWatchers.values()) {
-      watcher.close();
-    }
-    externalWatchers.clear();
-    if (session) {
-      await session.close();
-    }
+    await controller.close();
   }
 }
