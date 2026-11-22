@@ -260,6 +260,151 @@ void test("runs the independently deployed CLI with its production SDK and engin
   });
   assert.deepEqual(findingsEnvelope.data, sdkReport);
 
+  // 2b. Deployed CLI explain + observation overhead comparison & truncation
+  const explainMarkerPath = join(host.path, "checkpoint-detail-marker.txt");
+  const explainConfigPath = join(host.path, "verule.explain.config.ts");
+  writeFileSync(
+    explainConfigPath,
+    [
+      'import { appendFileSync } from "node:fs";',
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      `const markerPath = ${JSON.stringify(explainMarkerPath)};`,
+      "const explainableRule = defineRule({",
+      '  id: "host-explainable-string",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      '    const sinks = calls.filter((c) => c.text.startsWith("sink("));',
+      "    const targets = sinks.map((c) => c.arguments?.[1]).filter((x) => x !== undefined);",
+      "    if (targets.length === 0) return;",
+      "    const types = await ctx.typeAt(targets);",
+      "    for (const [i, ty] of types.entries()) {",
+      "      const call = sinks[i]!;",
+      '      if (ty.typeText === "string") {',
+      '        ctx.checkpoint("require-string-arg", call, "pass", () => {',
+      '          appendFileSync(markerPath, "eval\\n");',
+      "          return { actualType: ty.typeText };",
+      "        });",
+      "        ctx.report({",
+      "          at: call.location,",
+      '          message: "sink() received narrowed string",',
+      '          findingKey: "narrowed-string",',
+      "        });",
+      "      } else {",
+      '        ctx.checkpoint("require-string-arg", call, "exclude", () => {',
+      '          appendFileSync(markerPath, "eval\\n");',
+      '          return { actualType: ty.typeText, expected: "string" };',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [explainableRule],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const offStartMs = performance.now();
+  const offExplainRes = invoke(
+    host.path,
+    "check",
+    "--config",
+    explainConfigPath,
+    "--output",
+    "json",
+  );
+  const offWallMs = performance.now() - offStartMs;
+  assert.equal(offExplainRes.status, 1, offExplainRes.stderr);
+  const offExplainEnv = JSON.parse(offExplainRes.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal("observation" in offExplainEnv.data, false);
+  const { existsSync } = await import("node:fs");
+  assert.equal(existsSync(explainMarkerPath), false);
+
+  const detailStartMs = performance.now();
+  const detailExplainRes = invoke(
+    host.path,
+    "check",
+    "--config",
+    explainConfigPath,
+    "--observe",
+    "detail",
+    "--output",
+    "json",
+  );
+  const detailWallMs = performance.now() - detailStartMs;
+  assert.equal(detailExplainRes.status, 1, detailExplainRes.stderr);
+  const detailExplainEnv = JSON.parse(detailExplainRes.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(existsSync(explainMarkerPath), true);
+  assert.equal(detailExplainEnv.data.status, offExplainEnv.data.status);
+  assert.deepEqual(
+    detailExplainEnv.data.diagnostics,
+    offExplainEnv.data.diagnostics,
+  );
+  assert.deepEqual(detailExplainEnv.data.gaps, offExplainEnv.data.gaps);
+  assert.ok(detailExplainEnv.data.observation);
+  assert.equal(detailExplainEnv.data.observation.mode, "detail");
+  assert.ok(detailExplainEnv.data.observation.rpc.batches >= 2);
+  assert.ok(detailExplainEnv.data.observation.rpc.bytesSent > 0);
+  assert.ok(detailExplainEnv.data.observation.rpc.bytesReceived > 0);
+  assert.ok(detailExplainEnv.data.observation.overhead.checkpointMs >= 0);
+  assert.ok(detailExplainEnv.data.observation.overhead.encodeMs >= 0);
+  assert.ok(detailExplainEnv.data.observation.overhead.writeMs >= 0);
+  t.diagnostic(
+    `Deployed CLI observe off=${offWallMs.toFixed(2)}ms vs detail=${detailWallMs.toFixed(2)}ms (checkpoint=${detailExplainEnv.data.observation.overhead.checkpointMs}ms, encode=${detailExplainEnv.data.observation.overhead.encodeMs}ms, write=${detailExplainEnv.data.observation.overhead.writeMs}ms)`,
+  );
+
+  // Truncation visibility with --observe-limit 1
+  const truncatedRes = invoke(
+    host.path,
+    "check",
+    "--config",
+    explainConfigPath,
+    "--observe",
+    "detail",
+    "--observe-limit",
+    "1",
+    "--output",
+    "json",
+  );
+  assert.equal(truncatedRes.status, 1, truncatedRes.stderr);
+  const truncatedEnv = JSON.parse(truncatedRes.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(truncatedEnv.data.observation?.truncated, true);
+  assert.ok((truncatedEnv.data.observation?.droppedCount ?? 0) >= 1);
+  assert.equal(truncatedEnv.data.observation?.details?.length, 1);
+
+  // Targeted explain for excluded location at line 10
+  const explainedRes = invoke(
+    host.path,
+    "check",
+    "--config",
+    explainConfigPath,
+    "--rule",
+    "host-explainable-string",
+    "--at",
+    "src/handlers.ts:10:12",
+    "--output",
+    "json",
+  );
+  assert.equal(explainedRes.status, 1, explainedRes.stderr);
+  const explainedEnv = JSON.parse(explainedRes.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(explainedEnv.data.explanation?.status, "excluded_by_checkpoint");
+  assert.equal(explainedEnv.data.explanation?.inCandidates, true);
+  assert.equal(
+    explainedEnv.data.explanation?.excludedByCheckpoint?.name,
+    "require-string-arg",
+  );
+
   // 3. Failure paths -> exit 2 in text and json modes
   const missingConfig = invoke(
     host.path,
