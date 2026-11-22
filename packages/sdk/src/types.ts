@@ -63,14 +63,41 @@ export type VeruleErrorCode =
   | "SESSION_CLOSED"
   | "ENGINE_ERROR";
 
+export type FactConflictParty = {
+  readonly providerId: string;
+  readonly providers: readonly string[];
+  readonly conclusion: unknown;
+  readonly conclusionSummary: string;
+  readonly evidence: readonly Evidence[];
+};
+
+export type FactConflictDetails = {
+  readonly factTypeId: string;
+  readonly projectId: string;
+  readonly snapshotId: number;
+  readonly subjectHandleId: string;
+  readonly subjectLocation?: DiagnosticLocation;
+  readonly condition?: unknown;
+  readonly reason: string;
+  readonly parties: readonly [FactConflictParty, FactConflictParty];
+};
+
 /** Execution failure raised when analysis configuration, loading, queries, or rules fail. */
 export class VeruleExecutionError extends Error {
   readonly code: VeruleErrorCode;
+  readonly conflict?: FactConflictDetails;
 
-  constructor(code: VeruleErrorCode, message: string, options?: ErrorOptions) {
+  constructor(
+    code: VeruleErrorCode,
+    message: string,
+    options?: ErrorOptions & { readonly conflict?: FactConflictDetails },
+  ) {
     super(message, options);
     this.name = "VeruleExecutionError";
     this.code = code;
+    if (options?.conflict !== undefined) {
+      this.conflict = options.conflict;
+    }
   }
 }
 
@@ -724,6 +751,7 @@ export type WatchFailureEvent = {
   readonly trigger: WatchTrigger;
   readonly code: VeruleErrorCode;
   readonly message: string;
+  readonly conflict?: FactConflictDetails;
 };
 
 export type WatchEvent = WatchReportEvent | WatchFailureEvent;

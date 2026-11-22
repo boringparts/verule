@@ -2,6 +2,7 @@ import {
   REPORT_SCHEMA_VERSION,
   type CheckReport,
   type ExplainResult,
+  type FactConflictDetails,
   type ObservationReport,
   type ProjectSummary,
 } from "@verule/sdk";
@@ -266,11 +267,76 @@ export type WireProjectSummary = z.infer<typeof projectSummarySchema>;
 export type WireObservation = z.infer<typeof observationSchema>;
 export type WireExplainResult = z.infer<typeof explainResultSchema>;
 
+export const factConflictPartySchema = z.object({
+  providerId: z.string(),
+  providers: z.array(z.string()),
+  conclusion: z.unknown(),
+  conclusionSummary: z.string(),
+  evidence: z.array(evidenceSchema),
+});
+
+export const factConflictDetailsSchema = z.object({
+  factTypeId: z.string(),
+  projectId: z.string(),
+  snapshotId: z.number().int().positive(),
+  subjectHandleId: z.string(),
+  subjectLocation: locationSchema.optional(),
+  condition: z.unknown().optional(),
+  reason: z.string(),
+  parties: z.tuple([factConflictPartySchema, factConflictPartySchema]),
+});
+
+export type WireFactConflictDetails = z.infer<typeof factConflictDetailsSchema>;
+
 export const checkFailureSchema = z.object({
   reportVersion: z.literal(REPORT_SCHEMA_VERSION),
   code: z.string(),
   message: z.string(),
+  conflict: factConflictDetailsSchema.optional(),
 });
+
+export function toWireFactConflict(
+  conflict: FactConflictDetails,
+): WireFactConflictDetails {
+  const [party0, party1] = conflict.parties;
+  return {
+    factTypeId: conflict.factTypeId,
+    projectId: conflict.projectId,
+    snapshotId: conflict.snapshotId,
+    subjectHandleId: conflict.subjectHandleId,
+    ...(conflict.subjectLocation !== undefined
+      ? { subjectLocation: { ...conflict.subjectLocation } }
+      : {}),
+    ...(conflict.condition !== undefined
+      ? { condition: conflict.condition }
+      : {}),
+    reason: conflict.reason,
+    parties: [
+      {
+        providerId: party0.providerId,
+        providers: [...party0.providers],
+        conclusion: party0.conclusion,
+        conclusionSummary: party0.conclusionSummary,
+        evidence: party0.evidence.map((ev) => ({
+          kind: ev.kind,
+          message: ev.message,
+          ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
+        })),
+      },
+      {
+        providerId: party1.providerId,
+        providers: [...party1.providers],
+        conclusion: party1.conclusion,
+        conclusionSummary: party1.conclusionSummary,
+        evidence: party1.evidence.map((ev) => ({
+          kind: ev.kind,
+          message: ev.message,
+          ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
+        })),
+      },
+    ],
+  };
+}
 
 function toWireObservation(obs: ObservationReport): WireObservation {
   return {

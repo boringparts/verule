@@ -143,6 +143,42 @@ type SyntaxSnapshot = {
   readonly body?: SyntaxRef | null;
 };
 
+const DRIZZLE_TABLE_BUILDERS = new Set<string>([
+  "sqliteTable",
+  "pgTable",
+  "mysqlTable",
+  "singlestoreTable",
+]);
+
+function isDeclarationFile(file: string | null | undefined): boolean {
+  if (!file) return false;
+  return (
+    file.endsWith(".d.ts") || file.endsWith(".d.mts") || file.endsWith(".d.cts")
+  );
+}
+
+function isNodeModulesFile(file: string | null | undefined): boolean {
+  if (!file) return false;
+  return /(?:^|\/)node_modules\//u.test(file);
+}
+
+function canFollowDeclaration(decl: {
+  readonly location: DiagnosticLocation | null;
+  readonly syntax: SyntaxRef | null;
+  readonly isExternal: boolean;
+}): decl is {
+  readonly location: DiagnosticLocation | null;
+  readonly syntax: SyntaxRef;
+  readonly isExternal: boolean;
+} {
+  if (!decl.syntax) return false;
+  if (isDeclarationFile(decl.location?.file)) return false;
+  if (decl.isExternal && isNodeModulesFile(decl.location?.file)) {
+    return false;
+  }
+  return true;
+}
+
 function stripStringQuotes(raw: string): string {
   const trimmed = raw.trim();
   if (
@@ -640,6 +676,17 @@ class ZodAstEvaluator {
         );
       }
 
+      if (methodName === "createSelectSchema") {
+        const drizzleSchema = await this.#evaluateDrizzleSelectSchema(
+          snap,
+          args,
+          visitedDecls,
+        );
+        if (drizzleSchema.recognized) {
+          return drizzleSchema;
+        }
+      }
+
       if (
         ZOD_TRANSPARENT_WRAPPERS.has(methodName) ||
         methodName === "optional" ||
@@ -690,9 +737,25 @@ class ZodAstEvaluator {
       }
     }
 
-    // Check if the call is to a local helper function returning a Zod schema, or an external Zod factory (e.g. createSelectSchema)
+    // Handle direct createSelectSchema(table, refine?) from drizzle-zod
+    if (
+      callee.kind === "Identifier" &&
+      (callee.text === "createSelectSchema" ||
+        (await this.resolveDecl(callee.ref)).name === "createSelectSchema")
+    ) {
+      const drizzleSchema = await this.#evaluateDrizzleSelectSchema(
+        snap,
+        snap.arguments ?? [],
+        visitedDecls,
+      );
+      if (drizzleSchema.recognized) {
+        return drizzleSchema;
+      }
+    }
+
+    // Check if the call is to a local helper function returning a Zod schema, or an external Zod factory
     const decl = await this.resolveDecl(callee.ref);
-    if (!decl.isExternal && decl.syntax) {
+    if (canFollowDeclaration(decl)) {
       const declId = decl.syntax.handleId;
       if (!visitedDecls.has(declId)) {
         const declSnap = await this.getSyntax(decl.syntax);
@@ -788,7 +851,7 @@ class ZodAstEvaluator {
     visitedDecls: ReadonlySet<string>,
   ): Promise<ExtractedSchema> {
     const decl = await this.resolveDecl(snap.ref);
-    if (decl.syntax && !decl.isExternal) {
+    if (canFollowDeclaration(decl)) {
       const declId = decl.syntax.handleId;
       if (visitedDecls.has(declId)) {
         return {
@@ -1328,8 +1391,7 @@ class ZodAstEvaluator {
     if (snap.kind === "Identifier") {
       const decl = await this.resolveDecl(snap.ref);
       if (
-        decl.syntax &&
-        !decl.isExternal &&
+        canFollowDeclaration(decl) &&
         !visitedDecls.has(decl.syntax.handleId)
       ) {
         const declSnap = await this.getSyntax(decl.syntax);
@@ -1442,7 +1504,7 @@ class ZodAstEvaluator {
           ? ((await this.getSyntax(child.name))?.text ?? child.text)
           : child.text;
         const decl = await this.resolveDecl(child.ref);
-        if (decl.syntax && !decl.isExternal) {
+        if (canFollowDeclaration(decl)) {
           const declSnap = await this.getSyntax(decl.syntax);
           if (declSnap?.initializer) {
             const fieldEval = await this.#evaluateFieldModifiers(
@@ -1604,8 +1666,7 @@ class ZodAstEvaluator {
     if (snap.kind === "Identifier") {
       const decl = await this.resolveDecl(snap.ref);
       if (
-        decl.syntax &&
-        !decl.isExternal &&
+        canFollowDeclaration(decl) &&
         !visitedDecls.has(decl.syntax.handleId)
       ) {
         const declSnap = await this.getSyntax(decl.syntax);
@@ -1705,8 +1766,7 @@ class ZodAstEvaluator {
       if (current.kind === "Identifier") {
         const decl = await this.resolveDecl(current.ref);
         if (
-          decl.syntax &&
-          !decl.isExternal &&
+          canFollowDeclaration(decl) &&
           !visitedDecls.has(decl.syntax.handleId)
         ) {
           const declSnap = await this.getSyntax(decl.syntax);
@@ -1828,6 +1888,397 @@ class ZodAstEvaluator {
       evidence,
     };
   }
+
+  async #evaluateDrizzleSelectSchema(
+    callSnap: SyntaxSnapshot,
+    args: readonly SyntaxRef[],
+    visitedDecls: ReadonlySet<string>,
+  ): Promise<ExtractedSchema> {
+    const tableArg = args[0];
+    if (!tableArg) {
+      return {
+        recognized: false,
+        fields: {},
+        hasDynamicFields: false,
+        gaps: [],
+        evidence: [],
+      };
+    }
+
+    const tableInfo = await this.#resolveDrizzleTable(tableArg, visitedDecls);
+    if (!tableInfo) {
+      return {
+        recognized: false,
+        fields: {},
+        hasDynamicFields: false,
+        gaps: [],
+        evidence: [],
+      };
+    }
+
+    const fields: Record<string, FieldSchemaState> = { ...tableInfo.fields };
+    const gaps: Gap[] = [...tableInfo.gaps];
+    const evidence: Evidence[] = [
+      {
+        kind: "source",
+        message: "Schema derived via drizzle-zod createSelectSchema()",
+        at: callSnap.location,
+      },
+      ...tableInfo.evidence,
+    ];
+    let hasDynamicFields = tableInfo.hasDynamicFields;
+
+    // Optional 2nd argument: createSelectSchema(table, { field: (s) => s.optional() | z.string() })
+    const refineArg = args[1];
+    if (refineArg) {
+      const refineSnap = await this.unwrapExpression(refineArg);
+      if (refineSnap?.kind === "ObjectLiteralExpression") {
+        const children = await this.getDirectChildren(refineSnap.location);
+        for (const child of children) {
+          if (
+            child.kind !== "PropertyAssignment" ||
+            !child.name ||
+            !child.initializer
+          ) {
+            hasDynamicFields = true;
+            gaps.push({
+              kind: "dynamic-schema-field",
+              message: `Dynamic refine member "${child.text}" in createSelectSchema().`,
+              at: child.location,
+            });
+            continue;
+          }
+          const keyRes = await this.#resolvePropertyKey(
+            child.name,
+            child.location,
+          );
+          if (keyRes.key === null) {
+            hasDynamicFields = true;
+            if (keyRes.gap) gaps.push(keyRes.gap);
+            continue;
+          }
+          const initSnap = await this.unwrapExpression(child.initializer);
+          let overrideExpr: SyntaxRef | null = child.initializer;
+          if (
+            initSnap &&
+            (initSnap.kind === "ArrowFunction" ||
+              initSnap.kind === "FunctionExpression") &&
+            initSnap.body
+          ) {
+            const bodySnap = await this.unwrapExpression(initSnap.body);
+            if (bodySnap?.kind !== "Block") {
+              overrideExpr = initSnap.body;
+            } else {
+              const returns = await this.#ctx.findSyntax({
+                kinds: ["ReturnStatement"],
+                range: {
+                  file: bodySnap.location.file,
+                  start: bodySnap.location.start,
+                  end: bodySnap.location.end,
+                  match: "within",
+                },
+              });
+              overrideExpr =
+                returns.length === 1 && returns[0]!.expression
+                  ? returns[0]!.expression
+                  : null;
+            }
+          }
+          if (overrideExpr) {
+            const evalRes = await this.#evaluateFieldModifiers(
+              overrideExpr,
+              visitedDecls,
+            );
+            const prev = fields[keyRes.key];
+            if (evalRes.hasDynamicFields) hasDynamicFields = true;
+            gaps.push(...evalRes.gaps);
+            fields[keyRes.key] = {
+              name: keyRes.key,
+              inputRequirement: evalRes.inputRequirement,
+              outputPresence: evalRes.outputPresence,
+              nullable: evalRes.nullable || (prev?.nullable ?? false),
+              fromDefault: evalRes.fromDefault,
+              evidence: dedupeEvidence([
+                ...(prev?.evidence ?? []),
+                {
+                  kind: "source",
+                  message: `Field "${keyRes.key}" refined in createSelectSchema()`,
+                  at: child.location,
+                },
+              ]),
+            };
+          }
+        }
+      }
+    }
+
+    return {
+      recognized: true,
+      fields,
+      hasDynamicFields,
+      gaps: dedupeGaps(gaps),
+      evidence: dedupeEvidence(evidence),
+    };
+  }
+
+  async #resolveDrizzleTable(
+    ref: SyntaxRef,
+    visitedDecls: ReadonlySet<string>,
+  ): Promise<ExtractedSchema | null> {
+    const snap = await this.unwrapExpression(ref);
+    if (!snap) return null;
+
+    if (snap.kind === "Identifier") {
+      const decl = await this.resolveDecl(snap.ref);
+      if (
+        canFollowDeclaration(decl) &&
+        !visitedDecls.has(decl.syntax.handleId)
+      ) {
+        const declSnap = await this.getSyntax(decl.syntax);
+        if (declSnap?.initializer) {
+          return this.#resolveDrizzleTable(
+            declSnap.initializer,
+            new Set([...visitedDecls, decl.syntax.handleId]),
+          );
+        }
+      }
+      return null;
+    }
+
+    if (snap.kind !== "CallExpression" || !snap.expression) {
+      return null;
+    }
+
+    const callee = await this.unwrapExpression(snap.expression);
+    if (!callee) return null;
+
+    let isTableCall = false;
+    if (callee.kind === "Identifier") {
+      isTableCall = DRIZZLE_TABLE_BUILDERS.has(callee.text);
+    } else if (callee.kind === "PropertyAccessExpression" && callee.name) {
+      const propName = (await this.getSyntax(callee.name))?.text ?? "";
+      isTableCall =
+        DRIZZLE_TABLE_BUILDERS.has(propName) || propName === "table";
+    }
+    if (!isTableCall) return null;
+
+    const args = snap.arguments ?? [];
+    if (args.length < 2) return null;
+
+    const colsArg = await this.unwrapExpression(args[1]!);
+    if (!colsArg) return null;
+
+    let colsObjSnap: SyntaxSnapshot | null = null;
+    if (colsArg.kind === "ObjectLiteralExpression") {
+      colsObjSnap = colsArg;
+    } else if (
+      (colsArg.kind === "ArrowFunction" ||
+        colsArg.kind === "FunctionExpression") &&
+      colsArg.body
+    ) {
+      const bodySnap = await this.unwrapExpression(colsArg.body);
+      if (bodySnap?.kind === "ObjectLiteralExpression") {
+        colsObjSnap = bodySnap;
+      } else if (bodySnap?.kind === "Block") {
+        const returns = await this.#ctx.findSyntax({
+          kinds: ["ReturnStatement"],
+          range: {
+            file: bodySnap.location.file,
+            start: bodySnap.location.start,
+            end: bodySnap.location.end,
+            match: "within",
+          },
+        });
+        if (returns.length === 1 && returns[0]!.expression) {
+          const retSnap = await this.unwrapExpression(returns[0]!.expression);
+          if (retSnap?.kind === "ObjectLiteralExpression") {
+            colsObjSnap = retSnap;
+          }
+        }
+      }
+    }
+    if (!colsObjSnap) return null;
+
+    const extracted = await this.#extractDrizzleColumnsObject(
+      colsObjSnap,
+      visitedDecls,
+    );
+    return {
+      recognized: true,
+      fields: extracted.fields,
+      hasDynamicFields: extracted.hasDynamicFields,
+      gaps: extracted.gaps,
+      evidence: dedupeEvidence([
+        {
+          kind: "source",
+          message: "Drizzle table definition used by createSelectSchema()",
+          at: snap.location,
+        },
+        ...extracted.evidence,
+      ]),
+    };
+  }
+
+  async #extractDrizzleColumnsObject(
+    objSnap: SyntaxSnapshot,
+    visitedDecls: ReadonlySet<string>,
+  ): Promise<{
+    readonly fields: Readonly<Record<string, FieldSchemaState>>;
+    readonly hasDynamicFields: boolean;
+    readonly gaps: readonly Gap[];
+    readonly evidence: readonly Evidence[];
+  }> {
+    const children = await this.getDirectChildren(objSnap.location);
+    const preload: SyntaxRef[] = [];
+    for (const child of children) {
+      if (child.name) preload.push(child.name);
+      if (child.initializer) preload.push(child.initializer);
+      if (child.expression) preload.push(child.expression);
+    }
+    await this.preloadSyntax(preload);
+
+    const fields: Record<string, FieldSchemaState> = {};
+    const gaps: Gap[] = [];
+    const evidence: Evidence[] = [];
+    let hasDynamicFields = false;
+
+    for (const child of children) {
+      if (
+        child.kind === "PropertyAssignment" &&
+        child.name &&
+        child.initializer
+      ) {
+        const keyRes = await this.#resolvePropertyKey(
+          child.name,
+          child.location,
+        );
+        if (keyRes.key === null) {
+          hasDynamicFields = true;
+          if (keyRes.gap) gaps.push(keyRes.gap);
+          continue;
+        }
+        const nullable = await this.#isDrizzleColumnNullable(child.initializer);
+        fields[keyRes.key] = {
+          name: keyRes.key,
+          inputRequirement: "required",
+          outputPresence: "required",
+          nullable,
+          fromDefault: false,
+          evidence: [
+            {
+              kind: "source",
+              message: `Drizzle column "${keyRes.key}" (nullable=${String(nullable)})`,
+              at: child.location,
+            },
+          ],
+        };
+      } else if (child.kind === "ShorthandPropertyAssignment") {
+        const keyName = child.name
+          ? ((await this.getSyntax(child.name))?.text ?? child.text)
+          : child.text;
+        let nullable = true;
+        const decl = await this.resolveDecl(child.ref);
+        if (canFollowDeclaration(decl)) {
+          const declSnap = await this.getSyntax(decl.syntax);
+          if (declSnap?.initializer) {
+            nullable = await this.#isDrizzleColumnNullable(
+              declSnap.initializer,
+            );
+          }
+        }
+        fields[keyName] = {
+          name: keyName,
+          inputRequirement: "required",
+          outputPresence: "required",
+          nullable,
+          fromDefault: false,
+          evidence: [
+            {
+              kind: "source",
+              message: `Drizzle column "${keyName}"`,
+              at: child.location,
+            },
+          ],
+        };
+      } else if (child.kind === "SpreadAssignment" && child.expression) {
+        const spreadSnap = await this.unwrapExpression(child.expression);
+        let targetObj: SyntaxSnapshot | null = null;
+        let nextVisited = visitedDecls;
+        if (spreadSnap?.kind === "ObjectLiteralExpression") {
+          targetObj = spreadSnap;
+        } else if (spreadSnap?.kind === "Identifier") {
+          const decl = await this.resolveDecl(spreadSnap.ref);
+          if (
+            canFollowDeclaration(decl) &&
+            !visitedDecls.has(decl.syntax.handleId)
+          ) {
+            const declSnap = await this.getSyntax(decl.syntax);
+            if (declSnap?.initializer) {
+              const initSnap = await this.unwrapExpression(
+                declSnap.initializer,
+              );
+              if (initSnap?.kind === "ObjectLiteralExpression") {
+                targetObj = initSnap;
+                nextVisited = new Set([...visitedDecls, decl.syntax.handleId]);
+              }
+            }
+          }
+        }
+        if (targetObj) {
+          const nested = await this.#extractDrizzleColumnsObject(
+            targetObj,
+            nextVisited,
+          );
+          Object.assign(fields, nested.fields);
+          if (nested.hasDynamicFields) hasDynamicFields = true;
+          gaps.push(...nested.gaps);
+          evidence.push(...nested.evidence);
+        } else {
+          hasDynamicFields = true;
+          gaps.push({
+            kind: "dynamic-schema-spread",
+            message: `Spread "${child.text}" in Drizzle table cannot be statically resolved.`,
+            at: child.location,
+          });
+        }
+      } else {
+        hasDynamicFields = true;
+        gaps.push({
+          kind: "dynamic-schema-field",
+          message: `Unsupported dynamic member "${child.text}" (${child.kind}) in Drizzle table.`,
+          at: child.location,
+        });
+      }
+    }
+
+    return { fields, hasDynamicFields, gaps, evidence };
+  }
+
+  async #isDrizzleColumnNullable(exprRef: SyntaxRef): Promise<boolean> {
+    let current = await this.unwrapExpression(exprRef);
+    const seen = new Set<string>();
+    while (current && !seen.has(current.ref.handleId)) {
+      seen.add(current.ref.handleId);
+      if (current.kind !== "CallExpression" || !current.expression) {
+        break;
+      }
+      const callee = await this.unwrapExpression(current.expression);
+      if (
+        !callee ||
+        callee.kind !== "PropertyAccessExpression" ||
+        !callee.expression ||
+        !callee.name
+      ) {
+        break;
+      }
+      const methodName = (await this.getSyntax(callee.name))?.text ?? "";
+      if (methodName === "notNull" || methodName === "primaryKey") {
+        return false;
+      }
+      current = await this.unwrapExpression(callee.expression);
+    }
+    return true;
+  }
 }
 
 type ExtractedSite = {
@@ -1914,7 +2365,7 @@ async function collectSites(
             sites.push({
               subject: targetRef as SyntaxRef,
               siteKind: "call",
-              validatorMethod: methodName as ValidatorMethodName,
+              validatorMethod: methodName,
               ...(schemaName !== undefined ? { schemaName } : {}),
               schema,
             });
@@ -1995,7 +2446,7 @@ async function collectSites(
       if (call.expression) preloadRefs.push(call.expression);
     } else if (
       scope !== "calls" &&
-      /(?:^|\.)(?:object|strictObject|looseObject|record|union|discriminatedUnion|intersection|extend|merge|pick|omit|partial|required|transform|refine|superRefine|pipe|openapi)\s*\(/u.test(
+      /(?:^|\.)(?:object|strictObject|looseObject|record|union|discriminatedUnion|intersection|extend|merge|pick|omit|partial|required|transform|refine|superRefine|pipe|openapi|createSelectSchema)\s*\(/u.test(
         call.text,
       )
     ) {
@@ -2041,7 +2492,7 @@ async function collectSites(
       sites.push({
         subject: call.ref,
         siteKind: "call",
-        validatorMethod: methodName as ValidatorMethodName,
+        validatorMethod: methodName,
         ...(schemaName !== undefined ? { schemaName } : {}),
         schema: {
           ...schema,

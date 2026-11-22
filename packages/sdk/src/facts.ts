@@ -7,6 +7,8 @@ import {
   VeruleExecutionError,
   type DiagnosticLocation,
   type Evidence,
+  type FactConflictDetails,
+  type FactConflictParty,
   type Gap,
   type Model,
   type ProgramObjectKind,
@@ -39,6 +41,8 @@ export type FactMergeOutcome<Value = unknown> =
       readonly ok: false;
       readonly conflict: {
         readonly message: string;
+        readonly existingConclusion?: string;
+        readonly incomingConclusion?: string;
         readonly existingEvidence?: readonly Evidence[];
         readonly incomingEvidence?: readonly Evidence[];
       };
@@ -225,10 +229,12 @@ export function defineFactProvider<
   factType: FactType<SubjectKind, Condition, Value>,
   extract: (
     ctx: AdapterContext,
-    request: FactExtractionRequest<SubjectKind, Condition>,
+    request: FactExtractionRequest<NoInfer<SubjectKind>, NoInfer<Condition>>,
   ) =>
-    | readonly FactContribution<SubjectKind, Value>[]
-    | Promise<readonly FactContribution<SubjectKind, Value>[]>,
+    | readonly FactContribution<NoInfer<SubjectKind>, NoInfer<Value>>[]
+    | Promise<
+        readonly FactContribution<NoInfer<SubjectKind>, NoInfer<Value>>[]
+      >,
 ): FactProvider<SubjectKind, Condition, Value> {
   return {
     factType,
@@ -384,6 +390,80 @@ type SubjectAccumulator<SubjectKind extends ProgramObjectKind, Value> = {
   gaps: Gap[];
 };
 
+function buildFactConflictError<
+  SubjectKind extends ProgramObjectKind,
+  Value,
+>(params: {
+  readonly factTypeId: string;
+  readonly projectId: string;
+  readonly snapshotId: number;
+  readonly subject: ProgramRef<SubjectKind>;
+  readonly condition: unknown;
+  readonly syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>;
+  readonly reason: string;
+  readonly existingProviders: readonly string[];
+  readonly existingValue: Value;
+  readonly existingConclusionSummary?: string;
+  readonly existingEvidence: readonly Evidence[];
+  readonly incomingProviderId: string;
+  readonly incomingValue: Value;
+  readonly incomingConclusionSummary?: string;
+  readonly incomingEvidence: readonly Evidence[];
+}): VeruleExecutionError {
+  const existingProviders = [...new Set(params.existingProviders)].toSorted(
+    compareCodepoint,
+  );
+  const partyA: FactConflictParty = {
+    providerId: existingProviders.join(","),
+    providers: existingProviders,
+    conclusion: params.existingValue,
+    conclusionSummary:
+      params.existingConclusionSummary ??
+      stableSerializeValue(params.existingValue),
+    evidence: dedupeEvidence(params.existingEvidence),
+  };
+  const partyB: FactConflictParty = {
+    providerId: params.incomingProviderId,
+    providers: [params.incomingProviderId],
+    conclusion: params.incomingValue,
+    conclusionSummary:
+      params.incomingConclusionSummary ??
+      stableSerializeValue(params.incomingValue),
+    evidence: dedupeEvidence(params.incomingEvidence),
+  };
+  const parties: readonly [FactConflictParty, FactConflictParty] =
+    compareCodepoint(partyA.providerId, partyB.providerId) <= 0
+      ? [partyA, partyB]
+      : [partyB, partyA];
+
+  const subjectLocation =
+    params.syntaxLocations.get(params.subject as SyntaxRef) ??
+    parties[0].evidence.find((item) => item.at !== undefined)?.at ??
+    parties[1].evidence.find((item) => item.at !== undefined)?.at;
+
+  const conflict: FactConflictDetails = {
+    factTypeId: params.factTypeId,
+    projectId: params.projectId,
+    snapshotId: params.snapshotId,
+    subjectHandleId: params.subject.handleId,
+    ...(subjectLocation !== undefined ? { subjectLocation } : {}),
+    ...(params.condition !== undefined ? { condition: params.condition } : {}),
+    reason: params.reason,
+    parties,
+  };
+
+  const subjectLocSuffix = subjectLocation
+    ? ` at ${subjectLocation.file}:${subjectLocation.line}:${subjectLocation.column}`
+    : "";
+  const message =
+    `Fact conflict for "${params.factTypeId}" on "${params.subject.handleId}"${subjectLocSuffix} ` +
+    `between [${parties[0].providerId}] and [${parties[1].providerId}]: ${params.reason}. ` +
+    `[${parties[0].providerId}] concluded ${parties[0].conclusionSummary} (evidence: ${formatEvidenceList(parties[0].evidence)}). ` +
+    `[${parties[1].providerId}] concluded ${parties[1].conclusionSummary} (evidence: ${formatEvidenceList(parties[1].evidence)}).`;
+
+  return new VeruleExecutionError("FACT_CONFLICT", message, { conflict });
+}
+
 function mergeContributions<
   SubjectKind extends ProgramObjectKind,
   Condition,
@@ -392,6 +472,8 @@ function mergeContributions<
   factType: FactType<SubjectKind, Condition, Value>,
   projectId: string,
   snapshotId: number,
+  condition: Condition | undefined,
+  syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
   perProvider: readonly {
     readonly adapterId: string;
     readonly contributions: readonly FactContribution<SubjectKind, Value>[];
@@ -443,10 +525,33 @@ function mergeContributions<
             outcome.conflict.existingEvidence ?? existing.evidence;
           const incomingEv =
             outcome.conflict.incomingEvidence ?? incomingEvidence;
-          throw new VeruleExecutionError(
-            "FACT_CONFLICT",
-            `Fact conflict for "${factType.id}" on "${handleId}" between [${existing.providers.join(", ")}] and [${entry.adapterId}]: ${outcome.conflict.message}. Evidence from [${existing.providers.join(", ")}]: ${formatEvidenceList(existingEv)}. Evidence from [${entry.adapterId}]: ${formatEvidenceList(incomingEv)}.`,
-          );
+          throw buildFactConflictError({
+            factTypeId: factType.id,
+            projectId,
+            snapshotId,
+            subject: contribution.subject,
+            condition,
+            syntaxLocations,
+            reason: outcome.conflict.message,
+            existingProviders: existing.providers,
+            existingValue: existing.value,
+            ...(outcome.conflict.existingConclusion !== undefined
+              ? {
+                  existingConclusionSummary:
+                    outcome.conflict.existingConclusion,
+                }
+              : {}),
+            existingEvidence: existingEv,
+            incomingProviderId: entry.adapterId,
+            incomingValue: contribution.value,
+            ...(outcome.conflict.incomingConclusion !== undefined
+              ? {
+                  incomingConclusionSummary:
+                    outcome.conflict.incomingConclusion,
+                }
+              : {}),
+            incomingEvidence: incomingEv,
+          });
         }
         existing.value = outcome.value;
         existing.providers = [
@@ -458,14 +563,26 @@ function mergeContributions<
         ];
         existing.gaps = [...dedupeGaps([...existing.gaps, ...incomingGaps])];
       } else {
-        if (
-          stableSerializeValue(existing.value) !==
-          stableSerializeValue(contribution.value)
-        ) {
-          throw new VeruleExecutionError(
-            "FACT_CONFLICT",
-            `Fact conflict for "${factType.id}" on "${handleId}" between [${existing.providers.join(", ")}] and [${entry.adapterId}]: providers produced differing definite values. Evidence from [${existing.providers.join(", ")}]: ${formatEvidenceList(existing.evidence)}. Evidence from [${entry.adapterId}]: ${formatEvidenceList(incomingEvidence)}.`,
-          );
+        const existingSerialized = stableSerializeValue(existing.value);
+        const incomingSerialized = stableSerializeValue(contribution.value);
+        if (existingSerialized !== incomingSerialized) {
+          throw buildFactConflictError({
+            factTypeId: factType.id,
+            projectId,
+            snapshotId,
+            subject: contribution.subject,
+            condition,
+            syntaxLocations,
+            reason: `providers produced differing definite conclusions (${existingSerialized} vs ${incomingSerialized})`,
+            existingProviders: existing.providers,
+            existingValue: existing.value,
+            existingConclusionSummary: existingSerialized,
+            existingEvidence: existing.evidence,
+            incomingProviderId: entry.adapterId,
+            incomingValue: contribution.value,
+            incomingConclusionSummary: incomingSerialized,
+            incomingEvidence,
+          });
         }
         existing.providers = [
           ...new Set([...existing.providers, entry.adapterId]),
@@ -611,6 +728,13 @@ export async function executeFactQuery<
 
   assertActiveSnapshot();
 
+  if (options?.providerId !== undefined && options.providerId.trim() === "") {
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      "Fact query providerId must be a non-empty string when specified.",
+    );
+  }
+
   const targets = options?.targets;
   if (targets !== undefined) {
     if (targets.length === 0) {
@@ -620,12 +744,13 @@ export async function executeFactQuery<
   }
 
   const matchedProviders: ProviderEntry[] = [];
+  let filteredAdapterFound = false;
   for (const adapter of adapters) {
-    if (
-      options?.providerId !== undefined &&
-      adapter.id !== options.providerId
-    ) {
-      continue;
+    if (options?.providerId !== undefined) {
+      if (adapter.id !== options.providerId) {
+        continue;
+      }
+      filteredAdapterFound = true;
     }
     const found = adapter.provides.find(
       (provider) => provider.factType.id === factType.id,
@@ -635,6 +760,19 @@ export async function executeFactQuery<
     }
   }
   matchedProviders.sort((a, b) => compareCodepoint(a.adapterId, b.adapterId));
+
+  const providerFilterStatus:
+    | "matched"
+    | "not_enabled"
+    | "unsupported"
+    | undefined =
+    options?.providerId !== undefined
+      ? matchedProviders.length > 0
+        ? "matched"
+        : filteredAdapterFound
+          ? "unsupported"
+          : "not_enabled"
+      : undefined;
 
   const providersUsed = matchedProviders.map((entry) => entry.adapterId);
   const providerLabel =
@@ -719,7 +857,14 @@ export async function executeFactQuery<
     }
 
     return {
-      results: mergeContributions(factType, projectId, snapshotId, perProvider),
+      results: mergeContributions(
+        factType,
+        projectId,
+        snapshotId,
+        options?.condition,
+        syntaxLocations,
+        perProvider,
+      ),
       additionalInputs: recordedInputs,
     };
   };
@@ -835,6 +980,13 @@ export async function executeFactQuery<
       ? collectMatchedFactLocations(results, explainTarget, syntaxLocations)
       : undefined;
 
+    const filterSummarySuffix =
+      providerFilterStatus === "not_enabled"
+        ? ` (providerFilter=${options!.providerId}: not enabled)`
+        : providerFilterStatus === "unsupported"
+          ? ` (providerFilter=${options!.providerId}: factType unsupported)`
+          : "";
+
     collector.recordQuery({
       ruleId,
       op: `facts:${factType.id}`,
@@ -844,7 +996,7 @@ export async function executeFactQuery<
       cacheStatus,
       candidateCount: results.length,
       durationMs,
-      summary: `facts(${factType.id}) [${providerLabel}] -> ${results.length} result(s)`,
+      summary: `facts(${factType.id}) [${providerLabel}]${filterSummarySuffix} -> ${results.length} result(s)`,
       ...(matchedLocations !== undefined ? { matchedLocations } : {}),
       ...(collector.mode === "detail" || collector.isExplainEnabled()
         ? {
@@ -852,7 +1004,10 @@ export async function executeFactQuery<
               factTypeId: factType.id,
               providers: providersUsed,
               ...(options?.providerId !== undefined
-                ? { providerFilter: options.providerId }
+                ? {
+                    providerFilter: options.providerId,
+                    providerFilterStatus,
+                  }
                 : {}),
               candidateCount: results.length,
             },

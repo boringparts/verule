@@ -126,7 +126,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
       prepareExternalConsumer(root);
 
       const validCode = [
-        'import { createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallEffectsResult, type CallRef, type DeclarationRef, type ExplainCleanupPath, type InstanceCleanupScopeResult, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
+        'import { VeruleExecutionError, createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallEffectsResult, type CallRef, type DeclarationRef, type ExplainCleanupPath, type FactConflictDetails, type FactConflictParty, type InstanceCleanupScopeResult, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
         "",
         "const extModel = defineModel({",
         '  id: "ext-model",',
@@ -170,7 +170,26 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         'const sampleFact = defineFactType<"syntax", { readonly strict?: boolean } | undefined, readonly string[]>({',
         '  id: "demo.sample-fact",',
         '  subjectKind: "syntax",',
+        "  merge: (existing, incoming) => {",
+        "    if (existing.value[0] === incoming.value[0]) {",
+        "      return { ok: true, value: [...existing.value, ...incoming.value] };",
+        "    }",
+        "    return {",
+        "      ok: false,",
+        "      conflict: {",
+        '        message: "Mismatched head tag",',
+        '        existingConclusion: existing.value[0] ?? "none",',
+        '        incomingConclusion: incoming.value[0] ?? "none",',
+        "      },",
+        "    };",
+        "  },",
         "});",
+        "",
+        "function inspectConflict(err: VeruleExecutionError): readonly FactConflictParty[] | undefined {",
+        "  const details: FactConflictDetails | undefined = err.conflict;",
+        "  return details?.parties;",
+        "}",
+        "void inspectConflict;",
         "const sampleAdapter = defineAdapter({",
         '  id: "demo-adapter",',
         "  provides: [",
@@ -200,6 +219,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
         "    });",
         "    const facts = await ctx.facts(sampleFact, {",
         "      targets: syntaxNodes.map((n) => n.ref),",
+        '      providerId: "demo-adapter",',
         "      condition: { strict: true },",
         "    });",
         "    void facts;",
@@ -475,6 +495,14 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           body: `
             declare const syntaxFact: FactType<"syntax", { readonly mode: "a" | "b" }, string>;
             await ctx.facts(syntaxFact, { condition: { mode: "c" } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "non-string providerId passed to facts",
+          body: `
+            declare const syntaxFact: FactType<"syntax", undefined, string>;
+            await ctx.facts(syntaxFact, { providerId: 123 });
           `,
           expectedPattern: /TS2322|TS2345/u,
         },

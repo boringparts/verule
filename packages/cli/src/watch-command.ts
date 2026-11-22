@@ -8,7 +8,9 @@ import { loadProjectConfigWithDependencies } from "./config-loader.ts";
 import {
   appendGapLines,
   checkReportSchema,
+  factConflictDetailsSchema,
   formatDiagnosticsLines,
+  toWireFactConflict,
   toWireReport,
 } from "./report-wire.ts";
 
@@ -42,6 +44,7 @@ export const watchFailureRecordSchema = z.object({
   trigger: z.enum(["initial", "change"]),
   code: z.string(),
   message: z.string(),
+  conflict: factConflictDetailsSchema.optional(),
 });
 
 export type WireWatchFailureRecord = z.infer<typeof watchFailureRecordSchema>;
@@ -129,6 +132,9 @@ export async function* streamWatchEvents<
         trigger: event.trigger,
         code: event.code,
         message: event.message,
+        ...(event.conflict !== undefined
+          ? { conflict: toWireFactConflict(event.conflict) }
+          : {}),
       });
     }
   }
