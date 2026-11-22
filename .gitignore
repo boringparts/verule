@@ -5,8 +5,8 @@ fixture-dist/
 target/
 .turbo/
 coverage/
+/.template
 .env
-.template/
 .vitest/
 data/
 playwright-report/

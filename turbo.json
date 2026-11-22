@@ -65,7 +65,7 @@
       },
       "library": {
         "dependencies": {
-          "allow": ["native", "tooling"]
+          "allow": ["library", "native", "tooling"]
         }
       },
       "native": {
