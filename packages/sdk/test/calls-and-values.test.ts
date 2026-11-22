@@ -390,7 +390,7 @@ void describe("@verule/sdk call graph and value propagation", () => {
 
           const callers = await ctx.callersOf([
             resolvedForward.calleeDeclaration!,
-            deliverCallee!.targets[0]!,
+            deliverCallee.targets[0]!,
           ]);
           bridgeCallerFile = callers[0]?.callSites[0]?.location.file;
           sinkCallerFile = callers[1]?.callSites[0]?.location.file;
@@ -401,10 +401,11 @@ void describe("@verule/sdk call graph and value propagation", () => {
             kinds: ["VariableDeclaration"],
           });
           const varInitOf = (name: string): SyntaxRef => {
-            const decl = varDecls.find((d) =>
-              d.text.startsWith(`${name} =`) ||
-              d.text.startsWith(`{ ${name}`) ||
-              d.text.includes(`...${name}`),
+            const decl = varDecls.find(
+              (d) =>
+                d.text.startsWith(`${name} =`) ||
+                d.text.startsWith(`{ ${name}`) ||
+                d.text.includes(`...${name}`),
             );
             assert.ok(decl?.initializer, `Missing var ${name}`);
             return decl.initializer;
@@ -457,9 +458,9 @@ void describe("@verule/sdk call graph and value propagation", () => {
           });
 
           deliveredReachable = propRes.results[0]!.reachable;
-          deliveredEvidenceFiles = propRes.results[0]!.evidence
-            .map((e) => e.at?.file)
-            .filter((f): f is string => f !== undefined);
+          deliveredEvidenceFiles = propRes.results[0]!.evidence.map(
+            (e) => e.at?.file,
+          ).filter((f): f is string => f !== undefined);
           deliveredStepKinds =
             propRes.results[0]!.paths[0]?.steps.map((s) => s.kind) ?? [];
           extractedReachable = propRes.results[1]!.reachable;
@@ -633,9 +634,9 @@ void describe("@verule/sdk call graph and value propagation", () => {
           });
 
           relayedReachable = prop.results[0]!.reachable;
-          relayedFiles = prop.results[0]!.evidence
-            .map((e) => e.at?.file)
-            .filter((f): f is string => f !== undefined);
+          relayedFiles = prop.results[0]!.evidence.map(
+            (e) => e.at?.file,
+          ).filter((f): f is string => f !== undefined);
           boxedReachable = prop.results[1]!.reachable;
           boxedGapKinds = prop.results[1]!.gaps.map((g) => g.kind);
         },
@@ -881,7 +882,9 @@ void describe("@verule/sdk call graph and value propagation", () => {
               const secretInit = varDecls.find((d) =>
                 d.text.startsWith("secret ="),
               )?.initializer;
-              const safeDecl = varDecls.find((d) => d.text.startsWith("safe ="));
+              const safeDecl = varDecls.find((d) =>
+                d.text.startsWith("safe ="),
+              );
               assert.ok(secretInit && safeDecl);
               const [safeRes] = await ctx.resolveDeclarations([safeDecl.ref]);
               const prop = await ctx.valuePropagation({
@@ -905,7 +908,9 @@ void describe("@verule/sdk call graph and value propagation", () => {
                     ctx.report({
                       at: gap.at,
                       message: `Unresolved dynamic target escalated to error: ${gap.message}`,
-                      evidence: [{ kind: "note", message: gap.kind, at: gap.at }],
+                      evidence: [
+                        { kind: "note", message: gap.kind, at: gap.at },
+                      ],
                     });
                   }
                 }

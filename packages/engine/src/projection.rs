@@ -316,20 +316,48 @@ pub struct QueryBatchResult {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum StepResult {
-    FindSyntax { items: Vec<SyntaxItem> },
-    TypeAtLocation { items: Vec<TypeItem> },
-    ResolveDeclarations { items: Vec<DeclarationRow> },
-    ResolveCalls { items: Vec<CallResolutionRow> },
-    ProjectCalls { items: Vec<CallProjectionRow> },
-    ProjectSignatures { items: Vec<SignatureProjectionRow> },
-    ProjectTypes { items: Vec<TypeProjectionRow> },
-    IsAssignableTo { items: Vec<AssignabilityRow> },
-    SyntaxOf { items: Vec<SyntaxLookupRow> },
-    ListBranches { items: Vec<FunctionBranchesItem> },
-    BranchCoverage { items: Vec<BranchCoverageItem> },
-    CallersOf { items: Vec<DeclarationCallersRow> },
-    CalleesOf { items: Vec<CallTargetsRow> },
-    ValuePropagation { items: Vec<ValuePropagationResultPayload> },
+    FindSyntax {
+        items: Vec<SyntaxItem>,
+    },
+    TypeAtLocation {
+        items: Vec<TypeItem>,
+    },
+    ResolveDeclarations {
+        items: Vec<DeclarationRow>,
+    },
+    ResolveCalls {
+        items: Vec<CallResolutionRow>,
+    },
+    ProjectCalls {
+        items: Vec<CallProjectionRow>,
+    },
+    ProjectSignatures {
+        items: Vec<SignatureProjectionRow>,
+    },
+    ProjectTypes {
+        items: Vec<TypeProjectionRow>,
+    },
+    IsAssignableTo {
+        items: Vec<AssignabilityRow>,
+    },
+    SyntaxOf {
+        items: Vec<SyntaxLookupRow>,
+    },
+    ListBranches {
+        items: Vec<FunctionBranchesItem>,
+    },
+    BranchCoverage {
+        items: Vec<BranchCoverageItem>,
+    },
+    CallersOf {
+        items: Vec<DeclarationCallersRow>,
+    },
+    CalleesOf {
+        items: Vec<CallTargetsRow>,
+    },
+    ValuePropagation {
+        items: Vec<ValuePropagationResultPayload>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -617,13 +645,82 @@ fn execute_step(
 ) -> Result<StepResult, RpcErr> {
     let step_start = observer.start_step();
     match step {
-        QueryStep::FindSyntax { files, kinds, range } => execute_find_syntax_step(
-            snapshot, project_id, program, files.as_deref(), kinds.as_deref(), range.as_ref(),
-            step_start, observer,
+        QueryStep::FindSyntax {
+            files,
+            kinds,
+            range,
+        } => execute_find_syntax_step(
+            snapshot,
+            project_id,
+            program,
+            files.as_deref(),
+            kinds.as_deref(),
+            range.as_ref(),
+            step_start,
+            observer,
         ),
         QueryStep::TypeAtLocation { targets } => execute_type_at_location_step(
             snapshot, project_id, checker, &targets, step_start, observer,
         ),
+        other @ (QueryStep::ResolveDeclarations { .. }
+        | QueryStep::ResolveCalls { .. }
+        | QueryStep::ProjectCalls { .. }
+        | QueryStep::ProjectSignatures { .. }
+        | QueryStep::ProjectTypes { .. }
+        | QueryStep::IsAssignableTo { .. }
+        | QueryStep::SyntaxOf { .. }) => execute_projection_step(
+            snapshot, project_id, program, checker, other, step_start, observer,
+        ),
+        QueryStep::ListBranches { targets } => {
+            execute_list_branches_step(snapshot, project_id, &targets, step_start, observer)
+        }
+        QueryStep::BranchCoverage {
+            function,
+            branches,
+            targets,
+        } => execute_branch_coverage_step(
+            snapshot,
+            project_id,
+            function.as_deref(),
+            &branches,
+            &targets,
+            step_start,
+            observer,
+        ),
+        QueryStep::CallersOf { targets } => execute_call_graph_step(
+            snapshot, project_id, program, checker, &targets, true, step_start, observer,
+        ),
+        QueryStep::CalleesOf { targets } => execute_call_graph_step(
+            snapshot, project_id, program, checker, &targets, false, step_start, observer,
+        ),
+        QueryStep::ValuePropagation {
+            propagation,
+            from,
+            to,
+        } => execute_value_propagation_step(
+            snapshot,
+            project_id,
+            program,
+            checker,
+            propagation.as_deref(),
+            &from,
+            &to,
+            step_start,
+            observer,
+        ),
+    }
+}
+
+fn execute_projection_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    step: QueryStep,
+    step_start: Option<Instant>,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    match step {
         QueryStep::ResolveDeclarations { targets, select } => {
             let items = run_resolve_declarations(
                 snapshot,
@@ -672,22 +769,10 @@ fn execute_step(
             observer.record_step("syntaxOf", step_start, items.len(), Vec::new());
             Ok(StepResult::SyntaxOf { items })
         }
-        QueryStep::ListBranches { targets } => {
-            execute_list_branches_step(snapshot, project_id, &targets, step_start, observer)
-        }
-        QueryStep::BranchCoverage { function, branches, targets } => execute_branch_coverage_step(
-            snapshot, project_id, function.as_deref(), &branches, &targets, step_start, observer,
-        ),
-        QueryStep::CallersOf { targets } => execute_call_graph_step(
-            snapshot, project_id, program, checker, &targets, true, step_start, observer,
-        ),
-        QueryStep::CalleesOf { targets } => execute_call_graph_step(
-            snapshot, project_id, program, checker, &targets, false, step_start, observer,
-        ),
-        QueryStep::ValuePropagation { propagation, from, to } => execute_value_propagation_step(
-            snapshot, project_id, program, checker, propagation.as_deref(), &from, &to, step_start,
-            observer,
-        ),
+        _ => Err(RpcErr::new(
+            "INTERNAL_ERROR",
+            "Unexpected non-projection query step.".to_string(),
+        )),
     }
 }
 
@@ -740,7 +825,12 @@ fn execute_value_propagation_step(
         from,
         to,
     )?;
-    observer.record_step("valuePropagation", step_start, result.results.len(), Vec::new());
+    observer.record_step(
+        "valuePropagation",
+        step_start,
+        result.results.len(),
+        Vec::new(),
+    );
     Ok(StepResult::ValuePropagation {
         items: vec![result],
     })

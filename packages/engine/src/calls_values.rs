@@ -149,10 +149,7 @@ fn node_text(node: P<Node>) -> Option<String> {
     Some(slice_source_text(sf, loc.start, loc.end))
 }
 
-pub fn canonical_symbol_for_node(
-    checker: &mut CheckerHandle,
-    node: P<Node>,
-) -> Option<P<Symbol>> {
+pub fn canonical_symbol_for_node(checker: &mut CheckerHandle, node: P<Node>) -> Option<P<Symbol>> {
     let raw = if node.kind() == Kind::ShorthandPropertyAssignment {
         checker
             .get_shorthand_assignment_value_symbol(Some(node))
@@ -181,12 +178,12 @@ fn extract_callable_from_decl(decl: P<Node>) -> Option<P<Node>> {
         return Some(decl);
     }
     match decl.kind() {
-        Kind::VariableDeclaration
-        | Kind::PropertyDeclaration
-        | Kind::PropertyAssignment => decl.initializer().and_then(|init| {
-            let inner = unwrap_expr_wrappers(init);
-            is_function_like_declaration(Some(inner)).then_some(inner)
-        }),
+        Kind::VariableDeclaration | Kind::PropertyDeclaration | Kind::PropertyAssignment => {
+            decl.initializer().and_then(|init| {
+                let inner = unwrap_expr_wrappers(init);
+                is_function_like_declaration(Some(inner)).then_some(inner)
+            })
+        }
         Kind::ExportAssignment => decl.expression().and_then(|expr| {
             let inner = unwrap_expr_wrappers(expr);
             is_function_like_declaration(Some(inner)).then_some(inner)
@@ -195,10 +192,7 @@ fn extract_callable_from_decl(decl: P<Node>) -> Option<P<Node>> {
     }
 }
 
-fn pick_preferred_impl_decl(
-    sym: P<Symbol>,
-    sig_opt: Option<P<Signature>>,
-) -> Option<P<Node>> {
+fn pick_preferred_impl_decl(sym: P<Symbol>, sig_opt: Option<P<Signature>>) -> Option<P<Node>> {
     let mut candidates = Vec::new();
     for &d in sym.declarations() {
         candidates.push(d);
@@ -317,10 +311,7 @@ fn is_unresolved_sig(checker: &mut CheckerHandle, sig: P<Signature>) -> bool {
     false
 }
 
-fn resolve_property_in_object_literal(
-    obj_lit: P<Node>,
-    prop_name: &str,
-) -> Option<P<Node>> {
+fn resolve_property_in_object_literal(obj_lit: P<Node>, prop_name: &str) -> Option<P<Node>> {
     for &prop in obj_lit.as_object_literal_expression().properties().nodes() {
         match prop.kind() {
             Kind::PropertyAssignment => {
@@ -417,8 +408,8 @@ impl<'a> CalleeResolver<'a> {
         }
         let sf_opt = get_source_file_of_node(decl_node);
         let is_external = sf_opt.is_some_and(|sf| !is_project_source_file(self.program, sf));
-        let is_default_library = sf_opt
-            .is_some_and(|sf| self.program.is_source_file_default_library(sf.path()));
+        let is_default_library =
+            sf_opt.is_some_and(|sf| self.program.is_source_file_default_library(sf.path()));
         let location = node_location_rel(self.cwd, decl_node);
         let name = symbol_name(symbol, Some(decl_node));
 
@@ -463,9 +454,7 @@ impl<'a> CalleeResolver<'a> {
                 let op = bin.operator_token().kind();
                 if matches!(
                     op,
-                    Kind::BarBarToken
-                        | Kind::QuestionQuestionToken
-                        | Kind::AmpersandAmpersandToken
+                    Kind::BarBarToken | Kind::QuestionQuestionToken | Kind::AmpersandAmpersandToken
                 ) {
                     self.resolve_expr(bin.left(), true);
                     self.resolve_expr(bin.right(), true);
@@ -513,7 +502,10 @@ impl<'a> CalleeResolver<'a> {
         }
 
         let callee_ty = self.checker.get_type_at_location(expr);
-        if callee_ty.flags().intersects(TypeFlags::Any | TypeFlags::Unknown) {
+        if callee_ty
+            .flags()
+            .intersects(TypeFlags::Any | TypeFlags::Unknown)
+        {
             self.push_gap(
                 "dynamic-callee",
                 format!(
@@ -725,7 +717,10 @@ fn build_parameter_bindings(
         let matched_param = params.get(idx).copied().or_else(|| {
             params.last().copied().filter(|last| {
                 last.kind() == Kind::Parameter
-                    && last.as_parameter_declaration().dot_dot_dot_token().is_some()
+                    && last
+                        .as_parameter_declaration()
+                        .dot_dot_dot_token()
+                        .is_some()
             })
         });
         let (param_name, param_decl_ref, is_rest) =
@@ -954,13 +949,8 @@ pub fn run_callees_of(
 
         for target in outcome.targets {
             let decl_ref = snapshot.alloc_declaration(project_id, target.decl_node, target.symbol);
-            let parameter_bindings = build_parameter_bindings(
-                snapshot,
-                project_id,
-                checker,
-                call_node,
-                target.fn_node,
-            );
+            let parameter_bindings =
+                build_parameter_bindings(snapshot, project_id, checker, call_node, target.fn_node);
             let return_expressions = target
                 .fn_node
                 .map_or_default(collect_return_expressions)
@@ -1174,9 +1164,7 @@ fn is_identifier_write_only(id_node: P<Node>) -> bool {
         | Kind::NamespaceImport
         | Kind::ExportSpecifier
         | Kind::PropertyAssignment => parent.name() == Some(id_node),
-        Kind::PropertyAccessExpression => {
-            parent.as_property_access_expression().name == id_node
-        }
+        Kind::PropertyAccessExpression => parent.as_property_access_expression().name == id_node,
         Kind::BinaryExpression => {
             let bin = parent.as_binary_expression();
             bin.operator_token().kind() == Kind::EqualsToken
@@ -2080,11 +2068,13 @@ impl<'a> PropagationRunner<'a> {
                 continue;
             }
 
-            let Some(key) = be
-                .property_name()
-                .and_then(prop_key_text)
-                .or_else(|| target_name.kind().eq(&Kind::Identifier).then(|| node_text(target_name)).flatten())
-            else {
+            let Some(key) = be.property_name().and_then(prop_key_text).or_else(|| {
+                target_name
+                    .kind()
+                    .eq(&Kind::Identifier)
+                    .then(|| node_text(target_name))
+                    .flatten()
+            }) else {
                 continue;
             };
             if field_path.last().is_some_and(|k| k == &key) {
@@ -2114,8 +2104,11 @@ impl<'a> PropagationRunner<'a> {
         queue: &mut VecDeque<TraceQueueItem>,
         visited: &mut FxHashSet<TraceKey>,
     ) {
-        let fn_name = symbol_name(canonical_symbol_for_node(self.checker, fn_node), Some(fn_node))
-            .unwrap_or_else(|| "<anonymous>".to_string());
+        let fn_name = symbol_name(
+            canonical_symbol_for_node(self.checker, fn_node),
+            Some(fn_node),
+        )
+        .unwrap_or_else(|| "<anonymous>".to_string());
 
         if let Some((&top_call, rest_stack)) = item.key.call_stack.split_last() {
             self.enqueue_step(
@@ -2210,7 +2203,10 @@ impl<'a> PropagationRunner<'a> {
                     continue;
                 };
                 if param.kind() == Kind::Parameter
-                    && param.as_parameter_declaration().dot_dot_dot_token().is_some()
+                    && param
+                        .as_parameter_declaration()
+                        .dot_dot_dot_token()
+                        .is_some()
                 {
                     continue;
                 }
@@ -2285,9 +2281,7 @@ impl<'a> PropagationRunner<'a> {
         for (idx, to_id) in to_ids.iter().enumerate() {
             let paths = std::mem::take(&mut self.found_paths[idx]);
             let reachable = !paths.is_empty();
-            let evidence = paths
-                .first()
-                .map_or_default(|p| p.evidence.clone());
+            let evidence = paths.first().map_or_default(|p| p.evidence.clone());
 
             let mut gap_set = std::mem::take(&mut self.target_gaps[idx]);
             if !reachable {
@@ -2337,7 +2331,9 @@ fn resolve_endpoint_spec(
         | crate::serve::HandlePayload::Type { .. }
         | crate::serve::HandlePayload::Branch(_) => Err(crate::serve::RpcErr::new(
             "INVALID_REFERENCE_KIND",
-            format!("Program reference {handle_id} cannot be used as a value propagation endpoint."),
+            format!(
+                "Program reference {handle_id} cannot be used as a value propagation endpoint."
+            ),
         )),
     }
 }

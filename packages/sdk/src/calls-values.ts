@@ -362,15 +362,21 @@ export function createCallsValuesQueries(deps: {
       }
 
       const results = await Promise.all(
-        declarations.map(
-          (decl) =>
-            cache.callersCache.get(`${snapshotId}:${projectId}:${decl.handleId}`)!,
+        declarations.map((decl) =>
+          cache.callersCache.get(
+            `${snapshotId}:${projectId}:${decl.handleId}`,
+          )!,
         ),
       );
 
       if (onQueryCompleted) {
         const count = results.reduce((sum, r) => sum + r.calls.length, 0);
-        onQueryCompleted("callersOf", cacheStatus, count, performance.now() - start);
+        onQueryCompleted(
+          "callersOf",
+          cacheStatus,
+          count,
+          performance.now() - start,
+        );
       }
 
       return results;
@@ -477,15 +483,21 @@ export function createCallsValuesQueries(deps: {
       }
 
       const results = await Promise.all(
-        calls.map(
-          (call) =>
-            cache.calleesCache.get(`${snapshotId}:${projectId}:${call.handleId}`)!,
+        calls.map((call) =>
+          cache.calleesCache.get(
+            `${snapshotId}:${projectId}:${call.handleId}`,
+          )!,
         ),
       );
 
       if (onQueryCompleted) {
         const count = results.reduce((sum, r) => sum + r.targets.length, 0);
-        onQueryCompleted("calleesOf", cacheStatus, count, performance.now() - start);
+        onQueryCompleted(
+          "calleesOf",
+          cacheStatus,
+          count,
+          performance.now() - start,
+        );
       }
 
       return results;
@@ -526,7 +538,9 @@ export function createCallsValuesQueries(deps: {
 
       const start = onQueryCompleted ? performance.now() : 0;
       const existing = cache.valueCache.get(cacheKey);
-      const cacheStatus: "computed" | "reused" = existing ? "reused" : "computed";
+      const cacheStatus: "computed" | "reused" = existing
+        ? "reused"
+        : "computed";
 
       let promise: Promise<ValuePropagationResult>;
       if (existing) {

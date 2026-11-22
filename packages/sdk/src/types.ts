@@ -476,7 +476,9 @@ export type RuleContext = {
   callersOf: (
     declarations: readonly DeclarationRef[],
   ) => Promise<readonly DeclarationCallersResult[]>;
-  calleesOf: (calls: readonly CallRef[]) => Promise<readonly CallTargetsResult[]>;
+  calleesOf: (
+    calls: readonly CallRef[],
+  ) => Promise<readonly CallTargetsResult[]>;
   valuePropagation: (
     options: ValuePropagationOptions,
   ) => Promise<ValuePropagationResult>;

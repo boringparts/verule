@@ -12,6 +12,10 @@ import {
   type EngineFunctionBranchesItem,
   type FunctionBranchesResult,
 } from "./branch-coverage.ts";
+import {
+  createCallsValuesCache,
+  createCallsValuesQueries,
+} from "./calls-values.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
 import {
   ObservationCollector,
@@ -20,10 +24,6 @@ import {
   normalizeTargetSpec,
   type EngineCallIoMetrics,
 } from "./observation.ts";
-import {
-  createCallsValuesCache,
-  createCallsValuesQueries,
-} from "./calls-values.ts";
 import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
 import {
   buildDiagnostics,
