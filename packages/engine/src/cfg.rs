@@ -30,11 +30,7 @@ pub struct EvidenceItem {
 }
 
 impl EvidenceItem {
-    pub const fn simple(
-        kind: &'static str,
-        message: String,
-        at: Option<SourceLocation>,
-    ) -> Self {
+    pub const fn simple(kind: &'static str, message: String, at: Option<SourceLocation>) -> Self {
         Self {
             kind,
             message,
@@ -393,8 +389,7 @@ impl FunctionCfg {
 
         evidence.push(EvidenceItem::simple(
             "source",
-            "Target reached along bypass path without passing selected branches."
-                .to_string(),
+            "Target reached along bypass path without passing selected branches.".to_string(),
             Some(target_location.clone()),
         ));
         evidence

@@ -207,13 +207,21 @@ export function validateInstanceBehaviors(
       );
     }
 
-    const symbol = assertNonEmptyOptionalString(match.symbol, "symbol", modelId);
+    const symbol = assertNonEmptyOptionalString(
+      match.symbol,
+      "symbol",
+      modelId,
+    );
     const container = assertNonEmptyOptionalString(
       match.container,
       "container",
       modelId,
     );
-    const member = assertNonEmptyOptionalString(match.member, "member", modelId);
+    const member = assertNonEmptyOptionalString(
+      match.member,
+      "member",
+      modelId,
+    );
     assertNonEmptyOptionalString(match.module, "module", modelId);
 
     if (

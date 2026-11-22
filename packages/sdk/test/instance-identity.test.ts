@@ -720,10 +720,7 @@ void describe("@verule/sdk instance identity", () => {
         const evOnce2 = resolvedMap.get("evOnce2")!;
         assert.ok(evOnce1.instance && evOnce2.instance);
         assert.equal(evOnce1.originKind, "model-allocation");
-        assert.equal(
-          isSameInstance(evOnce1.instance, evOnce2.instance),
-          false,
-        );
+        assert.equal(isSameInstance(evOnce1.instance, evOnce2.instance), false);
         assert.ok(
           evOnce1.evidence.some(
             (e) => e.kind === "model" && e.modelId === "acme-ui-model",
@@ -736,10 +733,7 @@ void describe("@verule/sdk instance identity", () => {
         assert.ok(menu1.instance && menu2.instance && menu1Alias.instance);
         assert.equal(menu1.originKind, "model-allocation");
         assert.equal(isSameInstance(menu1.instance, menu2.instance), false);
-        assert.equal(
-          isSameInstance(menu1.instance, menu1Alias.instance),
-          true,
-        );
+        assert.equal(isSameInstance(menu1.instance, menu1Alias.instance), true);
 
         const inst1 = resolvedMap.get("inst1")!;
         const inst2 = resolvedMap.get("inst2")!;
@@ -855,7 +849,9 @@ void describe("@verule/sdk instance identity", () => {
         ].join("\n");
         writeFileSync(appPath, updatedApp, "utf8");
         const srcUpdate = await session.update({ changed: ["src/app.ts"] });
-        assert.ok(srcUpdate.recomputation.invalidatedBy.includes("changed:src/app.ts"));
+        assert.ok(
+          srcUpdate.recomputation.invalidatedBy.includes("changed:src/app.ts"),
+        );
 
         resolvedMap.clear();
         await session.check();
@@ -890,7 +886,8 @@ void describe("@verule/sdk instance identity", () => {
             },
           ],
         }),
-      (err) => err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
+      (err) =>
+        err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
     );
 
     assert.throws(
@@ -905,7 +902,8 @@ void describe("@verule/sdk instance identity", () => {
             },
           ],
         }),
-      (err) => err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
+      (err) =>
+        err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
     );
   });
 });

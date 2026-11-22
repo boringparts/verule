@@ -735,12 +735,8 @@ fn execute_step(
             Ok(StepResult::ResolveInstances { items })
         }
         QueryStep::ProjectInstances { targets, select } => {
-            let items = run_project_instances(
-                snapshot,
-                project_id,
-                &targets,
-                &select.unwrap_or_default(),
-            )?;
+            let items =
+                run_project_instances(snapshot, project_id, &targets, &select.unwrap_or_default())?;
             observer.record_step("projectInstances", step_start, items.len(), Vec::new());
             Ok(StepResult::ProjectInstances { items })
         }
@@ -1658,9 +1654,7 @@ fn run_resolve_declarations(
             HandlePayload::Branch(_) | HandlePayload::Instance(_) => {
                 return Err(RpcErr::new(
                     "INVALID_REFERENCE_KIND",
-                    format!(
-                        "Program reference {handle_id} cannot resolve a declaration."
-                    ),
+                    format!("Program reference {handle_id} cannot resolve a declaration."),
                 ));
             }
         };
@@ -2404,9 +2398,7 @@ fn run_syntax_of(
             HandlePayload::Branch(_) | HandlePayload::Instance(_) => {
                 return Err(RpcErr::new(
                     "INVALID_REFERENCE_KIND",
-                    format!(
-                        "Program reference {handle_id} has no syntax node."
-                    ),
+                    format!("Program reference {handle_id} has no syntax node."),
                 ));
             }
         };

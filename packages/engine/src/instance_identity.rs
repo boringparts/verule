@@ -459,15 +459,12 @@ fn select_reaching_writes(mut writes: Vec<VarWriteSite>, anchor: P<Node>) -> Vec
         }
     }
 
-    let latest_dominating = candidate_indices
-        .iter()
-        .copied()
-        .rfind(|&idx| {
-            let w = &writes[idx];
-            w.is_unconditional
-                && w.end <= anchor_start
-                && w.block.is_some_and(|b| is_ancestor_of(b, anchor))
-        });
+    let latest_dominating = candidate_indices.iter().copied().rfind(|&idx| {
+        let w = &writes[idx];
+        w.is_unconditional
+            && w.end <= anchor_start
+            && w.block.is_some_and(|b| is_ancestor_of(b, anchor))
+    });
 
     let start_idx = latest_dominating.unwrap_or(0);
     let selected: Vec<usize> = candidate_indices
@@ -635,10 +632,7 @@ fn collect_callee_decl_metadata(
     }
 }
 
-fn score_model_match(
-    rule: &InstanceModelMatchInput,
-    meta: &CalleeDeclMetadata,
-) -> Option<usize> {
+fn score_model_match(rule: &InstanceModelMatchInput, meta: &CalleeDeclMetadata) -> Option<usize> {
     let mut score = 0;
 
     if let Some(ref module_filter) = rule.module {
@@ -716,8 +710,8 @@ fn find_matching_model<'a>(
 
     for &(other_model, other_behavior) in best_matches.iter().skip(1) {
         let same_kind = first_behavior.kind == other_behavior.kind;
-        let same_arg =
-            first_behavior.argument_index.unwrap_or(0) == other_behavior.argument_index.unwrap_or(0);
+        let same_arg = first_behavior.argument_index.unwrap_or(0)
+            == other_behavior.argument_index.unwrap_or(0);
         if !same_kind || (first_behavior.kind == "forwards-argument" && !same_arg) {
             return ModelMatchOutcome::Conflict(GapItem {
                 kind: "conflicting-instance-model",
@@ -756,7 +750,8 @@ impl InstanceResolver<'_> {
     fn resolve_target(&mut self, node: P<Node>) -> TraceOutcome {
         let mut active = Vec::new();
         let mut out = self.resolve_node(node, &[], node, 0, &mut active);
-        out.origins.sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
+        out.origins
+            .sort_by(|a, b| a.instance_key.cmp(&b.instance_key));
         out
     }
 
@@ -811,7 +806,8 @@ impl InstanceResolver<'_> {
         match node.kind() {
             Kind::AwaitExpression => {
                 if let Some(expr) = node.expression() {
-                    let mut res = self.resolve_node(expr, call_stack, read_anchor, depth + 1, active);
+                    let mut res =
+                        self.resolve_node(expr, call_stack, read_anchor, depth + 1, active);
                     if let Some(loc) = node_location_rel(self.cwd, node) {
                         prepend_step(
                             &mut res.origins,
@@ -872,7 +868,14 @@ impl InstanceResolver<'_> {
                 return self.resolve_member_access(node, call_stack, read_anchor, depth, active);
             }
             Kind::VariableDeclaration => {
-                return self.resolve_variable_decl(node, node, call_stack, read_anchor, depth, active);
+                return self.resolve_variable_decl(
+                    node,
+                    node,
+                    call_stack,
+                    read_anchor,
+                    depth,
+                    active,
+                );
             }
             Kind::Parameter => {
                 return self.resolve_parameter(node, call_stack, depth, active);
@@ -1091,8 +1094,9 @@ impl InstanceResolver<'_> {
                 origins: Vec::new(),
                 gaps: vec![GapItem {
                     kind: "dynamic-callee",
-                    message: "Constructor target has dynamic type and cannot be statically resolved."
-                        .to_string(),
+                    message:
+                        "Constructor target has dynamic type and cannot be statically resolved."
+                            .to_string(),
                     at: loc,
                 }],
             };
@@ -1102,7 +1106,11 @@ impl InstanceResolver<'_> {
             .and_then(|d| d.name().and_then(node_text))
             .or_else(|| node_text(callee_expr))
             .unwrap_or_else(|| "instance".to_string());
-        self.make_allocation_outcome(node, call_stack, &format!("Allocated new {class_name} instance"))
+        self.make_allocation_outcome(
+            node,
+            call_stack,
+            &format!("Allocated new {class_name} instance"),
+        )
     }
 
     fn resolve_this_keyword(
@@ -1330,7 +1338,8 @@ impl InstanceResolver<'_> {
 
         let mut combined = TraceOutcome::default();
         for w in reaching {
-            let mut sub = self.resolve_node(w.rhs, effective_stack, w.write_node, depth + 1, active);
+            let mut sub =
+                self.resolve_node(w.rhs, effective_stack, w.write_node, depth + 1, active);
             if read_node != decl {
                 if let Some(loc) = node_location_rel(self.cwd, decl) {
                     let msg = if read_fn == decl_fn {
@@ -1628,7 +1637,15 @@ impl InstanceResolver<'_> {
             return closure_outcome;
         }
 
-        self.resolve_call_fallback(call_node, unwrapped_callee, outcome.gaps, loc, call_stack, depth, active)
+        self.resolve_call_fallback(
+            call_node,
+            unwrapped_callee,
+            outcome.gaps,
+            loc,
+            call_stack,
+            depth,
+            active,
+        )
     }
 
     #[expect(
@@ -1664,9 +1681,8 @@ impl InstanceResolver<'_> {
             && let Some(decl) = pick_preferred_impl_decl(sym, None)
             && is_external_declaration(self.program, decl)
         {
-            return self.resolve_external_or_unbodied_target(
-                call_node, decl, call_stack, depth, active,
-            );
+            return self
+                .resolve_external_or_unbodied_target(call_node, decl, call_stack, depth, active);
         }
 
         let mut combined = TraceOutcome::default();
@@ -1933,7 +1949,9 @@ impl InstanceResolver<'_> {
                 origins: Vec::new(),
                 gaps: vec![GapItem {
                     kind: "unsupported-instance-model",
-                    message: format!("Unsupported instance behavior kind '{other}' in model '{model_id}'."),
+                    message: format!(
+                        "Unsupported instance behavior kind '{other}' in model '{model_id}'."
+                    ),
                     at: call_loc,
                 }],
             },
@@ -2014,13 +2032,8 @@ impl InstanceResolver<'_> {
                 && origin_node.kind() == Kind::ObjectLiteralExpression
                 && let Some(prop_val) = resolve_property_in_object_literal(origin_node, prop_name)
             {
-                let mut sub = self.resolve_node(
-                    prop_val,
-                    &host.captured_stack,
-                    prop_val,
-                    depth + 1,
-                    active,
-                );
+                let mut sub =
+                    self.resolve_node(prop_val, &host.captured_stack, prop_val, depth + 1, active);
                 if let Some(ref loc) = read_loc {
                     prepend_step(
                         &mut sub.origins,
@@ -2628,9 +2641,11 @@ fn match_timeline_order(
 
 fn extract_call_receiver(unwrapped_callee: P<Node>) -> Option<P<Node>> {
     match unwrapped_callee.kind() {
-        Kind::PropertyAccessExpression => {
-            Some(unwrapped_callee.as_property_access_expression().expression())
-        }
+        Kind::PropertyAccessExpression => Some(
+            unwrapped_callee
+                .as_property_access_expression()
+                .expression(),
+        ),
         Kind::ElementAccessExpression => {
             Some(unwrapped_callee.as_element_access_expression().expression())
         }
@@ -2659,15 +2674,11 @@ fn find_class_property_initializer(class_node: P<Node>, prop_name: &str) -> Opti
 }
 
 fn find_class_getter(class_node: P<Node>, prop_name: &str) -> Option<P<Node>> {
-    class_node
-        .members()
-        .iter()
-        .copied()
-        .find(|&member| {
-            member.kind() == Kind::GetAccessor
-                && member.name().and_then(node_text).as_deref() == Some(prop_name)
-                && member.body().is_some()
-        })
+    class_node.members().iter().copied().find(|&member| {
+        member.kind() == Kind::GetAccessor
+            && member.name().and_then(node_text).as_deref() == Some(prop_name)
+            && member.body().is_some()
+    })
 }
 
 fn resolve_instance_target_node(
