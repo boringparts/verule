@@ -307,12 +307,10 @@ fn rejects_stale_snapshots_and_invalid_project_configs() {
     );
 }
 
-#[test]
-fn serves_list_branches_and_branch_coverage_statuses() {
-    let temp = TempDirGuard::new("verule-engine-serve-cfg");
-    let src_dir = temp.path().join("src");
+fn write_cfg_project(root: &Path) -> String {
+    let src_dir = root.join("src");
     fs::create_dir_all(&src_dir).expect("create src dir");
-    let tsconfig_path = temp.path().join("tsconfig.json");
+    let tsconfig_path = root.join("tsconfig.json");
     fs::write(
         &tsconfig_path,
         r#"{
@@ -348,20 +346,19 @@ fn serves_list_branches_and_branch_coverage_statuses() {
         "",
     ]
     .join("\n");
-    fs::write(src_dir.join("cfg.ts"), &source).expect("write cfg.ts");
+    fs::write(src_dir.join("cfg.ts"), source).expect("write cfg.ts");
+    normalized(&tsconfig_path)
+}
 
-    let cwd_str = normalized(temp.path());
-    let (child, mut stdin, mut reader) = spawn_engine_stdio();
-    let (snapshot_id, project_id, _) = open_snapshot(
-        &mut stdin,
-        &mut reader,
-        &cwd_str,
-        &normalized(&tsconfig_path),
-    );
-
+fn collect_cfg_handles(
+    stdin: &mut ChildStdin,
+    reader: &mut BufReader<ChildStdout>,
+    snapshot_id: u64,
+    project_id: &str,
+) -> (Vec<String>, Vec<String>) {
     let syntax_resp = rpc_call(
-        &mut stdin,
-        &mut reader,
+        stdin,
+        reader,
         &json!({
             "id": 2,
             "method": "query.batch",
@@ -376,22 +373,36 @@ fn serves_list_branches_and_branch_coverage_statuses() {
         }),
     );
     assert_eq!(syntax_resp["ok"], json!(true));
-    let fns = syntax_resp["result"]["results"][0]["items"]
+    let body_fns: Vec<String> = syntax_resp["result"]["results"][0]["items"]
         .as_array()
-        .expect("fns");
-    let body_fns: Vec<&Value> = fns
+        .expect("fns")
         .iter()
         .filter(|item| !item["text"].as_str().unwrap_or("").starts_with("declare "))
+        .map(|item| item["ref"].as_str().expect("fn ref").to_string())
         .collect();
     assert_eq!(body_fns.len(), 3);
 
-    let sink_calls: Vec<&Value> = syntax_resp["result"]["results"][1]["items"]
+    let sink_calls: Vec<String> = syntax_resp["result"]["results"][1]["items"]
         .as_array()
         .expect("calls")
         .iter()
         .filter(|item| item["text"].as_str().unwrap_or("").starts_with("sink("))
+        .map(|item| item["ref"].as_str().expect("call ref").to_string())
         .collect();
     assert_eq!(sink_calls.len(), 3);
+    (body_fns, sink_calls)
+}
+
+#[test]
+fn serves_list_branches_and_branch_coverage_statuses() {
+    let temp = TempDirGuard::new("verule-engine-serve-cfg");
+    let tsconfig_str = write_cfg_project(temp.path());
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+    let (snapshot_id, project_id, _) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+    let (body_fns, sink_calls) =
+        collect_cfg_handles(&mut stdin, &mut reader, snapshot_id, &project_id);
 
     let branches_resp = rpc_call(
         &mut stdin,
@@ -402,10 +413,7 @@ fn serves_list_branches_and_branch_coverage_statuses() {
             "params": {
                 "snapshotId": snapshot_id,
                 "projectId": project_id,
-                "steps": [{
-                    "op": "listBranches",
-                    "targets": body_fns.iter().map(|f| f["ref"].as_str().expect("fn ref")).collect::<Vec<_>>()
-                }]
+                "steps": [{ "op": "listBranches", "targets": body_fns }]
             }
         }),
     );
@@ -427,18 +435,14 @@ fn serves_list_branches_and_branch_coverage_statuses() {
         .collect();
     assert_eq!(joint_true_branches.len(), 2);
 
-    let dead_branches: Vec<&str> = branch_groups[1]["branches"]
-        .as_array()
-        .expect("dead branches")
-        .iter()
-        .map(|b| b["ref"].as_str().expect("branch ref"))
-        .collect();
-    let unmodeled_branches: Vec<&str> = branch_groups[2]["branches"]
-        .as_array()
-        .expect("unmodeled branches")
-        .iter()
-        .map(|b| b["ref"].as_str().expect("branch ref"))
-        .collect();
+    let collect_all_refs = |idx: usize| -> Vec<&str> {
+        branch_groups[idx]["branches"]
+            .as_array()
+            .expect("branches")
+            .iter()
+            .map(|b| b["ref"].as_str().expect("branch ref"))
+            .collect()
+    };
 
     let cov_resp = rpc_call(
         &mut stdin,
@@ -450,30 +454,10 @@ fn serves_list_branches_and_branch_coverage_statuses() {
                 "snapshotId": snapshot_id,
                 "projectId": project_id,
                 "steps": [
-                    {
-                        "op": "branchCoverage",
-                        "function": body_fns[0]["ref"],
-                        "branches": [joint_true_branches[0]],
-                        "targets": [sink_calls[0]["ref"]]
-                    },
-                    {
-                        "op": "branchCoverage",
-                        "function": body_fns[0]["ref"],
-                        "branches": joint_true_branches,
-                        "targets": [sink_calls[0]["ref"]]
-                    },
-                    {
-                        "op": "branchCoverage",
-                        "function": body_fns[1]["ref"],
-                        "branches": dead_branches,
-                        "targets": [sink_calls[1]["ref"]]
-                    },
-                    {
-                        "op": "branchCoverage",
-                        "function": body_fns[2]["ref"],
-                        "branches": unmodeled_branches,
-                        "targets": [sink_calls[2]["ref"]]
-                    }
+                    { "op": "branchCoverage", "function": body_fns[0], "branches": [joint_true_branches[0]], "targets": [sink_calls[0]] },
+                    { "op": "branchCoverage", "function": body_fns[0], "branches": joint_true_branches, "targets": [sink_calls[0]] },
+                    { "op": "branchCoverage", "function": body_fns[1], "branches": collect_all_refs(1), "targets": [sink_calls[1]] },
+                    { "op": "branchCoverage", "function": body_fns[2], "branches": collect_all_refs(2), "targets": [sink_calls[2]] }
                 ]
             }
         }),

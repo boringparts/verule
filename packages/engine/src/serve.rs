@@ -594,107 +594,13 @@ impl EngineServer {
 
         let mut results = Vec::with_capacity(params.steps.len());
         for step in params.steps {
-            let step_start = observer.start_step();
-            match step {
-                QueryStep::FindSyntax { files, kinds } => {
-                    let items = run_find_syntax(
-                        snapshot,
-                        &params.project_id,
-                        program,
-                        files.as_deref(),
-                        &kinds,
-                    )?;
-                    let raw_details = if observer.is_detail() {
-                        items
-                            .iter()
-                            .map(|item| EngineStepDetail {
-                                kind: "candidate",
-                                file: Some(item.location.file.clone()),
-                                line: Some(item.location.line),
-                                column: Some(item.location.column),
-                                summary: format!("{} {}", item.kind, item.text),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    observer.record_step("findSyntax", step_start, items.len(), raw_details);
-                    results.push(StepResult::FindSyntax { items });
-                }
-                QueryStep::TypeAtLocation { targets } => {
-                    let items =
-                        run_type_at_location(snapshot, &params.project_id, program, &targets)?;
-                    let raw_details = if observer.is_detail() {
-                        items
-                            .iter()
-                            .map(|item| EngineStepDetail {
-                                kind: "typeAtLocation",
-                                file: None,
-                                line: None,
-                                column: None,
-                                summary: format!("{} -> {}", item.target, item.type_text),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    observer.record_step("typeAtLocation", step_start, items.len(), raw_details);
-                    results.push(StepResult::TypeAtLocation { items });
-                }
-                QueryStep::ListBranches { targets } => {
-                    let items = run_list_branches(snapshot, &params.project_id, &targets)?;
-                    let raw_details = if observer.is_detail() {
-                        items
-                            .iter()
-                            .map(|item| EngineStepDetail {
-                                kind: "listBranches",
-                                file: None,
-                                line: None,
-                                column: None,
-                                summary: format!(
-                                    "{} -> {} branch(es), {} gap(s)",
-                                    item.target,
-                                    item.branches.len(),
-                                    item.gaps.len()
-                                ),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    observer.record_step("listBranches", step_start, items.len(), raw_details);
-                    results.push(StepResult::ListBranches { items });
-                }
-                QueryStep::BranchCoverage {
-                    function,
-                    branches,
-                    targets,
-                } => {
-                    let items = run_branch_coverage(
-                        snapshot,
-                        &params.project_id,
-                        function.as_deref(),
-                        &branches,
-                        &targets,
-                    )?;
-                    let raw_details = if observer.is_detail() {
-                        items
-                            .iter()
-                            .map(|item| EngineStepDetail {
-                                kind: "branchCoverage",
-                                file: None,
-                                line: None,
-                                column: None,
-                                summary: format!("{} -> {}", item.target, item.status),
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    observer.record_step("branchCoverage", step_start, items.len(), raw_details);
-                    results.push(StepResult::BranchCoverage { items });
-                }
-            }
+            results.push(execute_query_step(
+                snapshot,
+                &params.project_id,
+                program,
+                step,
+                observer,
+            )?);
         }
 
         Ok(QueryBatchResult { results })
@@ -709,6 +615,109 @@ impl EngineServer {
                 release_tsrs_snapshot(&session, id);
             }
             session.close();
+        }
+    }
+}
+
+fn execute_query_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    step: QueryStep,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    let step_start = observer.start_step();
+    match step {
+        QueryStep::FindSyntax { files, kinds } => {
+            let items = run_find_syntax(snapshot, project_id, program, files.as_deref(), &kinds)?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "candidate",
+                        file: Some(item.location.file.clone()),
+                        line: Some(item.location.line),
+                        column: Some(item.location.column),
+                        summary: format!("{} {}", item.kind, item.text),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("findSyntax", step_start, items.len(), raw_details);
+            Ok(StepResult::FindSyntax { items })
+        }
+        QueryStep::TypeAtLocation { targets } => {
+            let items = run_type_at_location(snapshot, project_id, program, &targets)?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "typeAtLocation",
+                        file: None,
+                        line: None,
+                        column: None,
+                        summary: format!("{} -> {}", item.target, item.type_text),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("typeAtLocation", step_start, items.len(), raw_details);
+            Ok(StepResult::TypeAtLocation { items })
+        }
+        QueryStep::ListBranches { targets } => {
+            let items = run_list_branches(snapshot, project_id, &targets)?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "listBranches",
+                        file: None,
+                        line: None,
+                        column: None,
+                        summary: format!(
+                            "{} -> {} branch(es), {} gap(s)",
+                            item.target,
+                            item.branches.len(),
+                            item.gaps.len()
+                        ),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("listBranches", step_start, items.len(), raw_details);
+            Ok(StepResult::ListBranches { items })
+        }
+        QueryStep::BranchCoverage {
+            function,
+            branches,
+            targets,
+        } => {
+            let items = run_branch_coverage(
+                snapshot,
+                project_id,
+                function.as_deref(),
+                &branches,
+                &targets,
+            )?;
+            let raw_details = if observer.is_detail() {
+                items
+                    .iter()
+                    .map(|item| EngineStepDetail {
+                        kind: "branchCoverage",
+                        file: None,
+                        line: None,
+                        column: None,
+                        summary: format!("{} -> {}", item.target, item.status),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            observer.record_step("branchCoverage", step_start, items.len(), raw_details);
+            Ok(StepResult::BranchCoverage { items })
         }
     }
 }
