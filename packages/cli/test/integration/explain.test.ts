@@ -303,3 +303,94 @@ void test("verule check rejects unknown --rule, invalid --at, and invalid --obse
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+void test("verule check --observe and --at surface adapter providers, ruleId, candidates, and reuse", async () => {
+  const root = mkdtempSync(join(tmpdir(), "verule-cli-facts-observe-"));
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "src", "app.ts"),
+    "export function checkInput(x: string): string { return x; }\n",
+    "utf8",
+  );
+  const sdkUrl = import.meta.resolve("@verule/sdk");
+  writeFileSync(
+    join(root, "verule.config.mjs"),
+    `import { defineAdapter, defineConfig, defineFactType, defineRule } from ${JSON.stringify(sdkUrl)};
+
+const SampleFact = defineFactType({
+  id: "cli.sample-fact",
+  subjectKind: "syntax",
+});
+
+const sampleAdapter = defineAdapter({
+  id: "sample-provider",
+  provides: [
+    {
+      factType: SampleFact,
+      extract: async (ctx) => {
+        const fns = await ctx.findSyntax({ kinds: ["FunctionDeclaration"] });
+        return fns.map((fn) => ({
+          subject: fn.ref,
+          value: { ok: true },
+        }));
+      },
+    },
+  ],
+});
+
+const ruleFirst = defineRule({
+  id: "rule-first",
+  run: async (ctx) => {
+    await ctx.facts(SampleFact);
+  },
+});
+
+const ruleSecond = defineRule({
+  id: "rule-second",
+  run: async (ctx) => {
+    await ctx.facts(SampleFact);
+  },
+});
+
+export default defineConfig({
+  tsconfig: "tsconfig.json",
+  adapters: [sampleAdapter],
+  rules: [ruleFirst, ruleSecond],
+});
+`,
+    "utf8",
+  );
+
+  try {
+    const textRes = await captureCli(
+      ["check", "--observe", "detail", "--at", "src/app.ts:1:1"],
+      root,
+    );
+    assert.equal(textRes.status, 0, textRes.stderr);
+    assert.match(textRes.stdout, /providers: .*sample-provider/u);
+    assert.match(textRes.stdout, /provider=sample-provider/u);
+    assert.match(textRes.stdout, /rule=rule-first/u);
+    assert.match(textRes.stdout, /rule=rule-second/u);
+    assert.match(textRes.stdout, /cache=computed/u);
+    assert.match(textRes.stdout, /cache=reused/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

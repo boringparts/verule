@@ -63,6 +63,7 @@ export type QueryTraceRecord = {
   readonly op: string;
   readonly projectId: string;
   readonly provider: string;
+  readonly providers?: readonly string[];
   readonly cacheStatus: "computed" | "reused";
   readonly candidateCount: number;
   readonly matchedTarget: boolean;
@@ -495,6 +496,7 @@ export class ObservationCollector {
     readonly op: string;
     readonly projectId: string;
     readonly provider: string;
+    readonly providers?: readonly string[];
     readonly cacheStatus: "computed" | "reused";
     readonly candidateCount: number;
     readonly durationMs: number;
@@ -514,7 +516,10 @@ export class ObservationCollector {
         this.#reusedQueryCount += 1;
       }
       this.#candidateCount += params.candidateCount;
-      this.#providers.add(params.provider);
+      const providersToAdd = params.providers ?? [params.provider];
+      for (const providerId of providersToAdd) {
+        this.#providers.add(providerId);
+      }
 
       if (this.mode === "detail") {
         this.#appendDetail({
@@ -541,6 +546,9 @@ export class ObservationCollector {
         op: params.op,
         projectId: params.projectId,
         provider: params.provider,
+        ...(params.providers !== undefined
+          ? { providers: params.providers }
+          : {}),
         cacheStatus: params.cacheStatus,
         candidateCount: params.candidateCount,
         matchedTarget,
@@ -761,7 +769,7 @@ export class ObservationCollector {
     }));
 
     const providers = [
-      ...new Set(querySteps.map((step) => step.provider)),
+      ...new Set(queries.flatMap((q) => q.providers ?? [q.provider])),
     ].toSorted();
     const projectsChecked = params.projects.map((p) => p.projectId);
 

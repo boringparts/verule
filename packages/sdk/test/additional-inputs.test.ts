@@ -13,7 +13,10 @@ import { describe, it } from "node:test";
 import {
   VeruleExecutionError,
   createAdditionalInputRegistry,
+  defineAdapter,
   defineConfig,
+  defineFactProvider,
+  defineFactType,
   defineRule,
   openSession,
   requestSharedReport,
@@ -479,6 +482,196 @@ void describe("@verule/sdk additional inputs", () => {
       await sharedSession?.close();
       rmSync(root, { recursive: true, force: true });
       rmSync(externalDir, { recursive: true, force: true });
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+
+  void it("tracks additional inputs read inside LibraryAdapter.extract, preserves adapter sources on fact cache reuse, and invalidates facts when only the adapter manifest changes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verule-adapter-inputs-"));
+    const socketDir = mkdtempSync(join(tmpdir(), "verule-adapter-sock-"));
+    const socketPath = join(socketDir, "shared.sock");
+    mkdirSync(join(root, "src"), { recursive: true });
+
+    const tsconfigPath = join(root, "tsconfig.json");
+    const appPath = join(root, "src", "app.ts");
+    const manifestPath = join(root, "schema-policy.json");
+
+    writeFileSync(tsconfigPath, createTsConfig(["src/**/*.ts"]), "utf8");
+    writeFileSync(
+      appPath,
+      [
+        "declare function validatePayload(payload: { id: string }): void;",
+        'export function handle(): void { validatePayload({ id: "u1" }); }',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({ requiredFields: ["id"] }, null, 2),
+      "utf8",
+    );
+
+    const RequiredFieldsFact = defineFactType<
+      "syntax",
+      undefined,
+      readonly string[]
+    >({
+      id: "policy.required-fields",
+      subjectKind: "syntax",
+    });
+
+    let extractCount = 0;
+    const policyAdapter = defineAdapter({
+      id: "policy-manifest-adapter",
+      provides: [
+        defineFactProvider(RequiredFieldsFact, async (ctx) => {
+          extractCount += 1;
+          const raw = ctx.readAdditionalInput("schema-policy.json");
+          const parsed = JSON.parse(raw) as {
+            readonly requiredFields: readonly string[];
+          };
+          const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
+          return calls
+            .filter((call) => call.text.startsWith("validatePayload("))
+            .map((call) => ({
+              subject: call.ref,
+              value: parsed.requiredFields,
+              evidence: [
+                {
+                  kind: "source" as const,
+                  message: `Policy requires [${parsed.requiredFields.join(", ")}]`,
+                  at: call.location,
+                },
+              ],
+            }));
+        }),
+      ],
+    });
+
+    const consumerRule = defineRule({
+      id: "policy-consumer",
+      run: async (ctx) => {
+        const facts = await ctx.facts(RequiredFieldsFact);
+        const [locations] = [
+          await ctx.syntaxOf(
+            facts.map((f) => f.subject),
+            { select: { location: true } },
+          ),
+        ];
+        for (const [idx, fact] of facts.entries()) {
+          const loc = locations[idx]?.location;
+          if (loc && fact.value.includes("tenantId")) {
+            ctx.report({
+              at: loc,
+              message: "Payload missing policy-required field tenantId",
+              findingKey: "missing:tenantId",
+              evidence: fact.evidence,
+            });
+          }
+        }
+      },
+    });
+
+    const auditorRule = defineRule({
+      id: "policy-auditor",
+      run: async (ctx) => {
+        ctx.registerAdditionalInput("./schema-policy.json");
+        await ctx.facts(RequiredFieldsFact);
+      },
+    });
+
+    const config = defineConfig({
+      tsconfig: "tsconfig.json",
+      additionalInputs: ["schema-policy.json"],
+      adapters: [policyAdapter],
+      rules: [consumerRule, auditorRule],
+    });
+
+    const abortController = new AbortController();
+    let sharedSession:
+      | Awaited<ReturnType<typeof startSharedSession>>
+      | undefined;
+    try {
+      // Verify single-session cache reuse across rules and across repeated check() calls preserves adapter source
+      const directSession = await openSession({ cwd: root, config });
+      try {
+        const first = await directSession.check();
+        assert.equal(first.status, "clean");
+        assert.equal(extractCount, 1);
+        assert.deepEqual(first.additionalInputs[0]?.sources, [
+          { kind: "config" },
+          { kind: "adapter", id: "policy-manifest-adapter" },
+          { kind: "rule", id: "policy-auditor" },
+        ]);
+
+        // Second check on same snapshot hits FactCache (extractCount stays 1) and still preserves adapter source
+        const second = await directSession.check({ observe: "summary" });
+        assert.equal(extractCount, 1);
+        assert.deepEqual(second.additionalInputs[0]?.sources, [
+          { kind: "config" },
+          { kind: "adapter", id: "policy-manifest-adapter" },
+          { kind: "rule", id: "policy-auditor" },
+        ]);
+      } finally {
+        await directSession.close();
+      }
+
+      // Verify shared session invalidates FactCache immediately when only the adapter-read manifest changes
+      const adapterOnlyConfig = defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: [policyAdapter],
+        rules: [consumerRule],
+      });
+      sharedSession = await startSharedSession({
+        cwd: root,
+        endpoint: socketPath,
+        config: adapterOnlyConfig,
+        signal: abortController.signal,
+      });
+
+      const r1 = await requestSharedReport({ endpoint: socketPath });
+      assert.equal(r1.status, "clean");
+      assert.deepEqual(r1.additionalInputs[0]?.sources, [
+        { kind: "adapter", id: "policy-manifest-adapter" },
+      ]);
+      assertMatchesCold(
+        r1,
+        await runCheck({ cwd: root, config: adapterOnlyConfig }),
+        "adapter-manifest-initial",
+      );
+
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ requiredFields: ["id", "tenantId"] }, null, 2),
+        "utf8",
+      );
+      const r2 = await requestSharedReport({ endpoint: socketPath });
+      assert.equal(r2.status, "findings");
+      assert.equal(r2.diagnostics.length, 1);
+      assertMatchesCold(
+        r2,
+        await runCheck({ cwd: root, config: adapterOnlyConfig }),
+        "adapter-manifest-violation",
+      );
+
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ requiredFields: ["id"] }, null, 2),
+        "utf8",
+      );
+      const r3 = await requestSharedReport({ endpoint: socketPath });
+      assert.equal(r3.status, "clean");
+      assert.equal(r3.diagnostics.length, 0);
+      assertMatchesCold(
+        r3,
+        await runCheck({ cwd: root, config: adapterOnlyConfig }),
+        "adapter-manifest-restored",
+      );
+    } finally {
+      abortController.abort();
+      await sharedSession?.close();
+      rmSync(root, { recursive: true, force: true });
       rmSync(socketDir, { recursive: true, force: true });
     }
   });

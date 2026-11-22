@@ -12,6 +12,22 @@ export {
   type AdditionalInputSource,
   type ScopedAdditionalInputRegistrar,
 } from "./additional-inputs.ts";
+export {
+  defineAdapter,
+  defineFactProvider,
+  defineFactType,
+  type AdapterContext,
+  type FactContribution,
+  type FactExtractionRequest,
+  type FactMergeOutcome,
+  type FactProvider,
+  type FactProviderContribution,
+  type FactQueryOptions,
+  type FactResult,
+  type FactType,
+  type FactTypeSpec,
+  type LibraryAdapter,
+} from "./facts.ts";
 export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {

@@ -21,6 +21,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@verule/adapter-zod": "workspace:*",
     "@verule/cli": "workspace:*",
     "@verule/engine": "workspace:*",
     "@verule/sdk": "workspace:*"
