@@ -31,6 +31,12 @@ function verifyBranchTypeContracts(
     // @ts-expect-error BranchRef cannot be passed where SyntaxRef is required
     targets: [branchRef],
   });
+  void ctx.branchCoverage({
+    // @ts-expect-error BranchRef cannot be passed as local scope
+    scope: branchRef,
+    branches: [branchRef],
+    targets: [syntaxRef],
+  });
   // @ts-expect-error BranchRef cannot be passed to listBranches
   void ctx.listBranches([branchRef]);
 }
@@ -766,6 +772,165 @@ void describe("@verule/sdk branchCoverage", () => {
         (err: unknown) =>
           err instanceof VeruleExecutionError && err.code === "STALE_REFERENCE",
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("evaluates local-scope branchCoverage inside loop and try/finally bodies without degrading on outer control flow", async () => {
+    const root = createTempProject(
+      [
+        "const enum JobFlags { QUEUED = 1 << 0, ALLOW_RECURSE = 1 << 2 }",
+        "interface Job { (): void; flags?: number }",
+        "declare function shouldSkip(job: Job): boolean;",
+        "declare function runWithHandling(job: Job): void;",
+        "declare const queue: Job[];",
+        "",
+        "export function loopWithBypass(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    if (job) {",
+        "      if (shouldSkip(job)) {",
+        "        continue;",
+        "      }",
+        "      if (job.flags! & JobFlags.ALLOW_RECURSE) {",
+        "        job.flags! &= ~JobFlags.QUEUED;",
+        "      }",
+        "      job();",
+        "      job.flags! &= ~JobFlags.QUEUED;",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "export function tryLoopWithGuard(): void {",
+        "  try {",
+        "    for (let i = 0; i < queue.length; i++) {",
+        "      const job = queue[i];",
+        "      if (job) {",
+        "        if (shouldSkip(job)) {",
+        "          continue;",
+        "        }",
+        "        if (job.flags! & JobFlags.ALLOW_RECURSE) {",
+        "          job.flags! &= ~JobFlags.QUEUED;",
+        "        }",
+        "        runWithHandling(job);",
+        "        if (!(job.flags! & JobFlags.ALLOW_RECURSE)) {",
+        "          job.flags! &= ~JobFlags.QUEUED;",
+        "        }",
+        "      }",
+        "    }",
+        "  } finally {",
+        "    queue.length = 0;",
+        "  }",
+        "}",
+        "",
+        "export function loopWithContinueGuard(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    if (job) {",
+        "      if (job.flags! & JobFlags.ALLOW_RECURSE) {",
+        "        continue;",
+        "      }",
+        "      job.flags! &= ~JobFlags.QUEUED;",
+        "    }",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const localStatuses: Record<string, string> = {};
+    const localGapCounts: Record<string, number> = {};
+    const wholeFnStatuses: Record<string, string> = {};
+
+    const rule = defineRule({
+      id: "local-scope-branch-coverage",
+      run: async (ctx) => {
+        const fns = await ctx.findSyntax({ kinds: ["FunctionDeclaration"] });
+        const blocks = await ctx.findSyntax({ kinds: ["Block"] });
+        const writes = (
+          await ctx.findSyntax({ kinds: ["BinaryExpression"] })
+        ).filter((expr) => expr.text.includes("&="));
+
+        for (const fnName of [
+          "loopWithBypass",
+          "tryLoopWithGuard",
+          "loopWithContinueGuard",
+        ] as const) {
+          const fn = fns.find((f) => f.text.includes(`function ${fnName}(`))!;
+          const fnWrites = writes.filter((w) =>
+            insideSpan(w.location, fn.location),
+          );
+          const postClear = fnWrites.at(-1)!;
+
+          // Whole-function query preserves unmodeled outer loop/try gaps
+          const [wholeFnCov] = await ctx.branchCoverage({
+            function: fn.ref,
+            branches: [],
+            targets: [postClear.ref],
+          });
+          wholeFnStatuses[fnName] = wholeFnCov!.status;
+
+          // Pick the loop body block (outermost block inside the loop/try that has no loop/try keywords of its own)
+          const candidateBlocks = blocks
+            .filter(
+              (b) =>
+                insideSpan(b.location, fn.location) &&
+                insideSpan(postClear.location, b.location) &&
+                !b.text.includes("for (") &&
+                !b.text.includes("try {") &&
+                b.text.includes("ALLOW_RECURSE"),
+            )
+            .toSorted(
+              (a, b) =>
+                b.location.end -
+                b.location.start -
+                (a.location.end - a.location.start),
+            );
+          const localBlock = candidateBlocks[0]!;
+
+          const [localBranches] = await ctx.listBranches([localBlock.ref]);
+          const guardBranches = localBranches!.branches.filter(
+            (b) =>
+              b.conditionText.includes("ALLOW_RECURSE") &&
+              ((b.conditionText.startsWith("!") && b.direction === "true") ||
+                (!b.conditionText.startsWith("!") && b.direction === "false")),
+          );
+
+          const [localCov] = await ctx.branchCoverage({
+            scope: localBlock.ref,
+            branches: guardBranches.map((b) => b.ref),
+            targets: [postClear.ref],
+          });
+          localStatuses[fnName] = localCov!.status;
+          localGapCounts[fnName] =
+            localBranches!.gaps.length + localCov!.gaps.length;
+        }
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(wholeFnStatuses, {
+        loopWithBypass: "unknown",
+        tryLoopWithGuard: "unknown",
+        loopWithContinueGuard: "unknown",
+      });
+      assert.deepEqual(localStatuses, {
+        loopWithBypass: "bypass",
+        tryLoopWithGuard: "covered",
+        loopWithContinueGuard: "covered",
+      });
+      assert.deepEqual(localGapCounts, {
+        loopWithBypass: 0,
+        tryLoopWithGuard: 0,
+        loopWithContinueGuard: 0,
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

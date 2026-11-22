@@ -51,9 +51,10 @@ export type FunctionBranchesResult = {
   readonly gaps: readonly Gap[];
 };
 
-/** Parameters for checking whether every modeled path from function entry to each target passes selected branches. */
+/** Parameters for checking whether every modeled path from function or local block scope entry to each target passes selected branches. */
 export type BranchCoverageOptions = {
   readonly function?: SyntaxRef;
+  readonly scope?: SyntaxRef;
   readonly branches: readonly BranchRef[];
   readonly targets: readonly SyntaxRef[];
 };

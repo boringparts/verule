@@ -155,6 +155,16 @@ pub fn normalize_function_node(node: P<Node>) -> Option<P<Node>> {
     None
 }
 
+pub fn normalize_cfg_scope_node(node: P<Node>) -> Option<P<Node>> {
+    if let Some(fn_node) = normalize_function_node(node) {
+        return Some(fn_node);
+    }
+    if node.kind() == Kind::Block || tsrs_ast::is_statement(node) {
+        return Some(node);
+    }
+    None
+}
+
 impl FunctionCfg {
     pub fn build(sf: P<SourceFile>, rel_file: &str, fn_node: P<Node>) -> Result<Self, GapItem> {
         let fn_location = node_location(sf, rel_file, fn_node);
@@ -177,7 +187,7 @@ impl FunctionCfg {
         };
 
         let mut entry = if body.kind() == Kind::Block {
-            builder.stmt(body, 0, None)
+            builder.stmt(body, 0, None, None)
         } else {
             builder.expr_val(body, 0)
         };
@@ -190,6 +200,48 @@ impl FunctionCfg {
 
         Ok(Self {
             fn_location,
+            entry,
+            successors: builder.successors,
+            ast_to_cfg: builder.ast_to_cfg,
+            branches: builder.branches,
+            switch_locations: builder.switch_locations,
+            gaps: builder.gaps,
+        })
+    }
+
+    pub fn build_scope(
+        sf: P<SourceFile>,
+        rel_file: &str,
+        scope_node: P<Node>,
+    ) -> Result<Self, GapItem> {
+        if let Some(fn_node) = normalize_function_node(scope_node) {
+            return Self::build(sf, rel_file, fn_node);
+        }
+        if scope_node.kind() != Kind::Block && !tsrs_ast::is_statement(scope_node) {
+            return Err(GapItem {
+                kind: "invalid-cfg-scope",
+                message: "CFG scope node must be a function, block, or statement.".to_string(),
+                at: Some(node_location(sf, rel_file, scope_node)),
+            });
+        }
+
+        let scope_location = node_location(sf, rel_file, scope_node);
+        let mut builder = CfgBuilder {
+            sf,
+            rel_file,
+            successors: vec![Vec::new()], // vertex 0 is @exit of local scope
+            ast_to_cfg: FxHashMap::default(),
+            branches: Vec::new(),
+            switch_locations: Vec::new(),
+            gaps: Vec::new(),
+        };
+
+        // Inside a local statement/block scope (such as a loop body), unlabeled break/continue
+        // exit the current local scope cleanly without requiring outer loop back-edges.
+        let entry = builder.stmt(scope_node, 0, Some(0), Some(0));
+
+        Ok(Self {
+            fn_location: scope_location,
             entry,
             successors: builder.successors,
             ast_to_cfg: builder.ast_to_cfg,
@@ -606,25 +658,32 @@ impl CfgBuilder<'_> {
         statements: &[P<Node>],
         mut next: usize,
         break_to: Option<usize>,
+        continue_to: Option<usize>,
     ) -> usize {
         for &stmt_node in statements.iter().rev() {
-            next = self.stmt(stmt_node, next, break_to);
+            next = self.stmt(stmt_node, next, break_to, continue_to);
         }
         next
     }
 
-    fn stmt(&mut self, node: P<Node>, next: usize, break_to: Option<usize>) -> usize {
+    fn stmt(
+        &mut self,
+        node: P<Node>,
+        next: usize,
+        break_to: Option<usize>,
+        continue_to: Option<usize>,
+    ) -> usize {
         let here = self.new_vertex();
         self.ast_to_cfg.insert(node, here);
 
         match node.kind() {
             Kind::Block => {
-                let first = self.sequence(node.statements(), next, break_to);
+                let first = self.sequence(node.statements(), next, break_to, continue_to);
                 self.add_edge(here, first, EdgeKind::Ordinary);
                 here
             }
-            Kind::IfStatement => self.stmt_if(node, here, next, break_to),
-            Kind::SwitchStatement => self.stmt_switch(node, here, next),
+            Kind::IfStatement => self.stmt_if(node, here, next, break_to, continue_to),
+            Kind::SwitchStatement => self.stmt_switch(node, here, next, continue_to),
             Kind::ReturnStatement => {
                 self.add_edge(here, 0, EdgeKind::Ordinary);
                 node.as_return_statement()
@@ -650,6 +709,21 @@ impl CfgBuilder<'_> {
                 }
                 here
             }
+            Kind::ContinueStatement => {
+                if node.as_continue_statement().label().is_none()
+                    && let Some(target) = continue_to
+                {
+                    self.add_edge(here, target, EdgeKind::Ordinary);
+                } else {
+                    self.record_gap(
+                        "unmodeled-jump",
+                        "Loop continue statements are not precisely modeled.",
+                        node,
+                    );
+                    self.add_edge(here, next, EdgeKind::Ordinary);
+                }
+                here
+            }
             Kind::ExpressionStatement => {
                 self.add_edge(here, next, EdgeKind::Ordinary);
                 let expr = node.as_expression_statement().expression();
@@ -669,14 +743,15 @@ impl CfgBuilder<'_> {
                 self.add_edge(here, next, EdgeKind::Ordinary);
                 here
             }
-            Kind::TryStatement => self.stmt_try(node, here, next, break_to),
+            Kind::TryStatement => self.stmt_try(node, here, next, break_to, continue_to),
             Kind::WhileStatement
             | Kind::DoStatement
             | Kind::ForStatement
             | Kind::ForInStatement
             | Kind::ForOfStatement
-            | Kind::LabeledStatement
-            | Kind::ContinueStatement => self.stmt_unmodeled(node, here, next, break_to),
+            | Kind::LabeledStatement => {
+                self.stmt_unmodeled(node, here, next, break_to, continue_to)
+            }
             _ => {
                 self.record_gap(
                     "unmodeled-control-flow",
@@ -698,13 +773,14 @@ impl CfgBuilder<'_> {
         here: usize,
         next: usize,
         break_to: Option<usize>,
+        continue_to: Option<usize>,
     ) -> usize {
         let if_stmt = node.as_if_statement();
         let cond = if_stmt.expression();
-        let then_entry = self.stmt(if_stmt.then_statement(), next, break_to);
-        let else_entry = if_stmt
-            .else_statement()
-            .map_or(next, |else_node| self.stmt(else_node, next, break_to));
+        let then_entry = self.stmt(if_stmt.then_statement(), next, break_to, continue_to);
+        let else_entry = if_stmt.else_statement().map_or(next, |else_node| {
+            self.stmt(else_node, next, break_to, continue_to)
+        });
 
         let cond_loc = self.loc(cond);
         let stmt_loc = self.loc(node);
@@ -722,7 +798,13 @@ impl CfgBuilder<'_> {
         here
     }
 
-    fn stmt_switch(&mut self, node: P<Node>, here: usize, next: usize) -> usize {
+    fn stmt_switch(
+        &mut self,
+        node: P<Node>,
+        here: usize,
+        next: usize,
+        continue_to: Option<usize>,
+    ) -> usize {
         let sw = node.as_switch_statement();
         let disc = sw.expression();
         let clauses = sw.case_block().as_case_block().clauses().nodes();
@@ -733,7 +815,8 @@ impl CfgBuilder<'_> {
         let mut clause_entries = Vec::with_capacity(clauses.len());
         for &clause in clauses.iter().rev() {
             has_default |= clause.kind() == Kind::DefaultClause;
-            let body_entry = self.sequence(clause.statements(), fallthrough, Some(next));
+            let body_entry =
+                self.sequence(clause.statements(), fallthrough, Some(next), continue_to);
             self.ast_to_cfg.insert(clause, body_entry);
             clause_entries.push((clause, body_entry));
             fallthrough = body_entry;
@@ -803,6 +886,7 @@ impl CfgBuilder<'_> {
         here: usize,
         next: usize,
         break_to: Option<usize>,
+        continue_to: Option<usize>,
     ) -> usize {
         self.record_gap(
             "unmodeled-try-catch",
@@ -812,14 +896,18 @@ impl CfgBuilder<'_> {
         let try_stmt = node.as_try_statement();
         let mut cont = next;
         if let Some(finally_block) = try_stmt.finally_block() {
-            cont = self.stmt(finally_block, cont, break_to);
+            cont = self.stmt(finally_block, cont, break_to, continue_to);
         }
         let after_try = cont;
-        let try_entry = self.stmt(try_stmt.try_block(), after_try, break_to);
+        let try_entry = self.stmt(try_stmt.try_block(), after_try, break_to, continue_to);
         self.add_edge(here, try_entry, EdgeKind::Ordinary);
         if let Some(catch_clause) = try_stmt.catch_clause() {
-            let catch_entry =
-                self.stmt(catch_clause.as_catch_clause().block(), after_try, break_to);
+            let catch_entry = self.stmt(
+                catch_clause.as_catch_clause().block(),
+                after_try,
+                break_to,
+                continue_to,
+            );
             self.add_edge(here, catch_entry, EdgeKind::Ordinary);
         }
         here
@@ -831,6 +919,7 @@ impl CfgBuilder<'_> {
         here: usize,
         next: usize,
         break_to: Option<usize>,
+        continue_to: Option<usize>,
     ) -> usize {
         match node.kind() {
             Kind::LabeledStatement => {
@@ -840,16 +929,8 @@ impl CfgBuilder<'_> {
                     node,
                 );
                 let inner = node.as_labeled_statement().statement();
-                let inner_entry = self.stmt(inner, next, break_to);
+                let inner_entry = self.stmt(inner, next, break_to, continue_to);
                 self.add_edge(here, inner_entry, EdgeKind::Ordinary);
-            }
-            Kind::ContinueStatement => {
-                self.record_gap(
-                    "unmodeled-jump",
-                    "Loop continue statements are not precisely modeled.",
-                    node,
-                );
-                self.add_edge(here, next, EdgeKind::Ordinary);
             }
             _ => {
                 self.record_gap(
@@ -857,7 +938,7 @@ impl CfgBuilder<'_> {
                     "Control flow through loops is not precisely modeled.",
                     node,
                 );
-                self.scan_unmodeled_children(node, here, next, break_to);
+                self.scan_unmodeled_children(node, here, next, None, None);
             }
         }
         here
@@ -869,6 +950,7 @@ impl CfgBuilder<'_> {
         here: usize,
         next: usize,
         break_to: Option<usize>,
+        continue_to: Option<usize>,
     ) {
         let mut children = Vec::new();
         node.for_each_child(&mut |child| {
@@ -884,7 +966,7 @@ impl CfgBuilder<'_> {
                 continue;
             }
             cont = if tsrs_ast::is_statement(child) {
-                self.stmt(child, cont, break_to)
+                self.stmt(child, cont, break_to, continue_to)
             } else {
                 self.expr_val(child, cont)
             };
