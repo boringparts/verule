@@ -355,7 +355,9 @@ function computeReportIdentity(
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
   const modelSummaries = models.map(summarizeModel);
-  const adapterSummaries = adapters.map(summarizeAdapter);
+  const adapterSummaries = adapters
+    .map(summarizeAdapter)
+    .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const configDigest = sha256Prefix(
     stableSerialize({
       entries,
@@ -608,8 +610,16 @@ function collectInvalidatedBy(
     reasons.push("additionalInputs");
   }
   if (
-    stableSerialize(prevConfig.adapters.map(summarizeAdapter)) !==
-    stableSerialize(nextConfig.adapters.map(summarizeAdapter))
+    stableSerialize(
+      prevConfig.adapters
+        .map(summarizeAdapter)
+        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    ) !==
+    stableSerialize(
+      nextConfig.adapters
+        .map(summarizeAdapter)
+        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    )
   ) {
     reasons.push("adapters");
   }

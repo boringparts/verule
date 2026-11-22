@@ -201,6 +201,32 @@ pub enum HandlePayload {
     Branch(BranchHandle),
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum HandleInternKey {
+    Syntax(String, P<Node>),
+    Declaration {
+        project_id: String,
+        node: P<Node>,
+        symbol: Option<P<Symbol>>,
+    },
+    Call(String, P<Node>),
+    Signature {
+        project_id: String,
+        sig: P<Signature>,
+        call_node: Option<P<Node>>,
+    },
+    Type {
+        project_id: String,
+        ty: P<Type>,
+        enclosing: Option<P<Node>>,
+    },
+    Branch {
+        project_id: String,
+        function_node: P<Node>,
+        edge_index: usize,
+    },
+}
+
 pub struct HandleEntry {
     pub project_id: String,
     pub payload: HandlePayload,
@@ -215,13 +241,23 @@ pub struct SnapshotState {
     pub snapshot_data: Arc<SnapshotData>,
     pub project_ids: BTreeMap<String, ProjectId>,
     pub handles: FxHashMap<String, HandleEntry>,
+    pub handle_intern: FxHashMap<HandleInternKey, String>,
     pub cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
     pub call_graph_cache: FxHashMap<String, Arc<ProjectCallGraph>>,
     pub next_handle_id: u64,
 }
 
 impl SnapshotState {
-    fn alloc_handle(&mut self, prefix: &str, project_id: &str, payload: HandlePayload) -> String {
+    fn alloc_interned_handle(
+        &mut self,
+        prefix: &str,
+        project_id: &str,
+        key: HandleInternKey,
+        payload: HandlePayload,
+    ) -> String {
+        if let Some(existing) = self.handle_intern.get(&key) {
+            return existing.clone();
+        }
         self.next_handle_id += 1;
         let id = format!("{prefix}:{}:{}", self.snapshot_id, self.next_handle_id);
         self.handles.insert(
@@ -231,11 +267,17 @@ impl SnapshotState {
                 payload,
             },
         );
+        self.handle_intern.insert(key, id.clone());
         id
     }
 
     pub fn alloc_syntax(&mut self, project_id: &str, node: P<Node>) -> String {
-        self.alloc_handle("syn", project_id, HandlePayload::Syntax(node))
+        self.alloc_interned_handle(
+            "syn",
+            project_id,
+            HandleInternKey::Syntax(project_id.to_string(), node),
+            HandlePayload::Syntax(node),
+        )
     }
 
     pub fn alloc_declaration(
@@ -244,15 +286,25 @@ impl SnapshotState {
         node: P<Node>,
         symbol: Option<P<Symbol>>,
     ) -> String {
-        self.alloc_handle(
+        self.alloc_interned_handle(
             "dec",
             project_id,
+            HandleInternKey::Declaration {
+                project_id: project_id.to_string(),
+                node,
+                symbol,
+            },
             HandlePayload::Declaration { node, symbol },
         )
     }
 
     pub fn alloc_call(&mut self, project_id: &str, node: P<Node>) -> String {
-        self.alloc_handle("cal", project_id, HandlePayload::Call(node))
+        self.alloc_interned_handle(
+            "cal",
+            project_id,
+            HandleInternKey::Call(project_id.to_string(), node),
+            HandlePayload::Call(node),
+        )
     }
 
     pub fn alloc_signature(
@@ -261,9 +313,14 @@ impl SnapshotState {
         sig: P<Signature>,
         call_node: Option<P<Node>>,
     ) -> String {
-        self.alloc_handle(
+        self.alloc_interned_handle(
             "sig",
             project_id,
+            HandleInternKey::Signature {
+                project_id: project_id.to_string(),
+                sig,
+                call_node,
+            },
             HandlePayload::Signature { sig, call_node },
         )
     }
@@ -274,11 +331,29 @@ impl SnapshotState {
         ty: P<Type>,
         enclosing: Option<P<Node>>,
     ) -> String {
-        self.alloc_handle("typ", project_id, HandlePayload::Type { ty, enclosing })
+        self.alloc_interned_handle(
+            "typ",
+            project_id,
+            HandleInternKey::Type {
+                project_id: project_id.to_string(),
+                ty,
+                enclosing,
+            },
+            HandlePayload::Type { ty, enclosing },
+        )
     }
 
     pub fn alloc_branch(&mut self, project_id: &str, branch: BranchHandle) -> String {
-        self.alloc_handle("brn", project_id, HandlePayload::Branch(branch))
+        self.alloc_interned_handle(
+            "brn",
+            project_id,
+            HandleInternKey::Branch {
+                project_id: project_id.to_string(),
+                function_node: branch.function_node,
+                edge_index: branch.edge_index,
+            },
+            HandlePayload::Branch(branch),
+        )
     }
 
     pub fn get_entry(&self, project_id: &str, handle_id: &str) -> Result<&HandleEntry, RpcErr> {
@@ -528,6 +603,7 @@ impl EngineServer {
                 snapshot_data: opened.snapshot_data,
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
+                handle_intern: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
                 next_handle_id: 0,
@@ -612,6 +688,7 @@ impl EngineServer {
                 snapshot_data: opened.snapshot_data,
                 project_ids: opened.project_ids,
                 handles: FxHashMap::default(),
+                handle_intern: FxHashMap::default(),
                 cfg_cache: FxHashMap::default(),
                 call_graph_cache: FxHashMap::default(),
                 next_handle_id: 0,

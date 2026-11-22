@@ -13,7 +13,8 @@ export type ValidatorMethodName =
   | "parse"
   | "safeParse"
   | "parseAsync"
-  | "safeParseAsync";
+  | "safeParseAsync"
+  | (string & {});
 
 export type ValidatorFieldsCondition = {
   readonly scope?: "all" | "calls" | "schemas";
@@ -172,6 +173,15 @@ export function buildOutputFieldsValue(params: {
   };
 }
 
+function pickConflictEvidence(
+  fieldEvidence: readonly Evidence[] | undefined,
+  contributionEvidence: readonly Evidence[],
+): readonly Evidence[] {
+  return fieldEvidence && fieldEvidence.length > 0
+    ? fieldEvidence
+    : contributionEvidence;
+}
+
 function mergeInputFields(
   existing: FactProviderContribution<ValidatorInputFieldsFactValue>,
   incoming: FactProviderContribution<ValidatorInputFieldsFactValue>,
@@ -181,6 +191,24 @@ function mergeInputFields(
       ok: false,
       conflict: {
         message: `Conflicting validator siteKind "${existing.value.siteKind}" vs "${incoming.value.siteKind}"`,
+        existingConclusion: `siteKind=${existing.value.siteKind}`,
+        incomingConclusion: `siteKind=${incoming.value.siteKind}`,
+        existingEvidence: existing.evidence,
+        incomingEvidence: incoming.evidence,
+      },
+    };
+  }
+  if (
+    existing.value.validatorMethod !== undefined &&
+    incoming.value.validatorMethod !== undefined &&
+    existing.value.validatorMethod !== incoming.value.validatorMethod
+  ) {
+    return {
+      ok: false,
+      conflict: {
+        message: `Conflicting validator method "${existing.value.validatorMethod}" vs "${incoming.value.validatorMethod}"`,
+        existingConclusion: `validatorMethod=${existing.value.validatorMethod}`,
+        incomingConclusion: `validatorMethod=${incoming.value.validatorMethod}`,
         existingEvidence: existing.evidence,
         incomingEvidence: incoming.evidence,
       },
@@ -204,8 +232,16 @@ function mergeInputFields(
         ok: false,
         conflict: {
           message: `Conflicting input field requirement for "${name}": ${existingField.requirement} (nullable=${String(existingField.nullable)}) vs ${incomingField.requirement} (nullable=${String(incomingField.nullable)})`,
-          existingEvidence: existingField.evidence ?? existing.evidence,
-          incomingEvidence: incomingField.evidence ?? incoming.evidence,
+          existingConclusion: `field "${name}": ${existingField.requirement} (nullable=${String(existingField.nullable)})`,
+          incomingConclusion: `field "${name}": ${incomingField.requirement} (nullable=${String(incomingField.nullable)})`,
+          existingEvidence: pickConflictEvidence(
+            existingField.evidence,
+            existing.evidence,
+          ),
+          incomingEvidence: pickConflictEvidence(
+            incomingField.evidence,
+            incoming.evidence,
+          ),
         },
       };
     }
@@ -246,6 +282,24 @@ function mergeOutputFields(
       ok: false,
       conflict: {
         message: `Conflicting validator siteKind "${existing.value.siteKind}" vs "${incoming.value.siteKind}"`,
+        existingConclusion: `siteKind=${existing.value.siteKind}`,
+        incomingConclusion: `siteKind=${incoming.value.siteKind}`,
+        existingEvidence: existing.evidence,
+        incomingEvidence: incoming.evidence,
+      },
+    };
+  }
+  if (
+    existing.value.validatorMethod !== undefined &&
+    incoming.value.validatorMethod !== undefined &&
+    existing.value.validatorMethod !== incoming.value.validatorMethod
+  ) {
+    return {
+      ok: false,
+      conflict: {
+        message: `Conflicting validator method "${existing.value.validatorMethod}" vs "${incoming.value.validatorMethod}"`,
+        existingConclusion: `validatorMethod=${existing.value.validatorMethod}`,
+        incomingConclusion: `validatorMethod=${incoming.value.validatorMethod}`,
         existingEvidence: existing.evidence,
         incomingEvidence: incoming.evidence,
       },
@@ -270,8 +324,16 @@ function mergeOutputFields(
         ok: false,
         conflict: {
           message: `Conflicting output field presence for "${name}": ${existingField.presence} (nullable=${String(existingField.nullable)}, fromDefault=${String(existingField.fromDefault)}) vs ${incomingField.presence} (nullable=${String(incomingField.nullable)}, fromDefault=${String(incomingField.fromDefault)})`,
-          existingEvidence: existingField.evidence ?? existing.evidence,
-          incomingEvidence: incomingField.evidence ?? incoming.evidence,
+          existingConclusion: `field "${name}": ${existingField.presence} (nullable=${String(existingField.nullable)}, fromDefault=${String(existingField.fromDefault)})`,
+          incomingConclusion: `field "${name}": ${incomingField.presence} (nullable=${String(incomingField.nullable)}, fromDefault=${String(incomingField.fromDefault)})`,
+          existingEvidence: pickConflictEvidence(
+            existingField.evidence,
+            existing.evidence,
+          ),
+          incomingEvidence: pickConflictEvidence(
+            incomingField.evidence,
+            incoming.evidence,
+          ),
         },
       };
     }

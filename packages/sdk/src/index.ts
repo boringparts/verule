@@ -109,6 +109,8 @@ export {
   type ExplainReport,
   type ExplainResult,
   type ExplainStatus,
+  type FactConflictDetails,
+  type FactConflictParty,
   type FindSyntaxOptions,
   type Gap,
   type InlineIgnoreEntry,
