@@ -36,6 +36,33 @@ export {
   type RunBareVeruleOptions,
 } from "./isolation.ts";
 export {
+  applyGetGateManualColumnEdit,
+  findLineContaining,
+  OPENSTATUS_DIRECT_PACKAGES,
+  OPENSTATUS_EXTENSION_PACKAGES,
+  OPENSTATUS_GET_GATE_FILE,
+  OPENSTATUS_GET_GATE_PROJECTS,
+  OPENSTATUS_GET_GATE_SHA,
+  OPENSTATUS_GET_GATE_STEPS,
+  OPENSTATUS_WHOAMI_PROJECTS,
+  OPENSTATUS_WHOAMI_STEPS,
+  parseCliCheckJson,
+  renderOpenStatusVeruleConfig,
+  runOpenStatusProjectionAcceptance,
+  type CliCheckPayload,
+  type CliDiagnostic,
+  type CliEvidence,
+  type CliExplainCheckpoint,
+  type CliExplainResult,
+  type CliLocation,
+  type OpenStatusAcceptanceResult,
+  type OpenStatusArtifactDigest,
+  type OpenStatusGetGateStep,
+  type OpenStatusProjectCoverage,
+  type OpenStatusReplayRecord,
+  type OpenStatusWhoamiStep,
+} from "./openstatus-projection.ts";
+export {
   startArtifactRegistry,
   type ScopedRegistryServer,
 } from "./registry.ts";

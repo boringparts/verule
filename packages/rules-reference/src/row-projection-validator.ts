@@ -624,8 +624,12 @@ export function createRowProjectionSatisfiesValidatorRule(
             call.location,
             "exclude",
             () => ({
-              schemaName: call.fact.value.schemaName,
-              validatorMethod: call.fact.value.validatorMethod,
+              ...(call.fact.value.schemaName !== undefined
+                ? { schemaName: call.fact.value.schemaName }
+                : {}),
+              ...(call.fact.value.validatorMethod !== undefined
+                ? { validatorMethod: call.fact.value.validatorMethod }
+                : {}),
             }),
           );
           continue;
@@ -649,10 +653,16 @@ export function createRowProjectionSatisfiesValidatorRule(
               () => ({
                 schemaName: schemaLabel,
                 validatorMethod: methodLabel,
-                tableName: source.queryFact.value.tableName,
-                ...(source.relationName
+                ...(source.queryFact.value.tableName !== undefined
+                  ? { tableName: source.queryFact.value.tableName }
+                  : {}),
+                ...(source.relationName !== undefined
                   ? { relationName: source.relationName }
                   : {}),
+                requiredFields: [...requiredFields],
+                availableColumns: [...source.availableKeys].toSorted(
+                  compareCodepoint,
+                ),
               }),
             );
             continue;
