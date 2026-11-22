@@ -21,6 +21,11 @@ import {
   type FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import {
+  createCallEffectsCache,
+  createCallEffectsQueries,
+  validateCleanupAndLifecycleModels,
+} from "./call-effects.ts";
+import {
   createCallsValuesCache,
   createCallsValuesQueries,
 } from "./calls-values.ts";
@@ -191,6 +196,11 @@ function validateModels(models: readonly Model[]): readonly Model[] {
       );
     }
     validateInstanceBehaviors(model.id, model.instanceBehaviors);
+    validateCleanupAndLifecycleModels(
+      model.id,
+      model.cleanupOperations,
+      model.lifecycleEvents,
+    );
     if (seen.has(model.id)) {
       throw new VeruleExecutionError(
         "INVALID_CONFIG",
@@ -217,6 +227,11 @@ export function defineModel(model: Model): Model {
     );
   }
   validateInstanceBehaviors(model.id, model.instanceBehaviors);
+  validateCleanupAndLifecycleModels(
+    model.id,
+    model.cleanupOperations,
+    model.lifecycleEvents,
+  );
   return model;
 }
 
@@ -339,6 +354,12 @@ function summarizeModel(model: Model): ModelIdentitySummary {
         facts: model.facts ?? null,
         ...(model.instanceBehaviors !== undefined
           ? { instanceBehaviors: model.instanceBehaviors }
+          : {}),
+        ...(model.cleanupOperations !== undefined
+          ? { cleanupOperations: model.cleanupOperations }
+          : {}),
+        ...(model.lifecycleEvents !== undefined
+          ? { lifecycleEvents: model.lifecycleEvents }
           : {}),
       }),
     ),
@@ -746,6 +767,7 @@ export async function openSession(
   const typeCache = new Map<string, Promise<TypeAtResult>>();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const callsValuesCache = createCallsValuesCache();
+  const callEffectsCache = createCallEffectsCache();
   const instanceCache = createInstanceIdentityCache();
   const factCache = new FactCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
@@ -940,6 +962,77 @@ export async function openSession(
                 durationMs,
                 summary: `${op} -> ${candidateCount} item(s)`,
               });
+            },
+          }
+        : {}),
+    });
+
+    const callEffectsQueries = createCallEffectsQueries({
+      client,
+      cache: callEffectsCache,
+      models,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      resolveSyntaxLocation: (ref) => syntaxLocations.get(ref as SyntaxRef),
+      ...(collector.isExplainEnabled()
+        ? {
+            onCleanupCovered: ({ targetLocations, paths }) => {
+              collector.recordCleanupPaths({
+                ruleId,
+                targetLocations,
+                paths,
+              });
+            },
+          }
+        : {}),
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
+              collector.recordQuery({
+                ruleId,
+                op,
+                projectId: project.projectId,
+                provider: "engine",
+                cacheStatus,
+                candidateCount,
+                durationMs,
+                summary: `${op} -> ${candidateCount} item(s)`,
+              });
+            },
+          }
+        : {}),
+    });
+
+    const adapterCallEffectsQueries = createCallEffectsQueries({
+      client,
+      cache: callEffectsCache,
+      models,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (
+              _op,
+              cacheStatus,
+              _candidateCount,
+              durationMs,
+            ) => {
+              if (cacheStatus === "computed") {
+                collector.addEngineQueryMs(durationMs);
+                recordRuleEngineMs(durationMs);
+              }
             },
           }
         : {}),
@@ -1423,6 +1516,7 @@ export async function openSession(
         getModel: (id: string) => models.find((model) => model.id === id),
         ...adapterProjectionQueries,
         ...adapterCallsValuesQueries,
+        ...adapterCallEffectsQueries,
         findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
         typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
         listBranches: (functions: readonly SyntaxRef[]) =>
@@ -1459,6 +1553,7 @@ export async function openSession(
       getModel: (id: string) => models.find((model) => model.id === id),
       ...projectionQueries,
       ...callsValuesQueries,
+      ...callEffectsQueries,
       ...instanceQueries,
       findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, true),
       typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, true),
@@ -1779,6 +1874,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       callsValuesCache.clear();
+      callEffectsCache.clear();
       instanceCache.clear();
       factCache.clear();
       cachedDirectives = undefined;
@@ -1843,6 +1939,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       callsValuesCache.clear();
+      callEffectsCache.clear();
       instanceCache.clear();
       factCache.clear();
       cachedDirectives = undefined;

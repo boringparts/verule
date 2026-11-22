@@ -126,6 +126,8 @@ export type AdapterContext = {
   callersOf: RuleContext["callersOf"];
   calleesOf: RuleContext["calleesOf"];
   valuePropagation: RuleContext["valuePropagation"];
+  callEffects: RuleContext["callEffects"];
+  instanceCleanup: RuleContext["instanceCleanup"];
   /** Registers a local non-source file read by this adapter as an additional input. */
   registerAdditionalInput: RuleContext["registerAdditionalInput"];
   /** Registers a local non-source file as an additional input and reads its UTF-8 content. */

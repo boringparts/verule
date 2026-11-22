@@ -93,6 +93,12 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
   if (exp.providers.length > 0) {
     lines.push(`  providers: ${exp.providers.join(", ")}`);
   }
+  for (const cp of exp.cleanupPaths) {
+    const sites = cp.cleanupLocations
+      .map((loc) => `${loc.file}:${loc.line}:${loc.column}`)
+      .join(", ");
+    lines.push(`  cleanupPath [${cp.instanceKey}]: ${cp.summary} (${sites})`);
+  }
   for (const query of exp.queries) {
     lines.push(
       `  query #${query.queryIndex}: ${query.op} [provider=${query.provider}, cache=${query.cacheStatus}] candidates=${query.candidateCount} matchedTarget=${String(query.matchedTarget)}`,

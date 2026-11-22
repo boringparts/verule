@@ -181,6 +181,16 @@ export const explainCheckpointTraceSchema = z.object({
   detail: z.unknown().optional(),
 });
 
+export const explainCleanupPathSchema = z.object({
+  instanceKey: z.string(),
+  allocationLocation: locationSchema.optional(),
+  scopeLocation: locationSchema,
+  cleanupLocations: z.array(locationSchema),
+  modelIds: z.array(z.string()),
+  summary: z.string(),
+  evidence: z.array(evidenceSchema),
+});
+
 export const explainResultSchema = z.object({
   ruleId: z.string(),
   target: z.object({
@@ -209,7 +219,7 @@ export const explainResultSchema = z.object({
   checkpoints: z.array(explainCheckpointTraceSchema),
   gaps: z.array(gapSchema),
   providers: z.array(z.string()),
-  cleanupPaths: z.array(z.unknown()),
+  cleanupPaths: z.array(explainCleanupPathSchema),
   inlineIgnore: z
     .object({
       matched: z.boolean(),
@@ -426,7 +436,25 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
       ...(g.at !== undefined ? { at: { ...g.at } } : {}),
     })),
     providers: [...exp.providers],
-    cleanupPaths: [...exp.cleanupPaths],
+    cleanupPaths: exp.cleanupPaths.map((cp) => ({
+      instanceKey: cp.instanceKey,
+      ...(cp.allocationLocation !== undefined
+        ? { allocationLocation: { ...cp.allocationLocation } }
+        : {}),
+      scopeLocation: { ...cp.scopeLocation },
+      cleanupLocations: cp.cleanupLocations.map((loc) => ({ ...loc })),
+      modelIds: [...cp.modelIds],
+      summary: cp.summary,
+      evidence: cp.evidence.map((ev) => ({
+        kind: ev.kind,
+        message: ev.message,
+        ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
+        ...(ev.modelId !== undefined ? { modelId: ev.modelId } : {}),
+        ...(ev.declaration !== undefined
+          ? { declaration: ev.declaration }
+          : {}),
+      })),
+    })),
     ...(exp.inlineIgnore !== undefined
       ? {
           inlineIgnore: {
