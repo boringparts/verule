@@ -5,6 +5,7 @@ import {
   type Diagnostic,
   type DiagnosticLocation,
   type Evidence,
+  type Gap,
   type ProjectSummary,
   type SourceFileOrigin,
   type SourceFileProjectOrigin,
@@ -219,5 +220,37 @@ export function buildDiagnostics(
       evidence: entry.evidence,
       projects: entry.projects.toSorted(compareCodepoint),
     };
+  });
+}
+
+/** Deduplicates and deterministically orders analysis gaps across projects and rules. */
+export function buildGaps(collected: readonly Gap[]): readonly Gap[] {
+  const unique = new Map<string, Gap>();
+  for (const rawGap of collected) {
+    const normAt =
+      rawGap.at !== undefined ? normalizeLocation(rawGap.at) : undefined;
+    const gap: Gap =
+      normAt !== rawGap.at && normAt !== undefined
+        ? { ...rawGap, at: normAt }
+        : rawGap;
+    const key = JSON.stringify([
+      gap.kind,
+      gap.message,
+      gap.at !== undefined ? canonicalLocationKey(gap.at) : null,
+    ]);
+    if (!unique.has(key)) {
+      unique.set(key, gap);
+    }
+  }
+  return [...unique.values()].toSorted((a, b) => {
+    if (a.at && b.at) {
+      const locCmp = compareLocations(a.at, b.at);
+      if (locCmp !== 0) return locCmp;
+    } else if (a.at || b.at) {
+      return a.at ? -1 : 1;
+    }
+    const kindCmp = compareCodepoint(a.kind, b.kind);
+    if (kindCmp !== 0) return kindCmp;
+    return compareCodepoint(a.message, b.message);
   });
 }

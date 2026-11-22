@@ -307,6 +307,185 @@ fn rejects_stale_snapshots_and_invalid_project_configs() {
     );
 }
 
+fn write_cfg_project(root: &Path) -> String {
+    let src_dir = root.join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    let tsconfig_path = root.join("tsconfig.json");
+    fs::write(
+        &tsconfig_path,
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*.ts"]
+}
+"#,
+    )
+    .expect("write tsconfig");
+
+    let source = [
+        "declare function hasKey(req: string): boolean;",
+        "declare function hasToken(req: string): boolean;",
+        "declare function verify(): void;",
+        "declare function sink(req: string): void;",
+        "export function joint(req: string): void {",
+        "  if (hasKey(req)) { verify(); } else if (hasToken(req)) { verify(); } else { return; }",
+        "  sink(req);",
+        "}",
+        "export function dead(req: string): void {",
+        "  if (hasKey(req)) { verify(); }",
+        "  return;",
+        "  sink(req);",
+        "}",
+        "export function unmodeled(req: string): void {",
+        "  try { if (hasKey(req)) { sink(req); } } catch (_e) {}",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(src_dir.join("cfg.ts"), source).expect("write cfg.ts");
+    normalized(&tsconfig_path)
+}
+
+fn collect_cfg_handles(
+    stdin: &mut ChildStdin,
+    reader: &mut BufReader<ChildStdout>,
+    snapshot_id: u64,
+    project_id: &str,
+) -> (Vec<String>, Vec<String>) {
+    let syntax_resp = rpc_call(
+        stdin,
+        reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [
+                    { "op": "findSyntax", "kinds": ["FunctionDeclaration"] },
+                    { "op": "findSyntax", "kinds": ["CallExpression"] }
+                ]
+            }
+        }),
+    );
+    assert_eq!(syntax_resp["ok"], json!(true));
+    let body_fns: Vec<String> = syntax_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("fns")
+        .iter()
+        .filter(|item| !item["text"].as_str().unwrap_or("").starts_with("declare "))
+        .map(|item| item["ref"].as_str().expect("fn ref").to_string())
+        .collect();
+    assert_eq!(body_fns.len(), 3);
+
+    let sink_calls: Vec<String> = syntax_resp["result"]["results"][1]["items"]
+        .as_array()
+        .expect("calls")
+        .iter()
+        .filter(|item| item["text"].as_str().unwrap_or("").starts_with("sink("))
+        .map(|item| item["ref"].as_str().expect("call ref").to_string())
+        .collect();
+    assert_eq!(sink_calls.len(), 3);
+    (body_fns, sink_calls)
+}
+
+#[test]
+fn serves_list_branches_and_branch_coverage_statuses() {
+    let temp = TempDirGuard::new("verule-engine-serve-cfg");
+    let tsconfig_str = write_cfg_project(temp.path());
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+    let (snapshot_id, project_id, _) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+    let (body_fns, sink_calls) =
+        collect_cfg_handles(&mut stdin, &mut reader, snapshot_id, &project_id);
+
+    let branches_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{ "op": "listBranches", "targets": body_fns }]
+            }
+        }),
+    );
+    assert_eq!(
+        branches_resp["ok"],
+        json!(true),
+        "listBranches failed: {branches_resp}"
+    );
+    let branch_groups = branches_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("branch groups");
+
+    let joint_true_branches: Vec<&str> = branch_groups[0]["branches"]
+        .as_array()
+        .expect("joint branches")
+        .iter()
+        .filter(|b| b["direction"] == json!("true"))
+        .map(|b| b["ref"].as_str().expect("branch ref"))
+        .collect();
+    assert_eq!(joint_true_branches.len(), 2);
+
+    let collect_all_refs = |idx: usize| -> Vec<&str> {
+        branch_groups[idx]["branches"]
+            .as_array()
+            .expect("branches")
+            .iter()
+            .map(|b| b["ref"].as_str().expect("branch ref"))
+            .collect()
+    };
+
+    let cov_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 4,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [
+                    { "op": "branchCoverage", "function": body_fns[0], "branches": [joint_true_branches[0]], "targets": [sink_calls[0]] },
+                    { "op": "branchCoverage", "function": body_fns[0], "branches": joint_true_branches, "targets": [sink_calls[0]] },
+                    { "op": "branchCoverage", "function": body_fns[1], "branches": collect_all_refs(1), "targets": [sink_calls[1]] },
+                    { "op": "branchCoverage", "function": body_fns[2], "branches": collect_all_refs(2), "targets": [sink_calls[2]] }
+                ]
+            }
+        }),
+    );
+    assert_eq!(
+        cov_resp["ok"],
+        json!(true),
+        "branchCoverage failed: {cov_resp}"
+    );
+    let results = cov_resp["result"]["results"].as_array().expect("results");
+    assert_eq!(results[0]["items"][0]["status"], json!("bypass"));
+    assert_eq!(results[1]["items"][0]["status"], json!("covered"));
+    assert_eq!(results[2]["items"][0]["status"], json!("unreachable"));
+    assert_eq!(results[3]["items"][0]["status"], json!("unknown"));
+    assert_eq!(
+        results[3]["items"][0]["gaps"][0]["kind"],
+        json!("unmodeled-try-catch")
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn emits_observation_metrics_in_summary_and_omits_when_off() {
     let temp = TempDirGuard::new("verule-engine-serve-observe-summary");

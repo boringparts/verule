@@ -1,3 +1,9 @@
+import type {
+  BranchCoverageItem,
+  BranchCoverageOptions,
+  FunctionBranchesResult,
+} from "./branch-coverage.ts";
+
 export const REPORT_SCHEMA_VERSION = "1" as const;
 
 export type VeruleErrorCode =
@@ -58,12 +64,21 @@ export type SyntaxKind =
   | "StringLiteral"
   | "NumericLiteral"
   | "Parameter"
-  | "NewExpression";
+  | "NewExpression"
+  | "SwitchStatement"
+  | "CaseClause"
+  | "DefaultClause"
+  | "ConditionalExpression"
+  | "ThrowStatement"
+  | "TryStatement"
+  | "Block"
+  | "ExpressionStatement"
+  | "VariableStatement";
 
 declare const objectKindBrand: unique symbol;
 declare const sessionBrand: unique symbol;
 
-export type ProgramObjectKind = "syntax" | "type";
+export type ProgramObjectKind = "syntax" | "type" | "branch";
 
 export interface ProgramRef<K extends ProgramObjectKind = ProgramObjectKind> {
   readonly [objectKindBrand]: K;
@@ -75,6 +90,7 @@ export interface ProgramRef<K extends ProgramObjectKind = ProgramObjectKind> {
 
 export type SyntaxRef = ProgramRef<"syntax">;
 export type TypeRef = ProgramRef<"type">;
+export type BranchRef = ProgramRef<"branch">;
 
 const refSessionTokens = new WeakMap<object, symbol>();
 
@@ -333,6 +349,12 @@ export type RuleContext = {
     options: FindSyntaxOptions,
   ) => Promise<readonly SyntaxNodeResult[]>;
   typeAt: (targets: readonly SyntaxRef[]) => Promise<readonly TypeAtResult[]>;
+  listBranches: (
+    functions: readonly SyntaxRef[],
+  ) => Promise<readonly FunctionBranchesResult[]>;
+  branchCoverage: (
+    options: BranchCoverageOptions,
+  ) => Promise<readonly BranchCoverageItem[]>;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.

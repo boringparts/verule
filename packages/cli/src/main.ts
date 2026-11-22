@@ -423,6 +423,15 @@ function toWireReport(report: CheckReport): WireCheckReport {
   };
 }
 
+function appendGapLines(lines: string[], gaps: WireCheckReport["gaps"]): void {
+  for (const gap of gaps) {
+    const locSuffix = gap.at
+      ? ` (${gap.at.file}:${gap.at.line}:${gap.at.column})`
+      : "";
+    lines.push(`gap [${gap.kind}]: ${gap.message}${locSuffix}`);
+  }
+}
+
 function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
   const linePart = exp.target.line !== undefined ? `:${exp.target.line}` : "";
   const colPart =
@@ -520,11 +529,15 @@ function formatScopeLines(report: WireCheckReport): string[] {
 }
 
 function formatCheckCleanText(report: WireCheckReport) {
-  const scopeLines = formatScopeLines(report);
-  const summary = `No violations found across ${report.projects.length} project(s).`;
+  const lines: string[] = formatScopeLines(report);
+  appendGapLines(lines, report.gaps);
+  const summary =
+    report.gaps.length > 0
+      ? `No violations found across ${report.projects.length} project(s) (${report.gaps.length} gap(s)).`
+      : `No violations found across ${report.projects.length} project(s).`;
   const extras: string[] = [];
   appendExtrasText(extras, report);
-  const [first, ...rest] = [...scopeLines, summary, ...extras];
+  const [first, ...rest] = [...lines, summary, ...extras];
   return first !== undefined
     ? text.lines([first, ...rest])
     : text.line(summary);
@@ -543,7 +556,11 @@ function formatCheckFindingsText(report: WireCheckReport) {
       lines.push(`  evidence (${item.kind}): ${item.message}${locSuffix}`);
     }
   }
-  const summary = `Found ${report.diagnostics.length} violation(s).`;
+  appendGapLines(lines, report.gaps);
+  const summary =
+    report.gaps.length > 0
+      ? `Found ${report.diagnostics.length} violation(s) (${report.gaps.length} gap(s)).`
+      : `Found ${report.diagnostics.length} violation(s).`;
   const extras: string[] = [];
   appendExtrasText(extras, report);
   const [first, ...rest] = lines;

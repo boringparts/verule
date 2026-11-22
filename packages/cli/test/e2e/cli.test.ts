@@ -260,7 +260,275 @@ void test("runs the independently deployed CLI with its production SDK and engin
   });
   assert.deepEqual(findingsEnvelope.data, sdkReport);
 
-  // 2b. Deployed CLI explain + observation overhead comparison & truncation
+  // 2b. Single branchCoverage project rule covering bypass, joint coverage, unreachable, and unmodeled gaps
+  using branchHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-branch-host-"),
+  );
+  mkdirSync(join(branchHost.path, "src"), { recursive: true });
+  mkdirSync(join(branchHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(branchHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(branchHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const routesSource = [
+    "declare function hasApiKey(req: string): boolean;",
+    "declare function hasSession(req: string): boolean;",
+    "declare function verifyApiKey(req: string): void;",
+    "declare function verifySession(req: string): void;",
+    "declare function audit(req: string): void;",
+    "declare function log(err: unknown): void;",
+    "declare function runAction(req: string): void;",
+    "",
+    "export function bypassHandler(req: string): void {",
+    "  if (hasApiKey(req)) {",
+    "    audit(req);",
+    "  }",
+    "  runAction(req);",
+    "}",
+    "",
+    "export function jointCoveredHandler(req: string): void {",
+    "  if (hasApiKey(req)) {",
+    "    verifyApiKey(req);",
+    "  } else if (hasSession(req)) {",
+    "    verifySession(req);",
+    "  } else {",
+    "    return;",
+    "  }",
+    "  runAction(req);",
+    "}",
+    "",
+    "export function unreachableHandler(req: string): void {",
+    "  if (hasApiKey(req)) {",
+    "    verifyApiKey(req);",
+    "  }",
+    "  return;",
+    "  runAction(req);",
+    "}",
+    "",
+    "export function unmodeledHandler(req: string): void {",
+    "  try {",
+    "    if (hasApiKey(req)) {",
+    "      runAction(req);",
+    "    }",
+    "  } catch (err) {",
+    "    log(err);",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  writeFileSync(
+    join(branchHost.path, "src", "routes.ts"),
+    routesSource,
+    "utf8",
+  );
+
+  const branchRuleConfigPath = join(branchHost.path, "verule.config.ts");
+  writeFileSync(
+    branchRuleConfigPath,
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "",
+      "const guardRule = defineRule({",
+      '  id: "host-auth-branch-coverage",',
+      "  run: async (ctx) => {",
+      '    const fns = (await ctx.findSyntax({ kinds: ["FunctionDeclaration"] })).filter(',
+      '      (fn) => !fn.text.startsWith("declare "),',
+      "    );",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "    const branchGroups = await ctx.listBranches(fns.map((fn) => fn.ref));",
+      "",
+      "    for (const [index, fn] of fns.entries()) {",
+      "      const actionCalls = calls.filter(",
+      "        (call) =>",
+      '          call.text.startsWith("runAction(") &&',
+      "          call.location.start >= fn.location.start &&",
+      "          call.location.end <= fn.location.end,",
+      "      );",
+      "      if (actionCalls.length === 0) continue;",
+      "",
+      "      const guardBranches = branchGroups[index]!.branches",
+      "        .filter(",
+      "          (b) =>",
+      '            b.kind === "if" &&',
+      '            b.direction === "true" &&',
+      '            (b.conditionText === "hasApiKey(req)" ||',
+      '              b.conditionText === "hasSession(req)"),',
+      "        )",
+      "        .map((b) => b.ref);",
+      "",
+      "      const coverage = await ctx.branchCoverage({",
+      "        function: fn.ref,",
+      "        branches: guardBranches,",
+      "        targets: actionCalls.map((call) => call.ref),",
+      "      });",
+      "",
+      "      for (const [targetIdx, item] of coverage.entries()) {",
+      "        const targetCall = actionCalls[targetIdx]!;",
+      '        if (item.status === "bypass") {',
+      "          ctx.report({",
+      "            at: targetCall.location,",
+      '            message: "runAction() can bypass required authorization branch.",',
+      '            findingKey: "branch-bypass",',
+      "            evidence: item.evidence,",
+      "          });",
+      '        } else if (item.status === "unreachable") {',
+      "          ctx.report({",
+      "            at: targetCall.location,",
+      '            message: "runAction() is unreachable from function entry and cannot be verified as covered.",',
+      '            findingKey: "branch-unreachable",',
+      "            evidence: item.evidence,",
+      "          });",
+      "        }",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [guardRule],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const branchFindingsJson = invoke(
+    branchHost.path,
+    "check",
+    "--output",
+    "json",
+  );
+  assert.equal(branchFindingsJson.status, 1, branchFindingsJson.stderr);
+  const branchEnvelope = JSON.parse(branchFindingsJson.stdout) as {
+    kind: string;
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(branchEnvelope.kind, "data");
+  assert.equal(branchEnvelope.variant, "findings");
+  assert.equal(branchEnvelope.data.diagnostics.length, 2);
+  assert.deepEqual(
+    branchEnvelope.data.diagnostics.map((d) => ({
+      line: d.at.line,
+      message: d.message,
+    })),
+    [
+      {
+        line: 13,
+        message: "runAction() can bypass required authorization branch.",
+      },
+      {
+        line: 32,
+        message:
+          "runAction() is unreachable from function entry and cannot be verified as covered.",
+      },
+    ],
+  );
+  assert.ok(
+    branchEnvelope.data.diagnostics[0]!.evidence.some((e) =>
+      e.message.includes("false branch"),
+    ),
+  );
+  assert.equal(branchEnvelope.data.gaps.length, 1);
+  assert.equal(branchEnvelope.data.gaps[0]!.kind, "unmodeled-try-catch");
+  assert.equal(branchEnvelope.data.gaps[0]!.at?.line, 36);
+
+  const branchFindingsText = invoke(branchHost.path, "check");
+  assert.equal(branchFindingsText.status, 1);
+  assert.match(branchFindingsText.stdout, /host-auth-branch-coverage/u);
+  assert.match(branchFindingsText.stdout, /gap \[unmodeled-try-catch\]/u);
+  assert.match(
+    branchFindingsText.stdout,
+    /Found 2 violation\(s\) \(1 gap\(s\)\)/u,
+  );
+
+  const branchLoadedConfig = (await import(
+    pathToFileURL(branchRuleConfigPath).href
+  )) as {
+    default: import("@verule/sdk").VeruleConfig;
+  };
+  const branchSdkReport = await sdk.runCheck({
+    cwd: branchHost.path,
+    config: branchLoadedConfig.default,
+  });
+  assert.deepEqual(branchEnvelope.data, branchSdkReport);
+
+  // Clean-with-gaps check: only covered + unmodeled try/catch -> exit 0 while still reporting gaps
+  writeFileSync(
+    join(branchHost.path, "src", "routes.ts"),
+    [
+      "declare function hasApiKey(req: string): boolean;",
+      "declare function hasSession(req: string): boolean;",
+      "declare function verifyApiKey(req: string): void;",
+      "declare function verifySession(req: string): void;",
+      "declare function log(err: unknown): void;",
+      "declare function runAction(req: string): void;",
+      "",
+      "export function jointCoveredHandler(req: string): void {",
+      "  if (hasApiKey(req)) {",
+      "    verifyApiKey(req);",
+      "  } else if (hasSession(req)) {",
+      "    verifySession(req);",
+      "  } else {",
+      "    return;",
+      "  }",
+      "  runAction(req);",
+      "}",
+      "",
+      "export function unmodeledHandler(req: string): void {",
+      "  try {",
+      "    if (hasApiKey(req)) {",
+      "      runAction(req);",
+      "    }",
+      "  } catch (err) {",
+      "    log(err);",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const cleanWithGapJson = invoke(branchHost.path, "check", "--output", "json");
+  assert.equal(cleanWithGapJson.status, 0, cleanWithGapJson.stderr);
+  const cleanWithGapEnvelope = JSON.parse(cleanWithGapJson.stdout) as {
+    kind: string;
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(cleanWithGapEnvelope.variant, "clean");
+  assert.equal(cleanWithGapEnvelope.data.diagnostics.length, 0);
+  assert.equal(cleanWithGapEnvelope.data.gaps.length, 1);
+  assert.equal(cleanWithGapEnvelope.data.gaps[0]!.kind, "unmodeled-try-catch");
+
+  const cleanWithGapText = invoke(branchHost.path, "check");
+  assert.equal(cleanWithGapText.status, 0, cleanWithGapText.stderr);
+  assert.match(cleanWithGapText.stdout, /No violations found.*1 gap\(s\)/u);
+  assert.match(cleanWithGapText.stdout, /gap \[unmodeled-try-catch\]/u);
+
+  // 2c. Deployed CLI explain + observation overhead comparison & truncation
   const explainMarkerPath = join(host.path, "checkpoint-detail-marker.txt");
   const explainConfigPath = join(host.path, "verule.explain.config.ts");
   writeFileSync(

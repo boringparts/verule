@@ -1,6 +1,16 @@
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
+import {
+  assertValidProgramRef,
+  toBranchCoverageItem,
+  toFunctionBranchesResult,
+  type BranchCoverageItem,
+  type BranchCoverageOptions,
+  type EngineBranchCoverageItem,
+  type EngineFunctionBranchesItem,
+  type FunctionBranchesResult,
+} from "./branch-coverage.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
 import {
   ObservationCollector,
@@ -12,13 +22,13 @@ import {
 import {
   buildDiagnostics,
   buildFileOrigins,
+  buildGaps,
   resolveProjectEntries,
   type CollectedDiagnostic,
 } from "./projects.ts";
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
-  getRefSessionToken,
   makeProgramRef,
   type AnalysisSession,
   type CheckReport,
@@ -29,6 +39,7 @@ import {
   type ExplainOptions,
   type ExplainReport,
   type FindSyntaxOptions,
+  type Gap,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProjectSummary,
@@ -355,6 +366,7 @@ export async function openSession(
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
+  const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
 
   function assertOpen(): void {
@@ -392,6 +404,7 @@ export async function openSession(
     ruleId: string,
     project: ProjectSummary,
     collected: CollectedDiagnostic[],
+    collectedGaps: Gap[],
     collector: ObservationCollector,
     recordRuleEngineMs: (ms: number) => void,
   ): RuleContext {
@@ -496,21 +509,12 @@ export async function openSession(
         if (targets.length === 0) return [];
 
         for (const target of targets) {
-          if (
-            getRefSessionToken(target) !== sessionToken ||
-            target.snapshotId !== snapshotId
-          ) {
-            throw new VeruleExecutionError(
-              "STALE_REFERENCE",
-              `Program reference "${target.handleId}" belongs to a closed or stale snapshot.`,
-            );
-          }
-          if (target.projectId !== project.projectId) {
-            throw new VeruleExecutionError(
-              "CROSS_PROJECT_REFERENCE",
-              `Program reference "${target.handleId}" belongs to project "${target.projectId}", not "${project.projectId}".`,
-            );
-          }
+          assertValidProgramRef(
+            target,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
         }
 
         const missingTargets: SyntaxRef[] = [];
@@ -612,6 +616,185 @@ export async function openSession(
 
         return results;
       },
+      listBranches: async (functions: readonly SyntaxRef[]) => {
+        assertOpen();
+        if (functions.length === 0) return [];
+
+        for (const fnRef of functions) {
+          assertValidProgramRef(
+            fnRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+
+        const queryStart = collector.isActive() ? performance.now() : 0;
+        const missingFunctions: SyntaxRef[] = [];
+        for (const fnRef of functions) {
+          const key = `${project.projectId}:${fnRef.handleId}`;
+          if (!branchListCache.has(key)) {
+            missingFunctions.push(fnRef);
+          }
+        }
+        const cacheStatus: "computed" | "reused" =
+          missingFunctions.length > 0 ? "computed" : "reused";
+
+        if (missingFunctions.length > 0) {
+          const batchPromise = client.request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId,
+              projectId: project.projectId,
+              steps: [
+                {
+                  op: "listBranches",
+                  targets: missingFunctions.map((fnRef) => fnRef.handleId),
+                },
+              ],
+            },
+            buildRpcOptions(collector),
+          );
+
+          for (const [index, fnRef] of missingFunctions.entries()) {
+            const key = `${project.projectId}:${fnRef.handleId}`;
+            const itemPromise = batchPromise.then((batch) => {
+              const items = (batch.results[0]?.items ??
+                []) as readonly EngineFunctionBranchesItem[];
+              const raw = items[index];
+              if (!raw) {
+                throw new VeruleExecutionError(
+                  "ENGINE_ERROR",
+                  `Engine omitted branch list for function "${fnRef.handleId}".`,
+                );
+              }
+              const mapped = toFunctionBranchesResult(
+                raw,
+                fnRef,
+                sessionToken,
+                project.projectId,
+                snapshotId,
+              );
+              for (const branch of mapped.branches) {
+                syntaxLocations.set(branch.condition, branch.location);
+              }
+              return mapped;
+            });
+            branchListCache.set(key, itemPromise);
+          }
+        }
+
+        const results = await Promise.all(
+          functions.map((fnRef) =>
+            branchListCache.get(`${project.projectId}:${fnRef.handleId}`)!,
+          ),
+        );
+
+        if (collector.isActive()) {
+          const durationMs = performance.now() - queryStart;
+          if (cacheStatus === "computed") {
+            collector.addEngineQueryMs(durationMs);
+            recordRuleEngineMs(durationMs);
+          }
+          collector.recordQuery({
+            ruleId,
+            op: "listBranches",
+            projectId: project.projectId,
+            provider: "engine",
+            cacheStatus,
+            candidateCount: results.reduce(
+              (total, item) => total + item.branches.length,
+              0,
+            ),
+            durationMs,
+            summary: `listBranches(${functions.length} function(s))`,
+          });
+        }
+
+        return results;
+      },
+      branchCoverage: async (query: BranchCoverageOptions) => {
+        assertOpen();
+        if (query.function !== undefined) {
+          assertValidProgramRef(
+            query.function,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        for (const branchRef of query.branches) {
+          assertValidProgramRef(
+            branchRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        for (const targetRef of query.targets) {
+          assertValidProgramRef(
+            targetRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        if (query.targets.length === 0) return [];
+
+        const queryStart = collector.isActive() ? performance.now() : 0;
+        const batch = await client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId,
+            projectId: project.projectId,
+            steps: [
+              {
+                op: "branchCoverage",
+                ...(query.function !== undefined
+                  ? { function: query.function.handleId }
+                  : {}),
+                branches: query.branches.map((branch) => branch.handleId),
+                targets: query.targets.map((target) => target.handleId),
+              },
+            ],
+          },
+          buildRpcOptions(collector),
+        );
+
+        const rawItems = (batch.results[0]?.items ??
+          []) as readonly EngineBranchCoverageItem[];
+        const results: BranchCoverageItem[] = [];
+        for (const [index, targetRef] of query.targets.entries()) {
+          const raw = rawItems[index];
+          if (!raw) {
+            throw new VeruleExecutionError(
+              "ENGINE_ERROR",
+              `Engine omitted branchCoverage result for target "${targetRef.handleId}".`,
+            );
+          }
+          const mapped = toBranchCoverageItem(raw, targetRef);
+          collectedGaps.push(...mapped.gaps);
+          results.push(mapped);
+        }
+
+        if (collector.isActive()) {
+          const durationMs = performance.now() - queryStart;
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
+          collector.recordQuery({
+            ruleId,
+            op: "branchCoverage",
+            projectId: project.projectId,
+            provider: "engine",
+            cacheStatus: "computed",
+            candidateCount: results.length,
+            durationMs,
+            summary: `branchCoverage(${query.branches.length} branch(es), ${query.targets.length} target(s))`,
+          });
+        }
+
+        return results;
+      },
       report: (input: DiagnosticInput) => {
         assertOpen();
         collected.push({
@@ -696,6 +879,7 @@ export async function openSession(
     }
 
     const collected: CollectedDiagnostic[] = [];
+    const collectedGaps: Gap[] = [];
     for (const project of projects) {
       for (const rule of rules) {
         let ruleEngineMs = 0;
@@ -704,6 +888,7 @@ export async function openSession(
           rule.id,
           project,
           collected,
+          collectedGaps,
           collector,
           (ms) => {
             ruleEngineMs += ms;
@@ -733,6 +918,7 @@ export async function openSession(
     }
 
     const diagnostics = buildDiagnostics(collected);
+    const gaps = buildGaps(collectedGaps);
     const observation = collector.buildObservationReport();
     const explanations = explainTarget
       ? rules.map((rule) =>
@@ -750,7 +936,7 @@ export async function openSession(
       projects,
       fileOrigins,
       diagnostics,
-      gaps: [],
+      gaps,
       ...(observation !== undefined ? { observation } : {}),
       ...(explanations !== undefined && explanations.length === 1
         ? { explanation: explanations[0] }
