@@ -306,3 +306,186 @@ fn rejects_stale_snapshots_and_invalid_project_configs() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn serves_list_branches_and_branch_coverage_statuses() {
+    let temp = TempDirGuard::new("verule-engine-serve-cfg");
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    let tsconfig_path = temp.path().join("tsconfig.json");
+    fs::write(
+        &tsconfig_path,
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*.ts"]
+}
+"#,
+    )
+    .expect("write tsconfig");
+
+    let source = [
+        "declare function hasKey(req: string): boolean;",
+        "declare function hasToken(req: string): boolean;",
+        "declare function verify(): void;",
+        "declare function sink(req: string): void;",
+        "export function joint(req: string): void {",
+        "  if (hasKey(req)) { verify(); } else if (hasToken(req)) { verify(); } else { return; }",
+        "  sink(req);",
+        "}",
+        "export function dead(req: string): void {",
+        "  if (hasKey(req)) { verify(); }",
+        "  return;",
+        "  sink(req);",
+        "}",
+        "export function unmodeled(req: string): void {",
+        "  try { if (hasKey(req)) { sink(req); } } catch (_e) {}",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(src_dir.join("cfg.ts"), &source).expect("write cfg.ts");
+
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+    let (snapshot_id, project_id, _) =
+        open_snapshot(&mut stdin, &mut reader, &cwd_str, &normalized(&tsconfig_path));
+
+    let syntax_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [
+                    { "op": "findSyntax", "kinds": ["FunctionDeclaration"] },
+                    { "op": "findSyntax", "kinds": ["CallExpression"] }
+                ]
+            }
+        }),
+    );
+    assert_eq!(syntax_resp["ok"], json!(true));
+    let fns = syntax_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("fns");
+    let body_fns: Vec<&Value> = fns
+        .iter()
+        .filter(|item| !item["text"].as_str().unwrap_or("").starts_with("declare "))
+        .collect();
+    assert_eq!(body_fns.len(), 3);
+
+    let sink_calls: Vec<&Value> = syntax_resp["result"]["results"][1]["items"]
+        .as_array()
+        .expect("calls")
+        .iter()
+        .filter(|item| item["text"].as_str().unwrap_or("").starts_with("sink("))
+        .collect();
+    assert_eq!(sink_calls.len(), 3);
+
+    let branches_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 3,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [{
+                    "op": "listBranches",
+                    "targets": body_fns.iter().map(|f| f["ref"].as_str().expect("fn ref")).collect::<Vec<_>>()
+                }]
+            }
+        }),
+    );
+    assert_eq!(branches_resp["ok"], json!(true), "listBranches failed: {branches_resp}");
+    let branch_groups = branches_resp["result"]["results"][0]["items"]
+        .as_array()
+        .expect("branch groups");
+
+    let joint_true_branches: Vec<&str> = branch_groups[0]["branches"]
+        .as_array()
+        .expect("joint branches")
+        .iter()
+        .filter(|b| b["direction"] == json!("true"))
+        .map(|b| b["ref"].as_str().expect("branch ref"))
+        .collect();
+    assert_eq!(joint_true_branches.len(), 2);
+
+    let dead_branches: Vec<&str> = branch_groups[1]["branches"]
+        .as_array()
+        .expect("dead branches")
+        .iter()
+        .map(|b| b["ref"].as_str().expect("branch ref"))
+        .collect();
+    let unmodeled_branches: Vec<&str> = branch_groups[2]["branches"]
+        .as_array()
+        .expect("unmodeled branches")
+        .iter()
+        .map(|b| b["ref"].as_str().expect("branch ref"))
+        .collect();
+
+    let cov_resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 4,
+            "method": "query.batch",
+            "params": {
+                "snapshotId": snapshot_id,
+                "projectId": project_id,
+                "steps": [
+                    {
+                        "op": "branchCoverage",
+                        "function": body_fns[0]["ref"],
+                        "branches": [joint_true_branches[0]],
+                        "targets": [sink_calls[0]["ref"]]
+                    },
+                    {
+                        "op": "branchCoverage",
+                        "function": body_fns[0]["ref"],
+                        "branches": joint_true_branches,
+                        "targets": [sink_calls[0]["ref"]]
+                    },
+                    {
+                        "op": "branchCoverage",
+                        "function": body_fns[1]["ref"],
+                        "branches": dead_branches,
+                        "targets": [sink_calls[1]["ref"]]
+                    },
+                    {
+                        "op": "branchCoverage",
+                        "function": body_fns[2]["ref"],
+                        "branches": unmodeled_branches,
+                        "targets": [sink_calls[2]["ref"]]
+                    }
+                ]
+            }
+        }),
+    );
+    assert_eq!(cov_resp["ok"], json!(true), "branchCoverage failed: {cov_resp}");
+    let results = cov_resp["result"]["results"].as_array().expect("results");
+    assert_eq!(results[0]["items"][0]["status"], json!("bypass"));
+    assert_eq!(results[1]["items"][0]["status"], json!("covered"));
+    assert_eq!(results[2]["items"][0]["status"], json!("unreachable"));
+    assert_eq!(results[3]["items"][0]["status"], json!("unknown"));
+    assert_eq!(
+        results[3]["items"][0]["gaps"][0]["kind"],
+        json!("unmodeled-try-catch")
+    );
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tsrs_api::{Handler, Response, Session, SessionOptions, session::SnapshotData};
-use tsrs_ast::{Kind, Node, SourceFile};
+use tsrs_ast::{Kind, Node, SourceFile, get_source_file_of_node};
 use tsrs_checker::{LiteralValue, Type, TypeFlags, TypeFormatFlags};
 use tsrs_compiler::Program;
 use tsrs_core::{
@@ -20,6 +20,10 @@ use tsrs_diagnostics::Category;
 use tsrs_project::ID as ProjectId;
 use tsrs_scanner::{get_ecma_line_and_utf16_character_of_position, get_token_pos_of_node};
 use tsrs_vfs::{FS, bundled, osvfs};
+
+use crate::cfg::{
+    EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
+};
 
 #[derive(Deserialize)]
 struct RpcRequest {
@@ -91,6 +95,15 @@ enum QueryStep {
     TypeAtLocation {
         targets: Vec<String>,
     },
+    ListBranches {
+        targets: Vec<String>,
+    },
+    BranchCoverage {
+        #[serde(default)]
+        function: Option<String>,
+        branches: Vec<String>,
+        targets: Vec<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -124,18 +137,20 @@ struct QueryBatchResult {
 enum StepResult {
     FindSyntax { items: Vec<SyntaxItem> },
     TypeAtLocation { items: Vec<TypeItem> },
+    ListBranches { items: Vec<FunctionBranchesItem> },
+    BranchCoverage { items: Vec<BranchCoverageItem> },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SourceLocation {
-    file: String,
-    line: u32,
-    column: u32,
-    end_line: u32,
-    end_column: u32,
-    start: u32,
-    end: u32,
+pub struct SourceLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Serialize)]
@@ -171,6 +186,36 @@ struct TypeItem {
     union_members: Option<Vec<String>>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchEdgeItem {
+    #[serde(rename = "ref")]
+    branch_ref: String,
+    kind: &'static str,
+    direction: &'static str,
+    condition: String,
+    condition_text: String,
+    location: SourceLocation,
+    statement_location: SourceLocation,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FunctionBranchesItem {
+    target: String,
+    branches: Vec<BranchEdgeItem>,
+    gaps: Vec<GapItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchCoverageItem {
+    target: String,
+    status: &'static str,
+    evidence: Vec<EvidenceItem>,
+    gaps: Vec<GapItem>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TsrsCreateSnapshotResponse {
@@ -185,9 +230,16 @@ struct TsrsProjectResponse {
     config_file_name: String,
 }
 
+#[derive(Clone, Copy)]
+struct BranchHandle {
+    function_node: P<Node>,
+    edge_index: usize,
+}
+
 enum HandlePayload {
     Syntax(P<Node>),
     Type(#[expect(dead_code, reason = "Retained for upcoming TypeRef follow-up queries.")] P<Type>),
+    Branch(BranchHandle),
 }
 
 struct HandleEntry {
@@ -201,6 +253,7 @@ struct SnapshotState {
     snapshot_data: Arc<SnapshotData>,
     project_ids: BTreeMap<String, ProjectId>,
     handles: FxHashMap<String, HandleEntry>,
+    cfg_cache: FxHashMap<(String, P<Node>), Result<Arc<FunctionCfg>, GapItem>>,
     next_handle_id: u64,
 }
 
@@ -229,6 +282,41 @@ impl SnapshotState {
             },
         );
         id
+    }
+
+    fn alloc_branch(&mut self, project_id: &str, branch: BranchHandle) -> String {
+        self.next_handle_id += 1;
+        let id = format!("brn:{}", self.next_handle_id);
+        self.handles.insert(
+            id.clone(),
+            HandleEntry {
+                project_id: project_id.to_string(),
+                payload: HandlePayload::Branch(branch),
+            },
+        );
+        id
+    }
+
+    fn get_or_build_cfg(
+        &mut self,
+        project_id: &str,
+        fn_node: P<Node>,
+    ) -> Result<Arc<FunctionCfg>, GapItem> {
+        let key = (project_id.to_string(), fn_node);
+        if let Some(cached) = self.cfg_cache.get(&key) {
+            return cached.clone();
+        }
+        let Some(sf) = get_source_file_of_node(fn_node) else {
+            return Err(GapItem {
+                kind: "missing-source-file",
+                message: "Function node has no associated source file.".to_string(),
+                at: None,
+            });
+        };
+        let rel_file = relative_to_cwd(&self.cwd, sf.file_name());
+        let built = FunctionCfg::build(sf, &rel_file, fn_node).map(Arc::new);
+        self.cfg_cache.insert(key, built.clone());
+        built
     }
 }
 
@@ -421,6 +509,7 @@ impl EngineServer {
                 snapshot_data,
                 project_ids,
                 handles: FxHashMap::default(),
+                cfg_cache: FxHashMap::default(),
                 next_handle_id: 0,
             },
         );
@@ -486,6 +575,24 @@ impl EngineServer {
                     let items =
                         run_type_at_location(snapshot, &params.project_id, program, &targets)?;
                     results.push(StepResult::TypeAtLocation { items });
+                }
+                QueryStep::ListBranches { targets } => {
+                    let items = run_list_branches(snapshot, &params.project_id, &targets)?;
+                    results.push(StepResult::ListBranches { items });
+                }
+                QueryStep::BranchCoverage {
+                    function,
+                    branches,
+                    targets,
+                } => {
+                    let items = run_branch_coverage(
+                        snapshot,
+                        &params.project_id,
+                        function.as_deref(),
+                        &branches,
+                        &targets,
+                    )?;
+                    results.push(StepResult::BranchCoverage { items });
                 }
             }
         }
@@ -606,6 +713,27 @@ fn run_find_syntax(
     Ok(items)
 }
 
+fn node_expression(node: P<Node>) -> Option<P<Node>> {
+    match node.kind() {
+        Kind::PropertyAccessExpression
+        | Kind::ElementAccessExpression
+        | Kind::ParenthesizedExpression
+        | Kind::CallExpression
+        | Kind::NewExpression
+        | Kind::AsExpression
+        | Kind::NonNullExpression
+        | Kind::SatisfiesExpression
+        | Kind::AwaitExpression
+        | Kind::IfStatement
+        | Kind::SwitchStatement
+        | Kind::ExpressionStatement
+        | Kind::ReturnStatement
+        | Kind::ThrowStatement
+        | Kind::CaseClause => node.expression(),
+        _ => None,
+    }
+}
+
 fn collect_matching_nodes(
     snapshot: &mut SnapshotState,
     project_id: &str,
@@ -620,9 +748,7 @@ fn collect_matching_nodes(
         let text = slice_source_text(sf, location.start, location.end);
         let node_ref = snapshot.alloc_syntax(project_id, node);
 
-        let expression = node
-            .expression()
-            .map(|expr| snapshot.alloc_syntax(project_id, expr));
+        let expression = node_expression(node).map(|expr| snapshot.alloc_syntax(project_id, expr));
 
         let arguments = if node.kind() == Kind::CallExpression {
             Some(
@@ -739,6 +865,64 @@ fn extract_type_info(
     }
 }
 
+fn resolve_syntax_handle(
+    snapshot: &SnapshotState,
+    project_id: &str,
+    handle_id: &str,
+) -> Result<P<Node>, RpcErr> {
+    let Some(entry) = snapshot.handles.get(handle_id) else {
+        return Err(RpcErr::new(
+            "STALE_REFERENCE",
+            format!("Program reference {handle_id} is expired or unknown."),
+        ));
+    };
+    if entry.project_id != project_id {
+        return Err(RpcErr::new(
+            "CROSS_PROJECT_REFERENCE",
+            format!(
+                "Program reference {handle_id} belongs to project {}, not {project_id}.",
+                entry.project_id
+            ),
+        ));
+    }
+    let HandlePayload::Syntax(node) = entry.payload else {
+        return Err(RpcErr::new(
+            "INVALID_REFERENCE_KIND",
+            format!("Program reference {handle_id} is not a syntax reference."),
+        ));
+    };
+    Ok(node)
+}
+
+fn resolve_branch_handle(
+    snapshot: &SnapshotState,
+    project_id: &str,
+    handle_id: &str,
+) -> Result<BranchHandle, RpcErr> {
+    let Some(entry) = snapshot.handles.get(handle_id) else {
+        return Err(RpcErr::new(
+            "STALE_REFERENCE",
+            format!("Program reference {handle_id} is expired or unknown."),
+        ));
+    };
+    if entry.project_id != project_id {
+        return Err(RpcErr::new(
+            "CROSS_PROJECT_REFERENCE",
+            format!(
+                "Program reference {handle_id} belongs to project {}, not {project_id}.",
+                entry.project_id
+            ),
+        ));
+    }
+    let HandlePayload::Branch(branch) = entry.payload else {
+        return Err(RpcErr::new(
+            "INVALID_REFERENCE_KIND",
+            format!("Program reference {handle_id} is not a branch reference."),
+        ));
+    };
+    Ok(branch)
+}
+
 fn run_type_at_location(
     snapshot: &mut SnapshotState,
     project_id: &str,
@@ -747,27 +931,7 @@ fn run_type_at_location(
 ) -> Result<Vec<TypeItem>, RpcErr> {
     let mut nodes = Vec::with_capacity(targets.len());
     for handle_id in targets {
-        let Some(entry) = snapshot.handles.get(handle_id) else {
-            return Err(RpcErr::new(
-                "STALE_REFERENCE",
-                format!("Program reference {handle_id} is expired or unknown."),
-            ));
-        };
-        if entry.project_id != project_id {
-            return Err(RpcErr::new(
-                "CROSS_PROJECT_REFERENCE",
-                format!(
-                    "Program reference {handle_id} belongs to project {}, not {project_id}.",
-                    entry.project_id
-                ),
-            ));
-        }
-        let HandlePayload::Syntax(node) = entry.payload else {
-            return Err(RpcErr::new(
-                "INVALID_REFERENCE_KIND",
-                format!("Program reference {handle_id} is not a syntax reference."),
-            ));
-        };
+        let node = resolve_syntax_handle(snapshot, project_id, handle_id)?;
         nodes.push((handle_id.clone(), node));
     }
 
@@ -798,7 +962,164 @@ fn run_type_at_location(
     Ok(items)
 }
 
-fn node_location(sf: P<SourceFile>, rel_file: &str, node: P<Node>) -> SourceLocation {
+fn run_list_branches(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    targets: &[String],
+) -> Result<Vec<FunctionBranchesItem>, RpcErr> {
+    let mut fn_nodes = Vec::with_capacity(targets.len());
+    for handle_id in targets {
+        let node = resolve_syntax_handle(snapshot, project_id, handle_id)?;
+        let Some(fn_node) = normalize_function_node(node) else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {handle_id} is not a function-like syntax node."),
+            ));
+        };
+        fn_nodes.push((handle_id.clone(), fn_node));
+    }
+
+    let mut items = Vec::with_capacity(fn_nodes.len());
+    for (target_id, fn_node) in fn_nodes {
+        match snapshot.get_or_build_cfg(project_id, fn_node) {
+            Ok(cfg) => {
+                let mut branch_items = Vec::with_capacity(cfg.branches.len());
+                for (edge_index, branch) in cfg.branches.iter().enumerate() {
+                    let branch_ref = snapshot.alloc_branch(
+                        project_id,
+                        BranchHandle {
+                            function_node: fn_node,
+                            edge_index,
+                        },
+                    );
+                    let condition = snapshot.alloc_syntax(project_id, branch.condition_node);
+                    branch_items.push(BranchEdgeItem {
+                        branch_ref,
+                        kind: branch.kind,
+                        direction: branch.direction,
+                        condition,
+                        condition_text: branch.condition_text.clone(),
+                        location: branch.location.clone(),
+                        statement_location: branch.statement_location.clone(),
+                    });
+                }
+                items.push(FunctionBranchesItem {
+                    target: target_id,
+                    branches: branch_items,
+                    gaps: cfg.gaps.clone(),
+                });
+            }
+            Err(gap) => {
+                items.push(FunctionBranchesItem {
+                    target: target_id,
+                    branches: Vec::new(),
+                    gaps: vec![gap],
+                });
+            }
+        }
+    }
+
+    Ok(items)
+}
+
+fn run_branch_coverage(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    function_handle: Option<&str>,
+    branch_handles: &[String],
+    target_handles: &[String],
+) -> Result<Vec<BranchCoverageItem>, RpcErr> {
+    let explicit_fn = if let Some(fn_id) = function_handle {
+        let node = resolve_syntax_handle(snapshot, project_id, fn_id)?;
+        let Some(fn_node) = normalize_function_node(node) else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!("Program reference {fn_id} is not a function-like syntax node."),
+            ));
+        };
+        Some(fn_node)
+    } else {
+        None
+    };
+
+    let mut resolved_branches = Vec::with_capacity(branch_handles.len());
+    for branch_id in branch_handles {
+        resolved_branches.push(resolve_branch_handle(snapshot, project_id, branch_id)?);
+    }
+
+    let mut resolved_targets = Vec::with_capacity(target_handles.len());
+    for target_id in target_handles {
+        let node = resolve_syntax_handle(snapshot, project_id, target_id)?;
+        let Some(sf) = get_source_file_of_node(node) else {
+            return Err(RpcErr::new(
+                "ENGINE_ERROR",
+                format!("Target syntax node {target_id} has no source file."),
+            ));
+        };
+        let rel_file = relative_to_cwd(&snapshot.cwd, sf.file_name());
+        let loc = node_location(sf, &rel_file, node);
+        resolved_targets.push((target_id.clone(), node, loc));
+    }
+
+    let mut items = Vec::with_capacity(resolved_targets.len());
+    for (target_id, target_node, target_loc) in resolved_targets {
+        let scope_fn = explicit_fn.or_else(|| resolve_enclosing_function(target_node));
+        let Some(fn_node) = scope_fn else {
+            items.push(BranchCoverageItem {
+                target: target_id,
+                status: "unknown",
+                evidence: Vec::new(),
+                gaps: vec![GapItem {
+                    kind: "no-enclosing-function",
+                    message: "Target is not inside a function body.".to_string(),
+                    at: Some(target_loc),
+                }],
+            });
+            continue;
+        };
+
+        let cfg = match snapshot.get_or_build_cfg(project_id, fn_node) {
+            Ok(cfg) => cfg,
+            Err(gap) => {
+                items.push(BranchCoverageItem {
+                    target: target_id,
+                    status: "unknown",
+                    evidence: Vec::new(),
+                    gaps: vec![gap],
+                });
+                continue;
+            }
+        };
+
+        let mut selected_edges = Vec::new();
+        let mut extra_gaps = Vec::new();
+        for branch in &resolved_branches {
+            if branch.function_node == fn_node {
+                selected_edges.push(branch.edge_index);
+            } else if explicit_fn.is_some() {
+                extra_gaps.push(GapItem {
+                    kind: "foreign-branch-reference",
+                    message:
+                        "Branch reference belongs to a different function than the target scope."
+                            .to_string(),
+                    at: Some(target_loc.clone()),
+                });
+            }
+        }
+
+        let outcome = cfg.evaluate_coverage(target_node, &target_loc, &selected_edges, &extra_gaps);
+        items.push(BranchCoverageItem {
+            target: target_id,
+            status: outcome.status.as_str(),
+            evidence: outcome.evidence,
+            gaps: outcome.gaps,
+        });
+    }
+
+    Ok(items)
+}
+
+pub fn node_location(sf: P<SourceFile>, rel_file: &str, node: P<Node>) -> SourceLocation {
     let start = get_token_pos_of_node(node, sf, false);
     let end = node.end().source_offset().unwrap_or(start).max(start);
 
@@ -816,7 +1137,7 @@ fn node_location(sf: P<SourceFile>, rel_file: &str, node: P<Node>) -> SourceLoca
     }
 }
 
-fn slice_source_text(sf: P<SourceFile>, start: u32, end: u32) -> String {
+pub fn slice_source_text(sf: P<SourceFile>, start: u32, end: u32) -> String {
     let text = sf.text();
     let start_idx = usize::try_from(start).unwrap_or(0);
     let end_idx = usize::try_from(end).unwrap_or(start_idx);
@@ -844,6 +1165,15 @@ fn parse_syntax_kind(name: &str) -> Option<Kind> {
         "NumericLiteral" => Some(Kind::NumericLiteral),
         "Parameter" => Some(Kind::Parameter),
         "NewExpression" => Some(Kind::NewExpression),
+        "SwitchStatement" => Some(Kind::SwitchStatement),
+        "CaseClause" => Some(Kind::CaseClause),
+        "DefaultClause" => Some(Kind::DefaultClause),
+        "ConditionalExpression" => Some(Kind::ConditionalExpression),
+        "ThrowStatement" => Some(Kind::ThrowStatement),
+        "TryStatement" => Some(Kind::TryStatement),
+        "Block" => Some(Kind::Block),
+        "ExpressionStatement" => Some(Kind::ExpressionStatement),
+        "VariableStatement" => Some(Kind::VariableStatement),
         _ => None,
     }
 }

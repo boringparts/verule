@@ -111,6 +111,29 @@ function toWireReport(report: CheckReport): WireCheckReport {
   };
 }
 
+function appendGapLines(lines: string[], gaps: WireCheckReport["gaps"]): void {
+  for (const gap of gaps) {
+    const locSuffix = gap.at
+      ? ` (${gap.at.file}:${gap.at.line}:${gap.at.column})`
+      : "";
+    lines.push(`gap [${gap.kind}]: ${gap.message}${locSuffix}`);
+  }
+}
+
+function formatCheckCleanText(report: WireCheckReport) {
+  const summary =
+    report.gaps.length > 0
+      ? `No violations found across ${report.projects.length} project(s) (${report.gaps.length} gap(s)).`
+      : `No violations found across ${report.projects.length} project(s).`;
+  if (report.gaps.length === 0) {
+    return text.line(summary);
+  }
+  const lines = [summary];
+  appendGapLines(lines, report.gaps);
+  const [first, ...rest] = lines;
+  return first !== undefined ? text.lines([first, ...rest]) : text.line(summary);
+}
+
 function formatCheckFindingsText(report: WireCheckReport) {
   const lines: string[] = [];
   for (const diag of report.diagnostics) {
@@ -124,7 +147,11 @@ function formatCheckFindingsText(report: WireCheckReport) {
       lines.push(`  evidence (${item.kind}): ${item.message}${locSuffix}`);
     }
   }
-  const summary = `Found ${report.diagnostics.length} violation(s).`;
+  appendGapLines(lines, report.gaps);
+  const summary =
+    report.gaps.length > 0
+      ? `Found ${report.diagnostics.length} violation(s) (${report.gaps.length} gap(s)).`
+      : `Found ${report.diagnostics.length} violation(s).`;
   const [first, ...rest] = lines;
   return first !== undefined
     ? text.lines([first, ...rest, summary])
@@ -274,10 +301,7 @@ function createCliContract(
                     description: "Analysis completed with zero violations.",
                     schema: checkReportSchema,
                     exitCode: 0,
-                    text: (report) =>
-                      text.line(
-                        `No violations found across ${report.projects.length} project(s).`,
-                      ),
+                    text: formatCheckCleanText,
                   },
                   findings: {
                     description: "Analysis completed and reported violations.",

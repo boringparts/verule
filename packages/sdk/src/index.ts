@@ -4,10 +4,20 @@ import { promisify } from "node:util";
 import { engineExecutablePath } from "@verule/engine/binary";
 
 export { defineConfig, defineRule, openSession, runCheck } from "./session.ts";
+export type {
+  BranchCoverageItem,
+  BranchCoverageOptions,
+  BranchCoverageStatus,
+  BranchDirection,
+  BranchEdgeInfo,
+  BranchKind,
+  FunctionBranchesResult,
+} from "./branch-coverage.ts";
 export {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
   type AnalysisSession,
+  type BranchRef,
   type CheckReport,
   type Diagnostic,
   type DiagnosticInput,

@@ -1,11 +1,20 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
+import {
+  assertValidProgramRef,
+  toBranchCoverageItem,
+  toFunctionBranchesResult,
+  type BranchCoverageItem,
+  type BranchCoverageOptions,
+  type EngineBranchCoverageItem,
+  type EngineFunctionBranchesItem,
+  type FunctionBranchesResult,
+} from "./branch-coverage.ts";
 import { EngineClient } from "./engine-client.ts";
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
-  getRefSessionToken,
   makeProgramRef,
   type AnalysisSession,
   type CheckReport,
@@ -14,6 +23,7 @@ import {
   type DiagnosticLocation,
   type Evidence,
   type FindSyntaxOptions,
+  type Gap,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProjectSummary,
@@ -358,6 +368,31 @@ function buildDiagnostics(
   });
 }
 
+function buildGaps(collected: readonly Gap[]): readonly Gap[] {
+  const unique = new Map<string, Gap>();
+  for (const gap of collected) {
+    const key = JSON.stringify([
+      gap.kind,
+      gap.message,
+      gap.at !== undefined ? canonicalLocationKey(gap.at) : null,
+    ]);
+    if (!unique.has(key)) {
+      unique.set(key, gap);
+    }
+  }
+  return [...unique.values()].toSorted((a, b) => {
+    if (a.at && b.at) {
+      const locCmp = compareLocations(a.at, b.at);
+      if (locCmp !== 0) return locCmp;
+    } else if (a.at || b.at) {
+      return a.at ? -1 : 1;
+    }
+    const kindCmp = a.kind.localeCompare(b.kind);
+    if (kindCmp !== 0) return kindCmp;
+    return a.message.localeCompare(b.message);
+  });
+}
+
 /**
  * Opens an analysis session backed by a single engine subprocess and project snapshot.
  *
@@ -391,6 +426,7 @@ export async function openSession(
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
+  const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
 
   function assertOpen(): void {
     if (closed) {
@@ -405,6 +441,7 @@ export async function openSession(
     ruleId: string,
     project: ProjectSummary,
     collected: CollectedDiagnostic[],
+    collectedGaps: Gap[],
   ): RuleContext {
     return {
       project,
@@ -451,21 +488,12 @@ export async function openSession(
         if (targets.length === 0) return [];
 
         for (const target of targets) {
-          if (
-            getRefSessionToken(target) !== sessionToken ||
-            target.snapshotId !== snapshotId
-          ) {
-            throw new VeruleExecutionError(
-              "STALE_REFERENCE",
-              `Program reference "${target.handleId}" belongs to a closed or stale snapshot.`,
-            );
-          }
-          if (target.projectId !== project.projectId) {
-            throw new VeruleExecutionError(
-              "CROSS_PROJECT_REFERENCE",
-              `Program reference "${target.handleId}" belongs to project "${target.projectId}", not "${project.projectId}".`,
-            );
-          }
+          assertValidProgramRef(
+            target,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
         }
 
         const missingTargets: SyntaxRef[] = [];
@@ -521,6 +549,132 @@ export async function openSession(
           ),
         );
       },
+      listBranches: async (functions: readonly SyntaxRef[]) => {
+        assertOpen();
+        if (functions.length === 0) return [];
+
+        for (const fnRef of functions) {
+          assertValidProgramRef(
+            fnRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+
+        const missingFunctions: SyntaxRef[] = [];
+        for (const fnRef of functions) {
+          const key = `${project.projectId}:${fnRef.handleId}`;
+          if (!branchListCache.has(key)) {
+            missingFunctions.push(fnRef);
+          }
+        }
+
+        if (missingFunctions.length > 0) {
+          const batchPromise = client.request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId,
+              projectId: project.projectId,
+              steps: [
+                {
+                  op: "listBranches",
+                  targets: missingFunctions.map((fnRef) => fnRef.handleId),
+                },
+              ],
+            },
+          );
+
+          for (const [index, fnRef] of missingFunctions.entries()) {
+            const key = `${project.projectId}:${fnRef.handleId}`;
+            const itemPromise = batchPromise.then((batch) => {
+              const items = (batch.results[0]?.items ??
+                []) as readonly EngineFunctionBranchesItem[];
+              const raw = items[index];
+              if (!raw) {
+                throw new VeruleExecutionError(
+                  "ENGINE_ERROR",
+                  `Engine omitted branch list for function "${fnRef.handleId}".`,
+                );
+              }
+              return toFunctionBranchesResult(
+                raw,
+                fnRef,
+                sessionToken,
+                project.projectId,
+                snapshotId,
+              );
+            });
+            branchListCache.set(key, itemPromise);
+          }
+        }
+
+        return Promise.all(
+          functions.map((fnRef) =>
+            branchListCache.get(`${project.projectId}:${fnRef.handleId}`)!,
+          ),
+        );
+      },
+      branchCoverage: async (query: BranchCoverageOptions) => {
+        assertOpen();
+        if (query.function !== undefined) {
+          assertValidProgramRef(
+            query.function,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        for (const branchRef of query.branches) {
+          assertValidProgramRef(
+            branchRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        for (const targetRef of query.targets) {
+          assertValidProgramRef(
+            targetRef,
+            sessionToken,
+            snapshotId,
+            project.projectId,
+          );
+        }
+        if (query.targets.length === 0) return [];
+
+        const batch = await client.request<EngineBatchResult>("query.batch", {
+          snapshotId,
+          projectId: project.projectId,
+          steps: [
+            {
+              op: "branchCoverage",
+              ...(query.function !== undefined
+                ? { function: query.function.handleId }
+                : {}),
+              branches: query.branches.map((branch) => branch.handleId),
+              targets: query.targets.map((target) => target.handleId),
+            },
+          ],
+        });
+
+        const rawItems = (batch.results[0]?.items ??
+          []) as readonly EngineBranchCoverageItem[];
+        const results: BranchCoverageItem[] = [];
+        for (const [index, targetRef] of query.targets.entries()) {
+          const raw = rawItems[index];
+          if (!raw) {
+            throw new VeruleExecutionError(
+              "ENGINE_ERROR",
+              `Engine omitted branchCoverage result for target "${targetRef.handleId}".`,
+            );
+          }
+          const mapped = toBranchCoverageItem(raw, targetRef);
+          collectedGaps.push(...mapped.gaps);
+          results.push(mapped);
+        }
+        return results;
+      },
       report: (input: DiagnosticInput) => {
         assertOpen();
         collected.push({
@@ -546,10 +700,16 @@ export async function openSession(
         ? validateRules(rulesOverride)
         : normalizedConfig.rules;
       const collected: CollectedDiagnostic[] = [];
+      const collectedGaps: Gap[] = [];
 
       for (const project of projects) {
         for (const rule of rules) {
-          const ctx = createRuleContext(rule.id, project, collected);
+          const ctx = createRuleContext(
+            rule.id,
+            project,
+            collected,
+            collectedGaps,
+          );
           try {
             await rule.run(ctx);
           } catch (err) {
@@ -567,12 +727,13 @@ export async function openSession(
       }
 
       const diagnostics = buildDiagnostics(collected);
+      const gaps = buildGaps(collectedGaps);
       return {
         reportVersion: REPORT_SCHEMA_VERSION,
         status: diagnostics.length > 0 ? "findings" : "clean",
         projects,
         diagnostics,
-        gaps: [],
+        gaps,
       };
     },
     close: async () => {
