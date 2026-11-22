@@ -1,7 +1,10 @@
+import { performance } from "node:perf_hooks";
+
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
   getEngineVersion,
+  parseObserveLimit,
   runCheck,
 } from "@verule/sdk";
 import {
@@ -26,6 +29,8 @@ import {
   formatDiagnosticsLines,
   toWireReport,
   type WireCheckReport,
+  type WireExplainResult,
+  type WireObservation,
 } from "./report-wire.ts";
 import {
   formatWatchReportText,
@@ -42,14 +47,99 @@ type CliRuntime = {
   readonly signal?: AbortSignal;
 };
 
+function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
+  const linePart = exp.target.line !== undefined ? `:${exp.target.line}` : "";
+  const colPart =
+    exp.target.column !== undefined ? `:${exp.target.column}` : "";
+  lines.push(
+    `Explanation [${exp.ruleId}] @ ${exp.target.file}${linePart}${colPart}: ${exp.status} (inCandidates=${String(exp.inCandidates)})`,
+  );
+  lines.push(`  summary: ${exp.summary}`);
+  if (exp.excludedByCheckpoint) {
+    const detailSuffix =
+      exp.excludedByCheckpoint.detail !== undefined
+        ? ` detail=${JSON.stringify(exp.excludedByCheckpoint.detail)}`
+        : "";
+    lines.push(
+      `  excludedByCheckpoint: ${exp.excludedByCheckpoint.name} (${exp.excludedByCheckpoint.outcome})${detailSuffix}`,
+    );
+  }
+  if (exp.excludedByQuery) {
+    lines.push(
+      `  excludedByQuery: ${exp.excludedByQuery.op} (provider=${exp.excludedByQuery.provider}, cache=${exp.excludedByQuery.cacheStatus}, candidates=${exp.excludedByQuery.candidateCount})`,
+    );
+  }
+  for (const query of exp.queries) {
+    lines.push(
+      `  query #${query.queryIndex}: ${query.op} [${query.cacheStatus}] candidates=${query.candidateCount} matchedTarget=${String(query.matchedTarget)}`,
+    );
+  }
+}
+
+function appendObservationLines(lines: string[], obs: WireObservation): void {
+  lines.push(
+    `Observation (${obs.mode}): total=${obs.phases.totalMs}ms (configOpen=${obs.phases.configAndOpenMs}ms, engineQuery=${obs.phases.engineQueryMs}ms, ruleExec=${obs.phases.ruleExecutionMs}ms)`,
+  );
+  lines.push(
+    `  rpc: batches=${obs.rpc.batches} (queryBatches=${obs.rpc.queryBatches}), bytesSent=${obs.rpc.bytesSent}, bytesReceived=${obs.rpc.bytesReceived}`,
+  );
+  lines.push(
+    `  overhead: checkpoint=${obs.overhead.checkpointMs}ms, encode=${obs.overhead.encodeMs}ms, write=${obs.overhead.writeMs}ms`,
+  );
+  lines.push(
+    `  queries: total=${obs.queryCount}, computed=${obs.computedQueryCount}, reused=${obs.reusedQueryCount}, candidates=${obs.candidateCount}, checkpoints=${obs.checkpointCount}`,
+  );
+  if (obs.truncated) {
+    lines.push(`  truncated: true (dropped=${obs.droppedCount})`);
+  }
+  if (obs.details) {
+    for (const detail of obs.details) {
+      lines.push(`  detail [${detail.kind}]: ${detail.summary}`);
+    }
+  }
+}
+
+function appendExtrasText(lines: string[], report: WireCheckReport): void {
+  if (report.explanation) {
+    appendExplanationLines(lines, report.explanation);
+  } else if (report.explanations) {
+    for (const exp of report.explanations) {
+      appendExplanationLines(lines, exp);
+    }
+  }
+  if (report.observation) {
+    appendObservationLines(lines, report.observation);
+  }
+}
+
+function formatCheckCleanText(report: WireCheckReport) {
+  const summary = `No violations found across ${report.projects.length} project(s).`;
+  const extras: string[] = [];
+  appendExtrasText(extras, report);
+  if (extras.length === 0) {
+    return text.line(summary);
+  }
+  return text.lines([summary, ...extras]);
+}
+
 function formatCheckFindingsText(report: WireCheckReport) {
   const lines = formatDiagnosticsLines(report);
   const summary = `Found ${report.diagnostics.length} violation(s).`;
+  const extras: string[] = [];
+  appendExtrasText(extras, report);
   const [first, ...rest] = lines;
   return first !== undefined
-    ? text.lines([first, ...rest, summary])
-    : text.line(summary);
+    ? text.lines([first, ...rest, summary, ...extras])
+    : text.lines([summary, ...extras]);
 }
+
+type CheckCliInput = {
+  readonly config?: string | undefined;
+  readonly rule?: string | undefined;
+  readonly at?: string | undefined;
+  readonly observe?: "off" | "summary" | "detail" | undefined;
+  readonly observeLimit?: string | undefined;
+};
 
 function createCliContract(
   identity: CliCommandIdentity,
@@ -58,11 +148,18 @@ function createCliContract(
 ) {
   const define = defineCli();
   const versionInput = z.object({});
-  const configInput = z.object({
+  const checkInput = z.object({
+    config: z.string().min(1).optional(),
+    rule: z.string().min(1).optional(),
+    at: z.string().min(1).optional(),
+    observe: z.enum(["off", "summary", "detail"]).optional(),
+    observeLimit: z.string().min(1).optional(),
+  });
+  const watchInput = z.object({
     config: z.string().min(1).optional(),
   });
 
-  async function executeCheck(configOption?: string): Promise<
+  async function executeCheck(input: CheckCliInput): Promise<
     | { readonly ok: true; readonly report: WireCheckReport }
     | {
         readonly ok: false;
@@ -74,8 +171,24 @@ function createCliContract(
       }
   > {
     try {
-      const config = await loadProjectConfig(workingDirectory, configOption);
-      const report = await runCheck({ cwd: workingDirectory, config });
+      const observeLimit =
+        input.observeLimit !== undefined
+          ? parseObserveLimit(input.observeLimit)
+          : undefined;
+
+      const configStart = performance.now();
+      const config = await loadProjectConfig(workingDirectory, input.config);
+      const configLoadMs = performance.now() - configStart;
+
+      const report = await runCheck({
+        cwd: workingDirectory,
+        config,
+        configLoadMs,
+        ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
+        ...(input.at !== undefined ? { at: input.at } : {}),
+        ...(input.observe !== undefined ? { observe: input.observe } : {}),
+        ...(observeLimit !== undefined ? { observeLimit } : {}),
+      });
       return { ok: true, report: toWireReport(report) };
     } catch (err) {
       if (err instanceof VeruleExecutionError) {
@@ -180,9 +293,31 @@ function createCliContract(
             shortAlias: "-c",
             description: "Path to the Verule configuration file.",
           },
+          rule: {
+            kind: "valueOption",
+            longOption: "--rule",
+            description: "Run only the specified rule ID.",
+          },
+          at: {
+            kind: "valueOption",
+            longOption: "--at",
+            description:
+              "Explain why diagnostics did or did not trigger at <file[:line[:column]]>.",
+          },
+          observe: {
+            kind: "valueOption",
+            longOption: "--observe",
+            description:
+              "Observation verbosity level (off, summary, or detail).",
+          },
+          observeLimit: {
+            kind: "valueOption",
+            longOption: "--observe-limit",
+            description: "Limit detail observation entries (e.g. 20 or 4096b).",
+          },
         },
-        input: configInput,
-        outputs: define.outputModes("check", configInput, (mode) => ({
+        input: checkInput,
+        outputs: define.outputModes("check", checkInput, (mode) => ({
           default: "text",
           modes: {
             text: mode.atomic({
@@ -195,10 +330,7 @@ function createCliContract(
                     description: "Analysis completed with zero violations.",
                     schema: checkReportSchema,
                     exitCode: 0,
-                    text: (report) =>
-                      text.line(
-                        `No violations found across ${report.projects.length} project(s).`,
-                      ),
+                    text: formatCheckCleanText,
                   },
                   findings: {
                     description: "Analysis completed and reported violations.",
@@ -219,7 +351,7 @@ function createCliContract(
                 },
               },
               handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input.config);
+                const outcomeResult = await executeCheck(input);
                 if (!outcomeResult.ok) {
                   return outcome.failure.failed(outcomeResult.failure);
                 }
@@ -255,7 +387,7 @@ function createCliContract(
                 },
               },
               handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input.config);
+                const outcomeResult = await executeCheck(input);
                 if (!outcomeResult.ok) {
                   return outcome.failure.failed(outcomeResult.failure);
                 }
@@ -281,8 +413,8 @@ function createCliContract(
             description: "Path to the Verule configuration file.",
           },
         },
-        input: configInput,
-        outputs: define.outputModes("watch", configInput, (mode) => ({
+        input: watchInput,
+        outputs: define.outputModes("watch", watchInput, (mode) => ({
           default: "text",
           modes: {
             text: mode.stream({

@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 
-import { EngineClient } from "./engine-client.ts";
+import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
+import {
+  ObservationCollector,
+  locationMatchesTarget,
+  normalizeObserveConfig,
+  normalizeTargetSpec,
+  type EngineCallIoMetrics,
+} from "./observation.ts";
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
@@ -9,10 +17,14 @@ import {
   makeProgramRef,
   type AnalysisSession,
   type CheckReport,
+  type CheckpointOutcome,
+  type CheckpointTarget,
   type Diagnostic,
   type DiagnosticInput,
   type DiagnosticLocation,
   type Evidence,
+  type ExplainOptions,
+  type ExplainReport,
   type FindSyntaxOptions,
   type MemoryStats,
   type Model,
@@ -26,6 +38,7 @@ import {
   type RuleContext,
   type RuleIdentitySummary,
   type RunCheckOptions,
+  type SessionCheckOptions,
   type SessionUpdateOptions,
   type SyntaxKind,
   type SyntaxNodeResult,
@@ -153,6 +166,32 @@ export function defineModel(model: Model): Model {
     );
   }
   return model;
+}
+
+function selectRules(
+  baseRules: readonly Rule[],
+  ruleIds?: readonly string[],
+): readonly Rule[] {
+  if (!ruleIds || ruleIds.length === 0) {
+    return baseRules;
+  }
+  const byId = new Map(baseRules.map((rule) => [rule.id, rule]));
+  const selected: Rule[] = [];
+  const seen = new Set<string>();
+  for (const id of ruleIds) {
+    const found = byId.get(id);
+    if (!found) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Unknown rule id "${id}".`,
+      );
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      selected.push(found);
+    }
+  }
+  return selected;
 }
 
 /** Validates and normalizes a rule definition. */
@@ -292,15 +331,19 @@ function toSyntaxNodeResult(
   sessionToken: symbol,
   projectId: string,
   snapshotId: number,
+  syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
 ): SyntaxNodeResult {
+  const ref = makeProgramRef(
+    "syntax",
+    sessionToken,
+    projectId,
+    snapshotId,
+    item.ref,
+  );
+  syntaxLocations.set(ref, item.location);
+
   return {
-    ref: makeProgramRef(
-      "syntax",
-      sessionToken,
-      projectId,
-      snapshotId,
-      item.ref,
-    ),
+    ref,
     kind: item.kind,
     text: item.text,
     location: item.location,
@@ -380,6 +423,19 @@ function toTypeAtResult(
       ? { unionMembers: item.unionMembers }
       : {}),
   };
+}
+
+function resolveCheckpointLocation(
+  target: CheckpointTarget,
+  syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
+): DiagnosticLocation | undefined {
+  if ("location" in target) {
+    return target.location;
+  }
+  if ("file" in target && "line" in target && "start" in target) {
+    return target;
+  }
+  return syntaxLocations.get(target);
 }
 
 function canonicalLocationKey(loc: DiagnosticLocation): string {
@@ -490,6 +546,7 @@ function buildDiagnostics(
   });
 }
 
+<<<<<<< HEAD
 function resolveNextConfig(
   current: NormalizedVeruleConfig,
   options?: SessionUpdateOptions,
@@ -574,6 +631,12 @@ function readMemoryStats(engineRssBytes?: number): MemoryStats {
   };
 }
 
+function isSessionCheckOptions(
+  value: readonly Rule[] | SessionCheckOptions | undefined,
+): value is SessionCheckOptions {
+  return value !== undefined && !Array.isArray(value);
+}
+
 /**
  * Opens an analysis session backed by a single engine subprocess and project snapshot.
  *
@@ -587,18 +650,46 @@ export async function openSession(
     : defineConfig({});
   const initialEntries = resolveEntries(normalizedConfig);
   const absCwd = resolve(options.cwd);
+  const sessionObserve = normalizeObserveConfig(
+    options.observe,
+    options.observeLimit,
+  );
 
   const client = new EngineClient();
+  let openIoMetrics: EngineCallIoMetrics | undefined;
+  const openStart = performance.now();
   let openResult: EngineOpenResult;
   try {
-    openResult = await client.request<EngineOpenResult>("snapshot.open", {
-      cwd: absCwd,
-      entries: initialEntries,
-    });
+    const openRpcOptions: RpcRequestOptions | undefined =
+      sessionObserve.mode !== "off"
+        ? {
+            observe: {
+              mode: sessionObserve.mode,
+              ...(sessionObserve.limit?.maxItems !== undefined
+                ? { maxItems: sessionObserve.limit.maxItems }
+                : {}),
+              ...(sessionObserve.limit?.maxBytes !== undefined
+                ? { maxBytes: sessionObserve.limit.maxBytes }
+                : {}),
+            },
+            onMetrics: (io) => {
+              openIoMetrics = io;
+            },
+          }
+        : undefined;
+    openResult = await client.request<EngineOpenResult>(
+      "snapshot.open",
+      {
+        cwd: absCwd,
+        entries: initialEntries,
+      },
+      openRpcOptions,
+    );
   } catch (err) {
     await client.close();
     throw err;
   }
+  const openDurationMs = performance.now() - openStart;
 
   const sessionToken = Symbol("verule-session");
   let currentSnapshotId = openResult.snapshotId;
@@ -606,9 +697,13 @@ export async function openSession(
   let currentProjects = openResult.projects;
   let lastEngineRssBytes = openResult.engineRssBytes;
   let closed = false;
+  let pendingOpenIoMetrics = openIoMetrics;
+  let pendingOpenDurationMs = openDurationMs;
+  let pendingConfigLoadMs = options.configLoadMs ?? 0;
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
+  const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
 
   function assertOpen(): void {
     if (closed) {
@@ -619,18 +714,42 @@ export async function openSession(
     }
   }
 
+  function buildRpcOptions(
+    collector: ObservationCollector,
+  ): RpcRequestOptions | undefined {
+    if (!collector.isObserveEnabled()) {
+      return undefined;
+    }
+    return {
+      observe: {
+        mode: collector.mode,
+        ...(collector.limit?.maxItems !== undefined
+          ? { maxItems: collector.limit.maxItems }
+          : {}),
+        ...(collector.limit?.maxBytes !== undefined
+          ? { maxBytes: collector.limit.maxBytes }
+          : {}),
+      },
+      onMetrics: (io) => {
+        collector.recordRpcCall(io);
+      },
+    };
+  }
+
   function createRuleContext(
     ruleId: string,
     project: ProjectSummary,
     models: readonly Model[],
     collected: CollectedDiagnostic[],
+    collector: ObservationCollector,
+    recordRuleEngineMs: (ms: number) => void,
   ): RuleContext {
     const activeSnapshotId = currentSnapshotId;
     return {
       project,
       models,
       getModel: (id: string) => models.find((model) => model.id === id),
-      findSyntax: (query: FindSyntaxOptions) => {
+      findSyntax: async (query: FindSyntaxOptions) => {
         assertOpen();
         const cacheKey = JSON.stringify([
           activeSnapshotId,
@@ -639,35 +758,91 @@ export async function openSession(
           query.files ? query.files.toSorted() : null,
         ]);
         const cached = syntaxCache.get(cacheKey);
-        if (cached) return cached;
+        const queryStart = collector.isActive() ? performance.now() : 0;
 
-        const promise = client
-          .request<EngineBatchResult>("query.batch", {
-            snapshotId: activeSnapshotId,
-            projectId: project.projectId,
-            steps: [
+        let items: readonly SyntaxNodeResult[];
+        let cacheStatus: "computed" | "reused";
+        if (cached) {
+          cacheStatus = "reused";
+          items = await cached;
+        } else {
+          cacheStatus = "computed";
+          const promise = client
+            .request<EngineBatchResult>(
+              "query.batch",
               {
-                op: "findSyntax",
-                kinds: query.kinds,
-                ...(query.files !== undefined ? { files: query.files } : {}),
+                snapshotId: activeSnapshotId,
+                projectId: project.projectId,
+                steps: [
+                  {
+                    op: "findSyntax",
+                    kinds: query.kinds,
+                    ...(query.files !== undefined
+                      ? { files: query.files }
+                      : {}),
+                  },
+                ],
               },
-            ],
-          })
-          .then((batch) => {
-            const items = (batch.results[0]?.items ??
-              []) as readonly EngineSyntaxItem[];
-            return items.map((item) =>
-              toSyntaxNodeResult(
-                item,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
-              ),
-            );
-          });
+              buildRpcOptions(collector),
+            )
+            .then((batch) => {
+              const rawItems = (batch.results[0]?.items ??
+                []) as readonly EngineSyntaxItem[];
+              return rawItems.map((item) =>
+                toSyntaxNodeResult(
+                  item,
+                  sessionToken,
+                  project.projectId,
+                  activeSnapshotId,
+                  syntaxLocations,
+                ),
+              );
+            });
 
-        syntaxCache.set(cacheKey, promise);
-        return promise;
+          syntaxCache.set(cacheKey, promise);
+          items = await promise;
+        }
+
+        if (collector.isActive()) {
+          const durationMs = performance.now() - queryStart;
+          if (cacheStatus === "computed") {
+            collector.addEngineQueryMs(durationMs);
+            recordRuleEngineMs(durationMs);
+          }
+          const matchedLocations = collector.explainTarget
+            ? items
+                .filter((item) =>
+                  locationMatchesTarget(
+                    item.location,
+                    collector.explainTarget!,
+                  ),
+                )
+                .map((item) => item.location)
+            : undefined;
+          collector.recordQuery({
+            ruleId,
+            op: "findSyntax",
+            projectId: project.projectId,
+            provider: "engine",
+            cacheStatus,
+            candidateCount: items.length,
+            durationMs,
+            summary: `findSyntax(${query.kinds.join(", ")}) -> ${items.length} candidate(s)`,
+            ...(matchedLocations !== undefined ? { matchedLocations } : {}),
+            ...(collector.mode === "detail" || collector.isExplainEnabled()
+              ? {
+                  detail: {
+                    kinds: query.kinds,
+                    ...(query.files !== undefined
+                      ? { files: query.files }
+                      : {}),
+                  },
+                }
+              : {}),
+          });
+        }
+
+        return items;
       },
       typeAt: async (targets: readonly SyntaxRef[]) => {
         assertOpen();
@@ -699,6 +874,10 @@ export async function openSession(
           }
         }
 
+        const queryStart = collector.isActive() ? performance.now() : 0;
+        const cacheStatus: "computed" | "reused" =
+          missingTargets.length > 0 ? "computed" : "reused";
+
         if (missingTargets.length > 0) {
           const batchPromise = client.request<EngineBatchResult>(
             "query.batch",
@@ -712,6 +891,7 @@ export async function openSession(
                 },
               ],
             },
+            buildRpcOptions(collector),
           );
 
           for (const [index, target] of missingTargets.entries()) {
@@ -738,13 +918,54 @@ export async function openSession(
           }
         }
 
-        return Promise.all(
+        const results = await Promise.all(
           targets.map((target) =>
             typeCache.get(
               `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
             )!,
           ),
         );
+
+        if (collector.isActive()) {
+          const durationMs = performance.now() - queryStart;
+          if (cacheStatus === "computed") {
+            collector.addEngineQueryMs(durationMs);
+            recordRuleEngineMs(durationMs);
+          }
+          const matchedLocations: DiagnosticLocation[] = [];
+          const matchedTypeTexts: string[] = [];
+          if (collector.explainTarget) {
+            for (const item of results) {
+              const loc = syntaxLocations.get(item.target);
+              if (
+                loc &&
+                (locationMatchesTarget(loc, collector.explainTarget) ||
+                  collector.hasMatchingCandidateOverlapping(ruleId, loc))
+              ) {
+                matchedLocations.push(loc);
+                matchedTypeTexts.push(item.typeText);
+              }
+            }
+          }
+          collector.recordQuery({
+            ruleId,
+            op: "typeAtLocation",
+            projectId: project.projectId,
+            provider: "engine",
+            cacheStatus,
+            candidateCount: results.length,
+            durationMs,
+            summary: `typeAtLocation(${targets.length} target(s))`,
+            ...(collector.explainTarget !== undefined
+              ? { matchedLocations }
+              : {}),
+            ...(matchedTypeTexts.length > 0
+              ? { detail: { matchedTypes: matchedTypeTexts } }
+              : {}),
+          });
+        }
+
+        return results;
       },
       report: (input: DiagnosticInput) => {
         assertOpen();
@@ -759,6 +980,145 @@ export async function openSession(
           evidence: input.evidence ?? [],
         });
       },
+      checkpoint: (
+        name: string,
+        target: CheckpointTarget,
+        outcome: CheckpointOutcome,
+        detail?: () => unknown,
+      ) => {
+        if (!collector.isActive()) {
+          return;
+        }
+        collector.recordCheckpoint({
+          ruleId,
+          projectId: project.projectId,
+          name,
+          outcome,
+          resolveLocation: () =>
+            resolveCheckpointLocation(target, syntaxLocations),
+          ...(detail !== undefined ? { detailFn: detail } : {}),
+        });
+      },
+    };
+  }
+
+  async function executeCheckRun(
+    runOptions?: SessionCheckOptions,
+  ): Promise<CheckReport> {
+    assertOpen();
+    const baseRules = runOptions?.rulesOverride
+      ? validateRules(runOptions.rulesOverride)
+      : normalizedConfig.rules;
+    const rules = selectRules(baseRules, runOptions?.ruleIds);
+
+    const explainTarget =
+      runOptions?.at !== undefined
+        ? normalizeTargetSpec(runOptions.at, absCwd)
+        : undefined;
+    if (explainTarget !== undefined && rules.length === 0) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        "At least one rule must be configured or selected via ruleIds to explain a target location.",
+      );
+    }
+
+    const effectiveObserve =
+      runOptions?.observe !== undefined ||
+      runOptions?.observeLimit !== undefined
+        ? normalizeObserveConfig(
+            runOptions.observe ?? sessionObserve.mode,
+            runOptions.observeLimit ?? sessionObserve.limit,
+          )
+        : sessionObserve;
+
+    const configLoadMs = runOptions?.configLoadMs ?? pendingConfigLoadMs;
+    pendingConfigLoadMs = 0;
+    const openMs = pendingOpenDurationMs;
+    pendingOpenDurationMs = 0;
+
+    const collector = new ObservationCollector({
+      mode: effectiveObserve.mode,
+      ...(effectiveObserve.limit !== undefined
+        ? { limit: effectiveObserve.limit }
+        : {}),
+      ...(explainTarget !== undefined ? { explainTarget } : {}),
+      configAndOpenMs: configLoadMs + openMs,
+    });
+
+    if (pendingOpenIoMetrics) {
+      collector.recordRpcCall(pendingOpenIoMetrics);
+      pendingOpenIoMetrics = undefined;
+    }
+
+    const collected: CollectedDiagnostic[] = [];
+    for (const project of currentProjects) {
+      for (const rule of rules) {
+        let ruleEngineMs = 0;
+        const ruleStart = collector.isObserveEnabled() ? performance.now() : 0;
+        const ctx = createRuleContext(
+          rule.id,
+          project,
+          normalizedConfig.models,
+          collected,
+          collector,
+          (ms) => {
+            ruleEngineMs += ms;
+          },
+        );
+        try {
+          await rule.run(ctx);
+        } catch (err) {
+          if (err instanceof VeruleExecutionError) {
+            throw err;
+          }
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new VeruleExecutionError(
+            "RULE_EXECUTION_ERROR",
+            `Rule "${rule.id}" failed: ${detail}`,
+            { cause: err },
+          );
+        } finally {
+          if (collector.isObserveEnabled()) {
+            const ruleElapsed = performance.now() - ruleStart;
+            collector.addRuleExecutionMs(
+              Math.max(0, ruleElapsed - ruleEngineMs),
+            );
+          }
+        }
+      }
+    }
+
+    const diagnostics = buildDiagnostics(collected);
+    const observation = collector.buildObservationReport();
+    const explanations = explainTarget
+      ? rules.map((rule) =>
+          collector.buildExplainResult({
+            ruleId: rule.id,
+            projects: currentProjects,
+            diagnostics,
+          }),
+        )
+      : undefined;
+
+    return {
+      reportVersion: REPORT_SCHEMA_VERSION,
+      status: diagnostics.length > 0 ? "findings" : "clean",
+      projects: currentProjects,
+      diagnostics,
+      gaps: [],
+      identity: computeReportIdentity(
+        currentSnapshotDigest,
+        resolveEntries(normalizedConfig),
+        rules,
+        normalizedConfig.models,
+      ),
+      ...(observation !== undefined ? { observation } : {}),
+      ...(explanations !== undefined && explanations.length === 1
+        ? { explanation: explanations[0] }
+        : {}),
+      ...(explanations !== undefined && explanations.length > 1
+        ? { explanations }
+        : {}),
     };
   }
 
@@ -772,47 +1132,15 @@ export async function openSession(
     get memory() {
       return readMemoryStats(lastEngineRssBytes);
     },
-    check: async (rulesOverride?: readonly Rule[]) => {
-      assertOpen();
-      const rules = rulesOverride
-        ? validateRules(rulesOverride)
-        : normalizedConfig.rules;
-      const models = normalizedConfig.models;
-      const collected: CollectedDiagnostic[] = [];
-
-      for (const project of currentProjects) {
-        for (const rule of rules) {
-          const ctx = createRuleContext(rule.id, project, models, collected);
-          try {
-            await rule.run(ctx);
-          } catch (err) {
-            if (err instanceof VeruleExecutionError) {
-              throw err;
-            }
-            const detail = err instanceof Error ? err.message : String(err);
-            throw new VeruleExecutionError(
-              "RULE_EXECUTION_ERROR",
-              `Rule "${rule.id}" failed: ${detail}`,
-              { cause: err },
-            );
-          }
-        }
+    check: (optionsOrRules?: readonly Rule[] | SessionCheckOptions) => {
+      if (isSessionCheckOptions(optionsOrRules)) {
+        return executeCheckRun(optionsOrRules);
       }
-
-      const diagnostics = buildDiagnostics(collected);
-      return {
-        reportVersion: REPORT_SCHEMA_VERSION,
-        status: diagnostics.length > 0 ? "findings" : "clean",
-        projects: currentProjects,
-        diagnostics,
-        gaps: [],
-        identity: computeReportIdentity(
-          currentSnapshotDigest,
-          resolveEntries(normalizedConfig),
-          rules,
-          models,
-        ),
-      };
+      return executeCheckRun(
+        optionsOrRules !== undefined
+          ? { rulesOverride: optionsOrRules }
+          : undefined,
+      );
     },
     update: async (updateOptions?: SessionUpdateOptions) => {
       assertOpen();
@@ -862,6 +1190,34 @@ export async function openSession(
         memory: readMemoryStats(updated.engineRssBytes),
       };
     },
+    explain: async (explainOptions: ExplainOptions): Promise<ExplainReport> => {
+      const report = await executeCheckRun({
+        ...(explainOptions.rulesOverride !== undefined
+          ? { rulesOverride: explainOptions.rulesOverride }
+          : {}),
+        ...(explainOptions.ruleId !== undefined
+          ? { ruleIds: [explainOptions.ruleId] }
+          : {}),
+        at: explainOptions.at,
+        ...(explainOptions.observe !== undefined
+          ? { observe: explainOptions.observe }
+          : {}),
+        ...(explainOptions.observeLimit !== undefined
+          ? { observeLimit: explainOptions.observeLimit }
+          : {}),
+      });
+      const primaryExplanation = report.explanation ?? report.explanations?.[0];
+      if (!primaryExplanation) {
+        throw new VeruleExecutionError(
+          "ENGINE_ERROR",
+          "Failed to generate explanation for the requested target.",
+        );
+      }
+      return {
+        ...report,
+        explanation: primaryExplanation,
+      };
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -884,7 +1240,14 @@ export async function openSession(
 export async function runCheck(options: RunCheckOptions): Promise<CheckReport> {
   const session = await openSession(options);
   try {
-    return await session.check();
+    return await session.check({
+      ...(options.ruleIds !== undefined ? { ruleIds: options.ruleIds } : {}),
+      ...(options.at !== undefined ? { at: options.at } : {}),
+      ...(options.observe !== undefined ? { observe: options.observe } : {}),
+      ...(options.observeLimit !== undefined
+        ? { observeLimit: options.observeLimit }
+        : {}),
+    });
   } finally {
     await session.close();
   }

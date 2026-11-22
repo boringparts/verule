@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import {
   createInterface,
   type Interface as ReadlineInterface,
@@ -6,13 +7,30 @@ import {
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
-import { VeruleExecutionError, type VeruleErrorCode } from "./types.ts";
+import type { EngineCallIoMetrics, EngineRpcMetrics } from "./observation.ts";
+import {
+  VeruleExecutionError,
+  type ObserveMode,
+  type VeruleErrorCode,
+} from "./types.ts";
+
+export type EngineObserveRequest = {
+  readonly mode: ObserveMode;
+  readonly maxItems?: number;
+  readonly maxBytes?: number;
+};
+
+export type RpcRequestOptions = {
+  readonly observe?: EngineObserveRequest;
+  readonly onMetrics?: (metrics: EngineCallIoMetrics) => void;
+};
 
 type RpcResponse =
   | {
       readonly id: number;
       readonly ok: true;
       readonly result: unknown;
+      readonly metrics?: EngineRpcMetrics;
     }
   | {
       readonly id: number;
@@ -24,6 +42,11 @@ type RpcResponse =
     };
 
 type PendingCall = {
+  readonly isQueryBatch: boolean;
+  readonly bytesSent: number;
+  readonly encodeMs: number;
+  readonly getWriteMs: () => number;
+  readonly onMetrics: ((metrics: EngineCallIoMetrics) => void) | undefined;
   readonly resolve: (value: unknown) => void;
   readonly reject: (reason: Error) => void;
 };
@@ -82,6 +105,20 @@ export class EngineClient {
       if (!call) return;
       this.#pending.delete(parsed.id);
 
+      if (call.onMetrics) {
+        const bytesReceived = Buffer.byteLength(line, "utf8") + 1;
+        call.onMetrics({
+          isQueryBatch: call.isQueryBatch,
+          bytesSent: call.bytesSent,
+          bytesReceived,
+          encodeMs: call.encodeMs,
+          writeMs: call.getWriteMs(),
+          ...(parsed.ok && parsed.metrics !== undefined
+            ? { engineMetrics: parsed.metrics }
+            : {}),
+        });
+      }
+
       if (parsed.ok) {
         call.resolve(parsed.result);
       } else {
@@ -127,7 +164,11 @@ export class EngineClient {
     this.#pending.clear();
   }
 
-  request<T>(method: string, params: Record<string, unknown>): Promise<T> {
+  request<T>(
+    method: string,
+    params: Record<string, unknown>,
+    options?: RpcRequestOptions,
+  ): Promise<T> {
     if (this.#closed) {
       return Promise.reject(
         new VeruleExecutionError(
@@ -138,15 +179,38 @@ export class EngineClient {
     }
 
     const id = this.#nextId++;
-    const line = `${JSON.stringify({ id, method, params })}\n`;
+    const trackMetrics = options?.onMetrics !== undefined;
+    const observePayload =
+      options?.observe && options.observe.mode !== "off"
+        ? options.observe
+        : undefined;
+
+    const encodeStart = trackMetrics ? performance.now() : 0;
+    const payload = observePayload
+      ? { id, method, params, observe: observePayload }
+      : { id, method, params };
+    const line = `${JSON.stringify(payload)}\n`;
+    const encodeMs = trackMetrics ? performance.now() - encodeStart : 0;
+    const bytesSent = trackMetrics ? Buffer.byteLength(line, "utf8") : 0;
 
     return new Promise<T>((resolve, reject) => {
+      let writeMs = 0;
+      const writeStart = trackMetrics ? performance.now() : 0;
+
       this.#pending.set(id, {
+        isQueryBatch: method === "query.batch",
+        bytesSent,
+        encodeMs,
+        getWriteMs: () => writeMs,
+        onMetrics: options?.onMetrics,
         resolve: (value) => resolve(value as T),
         reject,
       });
 
       this.#child.stdin.write(line, "utf8", (err) => {
+        if (trackMetrics) {
+          writeMs = performance.now() - writeStart;
+        }
         if (err) {
           this.#pending.delete(id);
           reject(

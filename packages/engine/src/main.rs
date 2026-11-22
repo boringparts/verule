@@ -1,3 +1,4 @@
+mod observe;
 mod serve;
 
 use std::{env, ffi::OsString, process::ExitCode, thread};
