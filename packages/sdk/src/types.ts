@@ -1,4 +1,8 @@
 import type {
+  AdditionalInputEntry,
+  AdditionalInputSource,
+} from "./additional-inputs.ts";
+import type {
   BranchCoverageItem,
   BranchCoverageOptions,
   FunctionBranchesResult,
@@ -369,6 +373,7 @@ export type CheckReport = {
   readonly status: "clean" | "findings";
   readonly projects: readonly ProjectSummary[];
   readonly fileOrigins: readonly SourceFileOrigin[];
+  readonly additionalInputs: readonly AdditionalInputEntry[];
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
   readonly identity: ReportIdentity;
@@ -467,6 +472,10 @@ export type RuleContext = {
     targets: readonly (DeclarationRef | CallRef | SignatureRef)[],
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedSyntaxLookupRow<S>[]>;
+  /** Registers a local non-source file read by this rule as an additional input. */
+  registerAdditionalInput: (filePath: string) => AdditionalInputEntry;
+  /** Registers a local non-source file as an additional input and reads its UTF-8 content. */
+  readAdditionalInput: (filePath: string) => string;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.
@@ -491,6 +500,7 @@ export type VeruleConfig = {
   readonly projects?: readonly string[];
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
+  readonly additionalInputs?: readonly string[];
 };
 
 export type NormalizedVeruleConfig = {
@@ -498,6 +508,7 @@ export type NormalizedVeruleConfig = {
   readonly projects?: readonly string[];
   readonly rules: readonly Rule[];
   readonly models: readonly Model[];
+  readonly additionalInputs: readonly string[];
 };
 
 export type SessionCheckOptions = {
@@ -552,6 +563,7 @@ export type SessionUpdateOptions = {
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
   readonly entries?: readonly string[];
+  readonly additionalInputs?: readonly string[];
 };
 
 export type SessionUpdateResult = {
@@ -559,6 +571,7 @@ export type SessionUpdateResult = {
   readonly snapshotId: number;
   readonly projects: readonly ProjectSummary[];
   readonly fileOrigins: readonly SourceFileOrigin[];
+  readonly additionalInputs: readonly AdditionalInputEntry[];
   readonly recomputation: RecomputationScope;
   readonly memory: MemoryStats;
 };
@@ -567,7 +580,12 @@ export type AnalysisSession = {
   readonly snapshotId: number;
   readonly projects: readonly ProjectSummary[];
   readonly fileOrigins: readonly SourceFileOrigin[];
+  readonly additionalInputs: readonly AdditionalInputEntry[];
   readonly memory: MemoryStats;
+  registerAdditionalInput: (
+    filePath: string,
+    source: AdditionalInputSource,
+  ) => AdditionalInputEntry;
   check: (
     optionsOrRules?: readonly Rule[] | SessionCheckOptions,
   ) => Promise<CheckReport>;
