@@ -12,6 +12,7 @@ export {
   openSession,
   runCheck,
 } from "./session.ts";
+export { requestSharedReport, startSharedSession } from "./shared-session.ts";
 export { watchProject } from "./watch.ts";
 export type {
   BranchCoverageItem,
@@ -91,6 +92,7 @@ export {
   type ProjectSummary,
   type RecomputationScope,
   type ReportIdentity,
+  type RequestSharedReportOptions,
   type Rule,
   type RuleContext,
   type RuleIdentitySummary,
@@ -98,6 +100,8 @@ export {
   type SessionCheckOptions,
   type SessionUpdateOptions,
   type SessionUpdateResult,
+  type SharedSession,
+  type SharedSessionOptions,
   type SignatureRef,
   type SourceFileOrigin,
   type SourceFileProjectOrigin,
