@@ -21,9 +21,11 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@verule/adapter-drizzle": "workspace:*",
     "@verule/adapter-zod": "workspace:*",
     "@verule/cli": "workspace:*",
     "@verule/engine": "workspace:*",
+    "@verule/rules-reference": "workspace:*",
     "@verule/sdk": "workspace:*"
   },
   "devDependencies": {
