@@ -35,6 +35,8 @@ import {
   executeFactQuery,
   validateAdapters,
   type AdapterContext,
+  type EngineFactExtractionOptions,
+  type FactContribution,
   type FactQueryOptions,
   type FactType,
   type LibraryAdapter,
@@ -79,6 +81,7 @@ import {
   type CheckpointTarget,
   type DiagnosticInput,
   type DiagnosticLocation,
+  type Evidence,
   type ExplainOptions,
   type ExplainReport,
   type FindSyntaxOptions,
@@ -89,6 +92,7 @@ import {
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProgramObjectKind,
+  type ProgramRef,
   type ProjectSummary,
   type RecomputationScope,
   type ReportIdentity,
@@ -1603,6 +1607,89 @@ export async function openSession(
           runListBranches(functions, false),
         branchCoverage: (query: BranchCoverageOptions) =>
           runBranchCoverage(query, false),
+        extractEngineFacts: async <
+          SubjectKind extends ProgramObjectKind,
+          Condition = unknown,
+          Value = unknown,
+        >(
+          extractOptions: EngineFactExtractionOptions<SubjectKind, Condition>,
+        ): Promise<readonly FactContribution<SubjectKind, Value>[]> => {
+          assertActiveSnapshot();
+          if (extractOptions.targets !== undefined) {
+            if (extractOptions.targets.length === 0) {
+              return [];
+            }
+            validateProgramRefs(
+              extractOptions.targets,
+              sessionToken,
+              activeSnapshotId,
+              project.projectId,
+            );
+          }
+
+          const queryStart = collector.isActive() ? performance.now() : 0;
+          const batch = await client.request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId: activeSnapshotId,
+              projectId: project.projectId,
+              steps: [
+                {
+                  op: "extractFacts",
+                  factTypeId: extractOptions.factTypeId,
+                  providerId: extractOptions.providerId,
+                  ...(extractOptions.reportProviderId !== undefined
+                    ? { reportProviderId: extractOptions.reportProviderId }
+                    : {}),
+                  ...(extractOptions.targets !== undefined
+                    ? {
+                        targets: extractOptions.targets.map(
+                          (target) => target.handleId,
+                        ),
+                      }
+                    : {}),
+                  ...(extractOptions.condition !== undefined
+                    ? { condition: extractOptions.condition }
+                    : {}),
+                },
+              ],
+            },
+            buildRpcOptions(collector),
+          );
+
+          if (collector.isActive()) {
+            const durationMs = performance.now() - queryStart;
+            collector.addEngineQueryMs(durationMs);
+            recordRuleEngineMs(durationMs);
+          }
+
+          const rawItems = (batch.results[0]?.items ?? []) as readonly {
+            readonly subject: string;
+            readonly subjectLocation: DiagnosticLocation;
+            readonly value: Value;
+            readonly evidence?: readonly Evidence[];
+            readonly gaps?: readonly Gap[];
+          }[];
+
+          return rawItems.map((item) => {
+            const ref = makeProgramRef(
+              "syntax",
+              sessionToken,
+              project.projectId,
+              activeSnapshotId,
+              item.subject,
+            );
+            syntaxLocations.set(ref, item.subjectLocation);
+            return {
+              subject: ref as unknown as ProgramRef<SubjectKind>,
+              value: item.value,
+              ...(item.evidence !== undefined
+                ? { evidence: item.evidence }
+                : {}),
+              ...(item.gaps !== undefined ? { gaps: item.gaps } : {}),
+            };
+          });
+        },
         registerAdditionalInput: (filePath: string) => {
           assertActiveSnapshot();
           onAdditionalInput(filePath);

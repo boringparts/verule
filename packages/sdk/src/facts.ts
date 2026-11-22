@@ -107,6 +107,18 @@ export type FactResult<
   readonly providers: readonly string[];
 };
 
+/** Options passed to `AdapterContext.extractEngineFacts`. */
+export type EngineFactExtractionOptions<
+  SubjectKind extends ProgramObjectKind = ProgramObjectKind,
+  Condition = unknown,
+> = {
+  readonly factTypeId: string;
+  readonly providerId: string;
+  readonly reportProviderId?: string;
+  readonly targets?: readonly ProgramRef<SubjectKind>[];
+  readonly condition?: Condition;
+};
+
 /** Read-only query context exposed to TypeScript `LibraryAdapter` providers. */
 export type AdapterContext = {
   readonly project: ProjectSummary;
@@ -129,6 +141,14 @@ export type AdapterContext = {
   valuePropagation: RuleContext["valuePropagation"];
   callEffects: RuleContext["callEffects"];
   instanceCleanup: RuleContext["instanceCleanup"];
+  /** Invokes an engine-internal built-in fact provider on the active project snapshot. */
+  extractEngineFacts: <
+    SubjectKind extends ProgramObjectKind,
+    Condition = unknown,
+    Value = unknown,
+  >(
+    options: EngineFactExtractionOptions<SubjectKind, Condition>,
+  ) => Promise<readonly FactContribution<SubjectKind, Value>[]>;
   /** Registers a local non-source file read by this adapter as an additional input. */
   registerAdditionalInput: RuleContext["registerAdditionalInput"];
   /** Registers a local non-source file as an additional input and reads its UTF-8 content. */

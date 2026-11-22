@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,12 +43,20 @@ pub struct EngineStepDetail {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStepMetrics {
     pub op: &'static str,
-    pub provider: &'static str,
+    pub provider: String,
     pub cache_status: &'static str,
     pub duration_ms: f64,
     pub candidate_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Vec<EngineStepDetail>>,
+}
+
+/// Built-in engine fact provider extraction counters for one RPC call.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineProviderExtractionStats {
+    pub extractions: usize,
+    pub candidates: usize,
 }
 
 /// Engine-side metrics attached to an RPC response only when observation is enabled.
@@ -61,6 +69,8 @@ pub struct EngineRpcMetrics {
     pub dropped_count: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<EngineStepMetrics>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_extractions: BTreeMap<String, EngineProviderExtractionStats>,
 }
 
 /// Tracks engine-side timing, candidate counts, and bounded detail records for one RPC call.
@@ -75,6 +85,7 @@ pub struct ObserveCollector {
     truncated: bool,
     dropped_count: usize,
     steps: Vec<EngineStepMetrics>,
+    provider_extractions: BTreeMap<String, EngineProviderExtractionStats>,
 }
 
 impl ObserveCollector {
@@ -97,6 +108,7 @@ impl ObserveCollector {
             truncated: false,
             dropped_count: 0,
             steps: Vec::new(),
+            provider_extractions: BTreeMap::new(),
         }
     }
 
@@ -128,6 +140,38 @@ impl ObserveCollector {
     pub fn record_step(
         &mut self,
         op: &'static str,
+        step_start: Option<Instant>,
+        candidate_count: usize,
+        raw_details: Vec<EngineStepDetail>,
+    ) {
+        self.push_step_metrics(op, "engine", step_start, candidate_count, raw_details);
+    }
+
+    pub fn record_provider_step(
+        &mut self,
+        op: &'static str,
+        provider: &str,
+        engine_provider_id: &str,
+        step_start: Option<Instant>,
+        candidate_count: usize,
+        raw_details: Vec<EngineStepDetail>,
+    ) {
+        if !self.is_active() {
+            return;
+        }
+        let stats = self
+            .provider_extractions
+            .entry(engine_provider_id.to_string())
+            .or_default();
+        stats.extractions += 1;
+        stats.candidates += candidate_count;
+        self.push_step_metrics(op, provider, step_start, candidate_count, raw_details);
+    }
+
+    fn push_step_metrics(
+        &mut self,
+        op: &'static str,
+        provider: &str,
         step_start: Option<Instant>,
         candidate_count: usize,
         raw_details: Vec<EngineStepDetail>,
@@ -175,7 +219,7 @@ impl ObserveCollector {
 
         self.steps.push(EngineStepMetrics {
             op,
-            provider: "engine",
+            provider: provider.to_string(),
             cache_status: "computed",
             duration_ms,
             candidate_count,
@@ -192,6 +236,7 @@ impl ObserveCollector {
             truncated: self.truncated,
             dropped_count: self.dropped_count,
             steps: self.steps,
+            provider_extractions: self.provider_extractions,
         })
     }
 }

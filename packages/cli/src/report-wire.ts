@@ -156,6 +156,15 @@ export const observationSchema = z.object({
     .optional(),
   truncated: z.boolean(),
   droppedCount: z.number().int().nonnegative(),
+  engineExtractions: z
+    .record(
+      z.string(),
+      z.object({
+        extractions: z.number().int().nonnegative(),
+        candidates: z.number().int().nonnegative(),
+      }),
+    )
+    .optional(),
   details: z.array(observationDetailEntrySchema).optional(),
 });
 

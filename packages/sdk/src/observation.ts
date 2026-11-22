@@ -6,6 +6,7 @@ import {
   type CheckpointOutcome,
   type Diagnostic,
   type DiagnosticLocation,
+  type EngineProviderExtractionStats,
   type ExplainCheckpointTrace,
   type ExplainCleanupPath,
   type ExplainQueryStep,
@@ -42,6 +43,9 @@ export type EngineRpcMetrics = {
   readonly truncated: boolean;
   readonly droppedCount: number;
   readonly steps?: readonly EngineStepMetrics[];
+  readonly providerExtractions?: Readonly<
+    Record<string, EngineProviderExtractionStats>
+  >;
 };
 
 export type EngineCallIoMetrics = {
@@ -391,6 +395,10 @@ export class ObservationCollector {
   #droppedCount = 0;
   #usedDetailBytes = 0;
   readonly #providers = new Set<string>();
+  readonly #engineExtractions = new Map<
+    string,
+    { extractions: number; candidates: number }
+  >();
   readonly #details: ObservationDetailEntry[] = [];
   readonly #queriesByRule = new Map<string, QueryTraceRecord[]>();
   readonly #checkpointsByRule = new Map<string, CheckpointTraceRecord[]>();
@@ -496,6 +504,19 @@ export class ObservationCollector {
     }
     if (engineMetrics.droppedCount > 0) {
       this.#droppedCount += engineMetrics.droppedCount;
+    }
+    if (engineMetrics.providerExtractions) {
+      for (const [providerId, stats] of Object.entries(
+        engineMetrics.providerExtractions,
+      )) {
+        const current = this.#engineExtractions.get(providerId) ?? {
+          extractions: 0,
+          candidates: 0,
+        };
+        current.extractions += stats.extractions;
+        current.candidates += stats.candidates;
+        this.#engineExtractions.set(providerId, current);
+      }
     }
   }
 
@@ -733,6 +754,18 @@ export class ObservationCollector {
       candidateCount: this.#candidateCount,
       checkpointCount: this.#checkpointCount,
       providers: [...this.#providers].toSorted(),
+      ...(this.#engineExtractions.size > 0
+        ? {
+            engineExtractions: Object.fromEntries(
+              [...this.#engineExtractions.entries()]
+                .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([k, v]) => [
+                  k,
+                  { extractions: v.extractions, candidates: v.candidates },
+                ]),
+            ),
+          }
+        : {}),
       ...(this.limit !== undefined ? { limit: this.limit } : {}),
       truncated: this.#truncated,
       droppedCount: this.#droppedCount,

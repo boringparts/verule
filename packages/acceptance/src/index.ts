@@ -1,4 +1,21 @@
 export {
+  runControlledAdapterCostComparison,
+  runOpenStatusAdapterCostAcceptance,
+  type ConfigBehaviorSample,
+  type ControlledAdapterCostResult,
+  type FactAlignmentSummary,
+  type LatencyDistribution,
+  type ObserveOverheadComparison,
+  type OpenStatusAdapterCostResult,
+  type OpenStatusWatchEditStep,
+  type OpenStatusWhoamiAlignmentRecord,
+  type ProviderCostSample,
+  type ProviderSelectionComparison,
+  type ProviderSelectionSample,
+  type ReuseAndInvalidationSummary,
+  type ThreeConfigMatrix,
+} from "./adapter-cost.ts";
+export {
   CORE_VERULE_PACKAGES,
   packWorkspaceArtifacts,
   type PackedArtifact,

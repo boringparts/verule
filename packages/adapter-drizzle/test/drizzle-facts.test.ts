@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import {
   QueryRowProjectionFact,
   createDrizzleAdapter,
+  createRustDrizzleAdapter,
   drizzleAdapter,
+  rustDrizzleAdapter,
   type QueryRowProjectionFactValue,
 } from "@verule/adapter-drizzle";
 import {
@@ -659,12 +661,13 @@ void describe("@verule/adapter-drizzle", () => {
         join(root, "src", "consumer.ts"),
         [
           'import { defineConfig, defineRule } from "@verule/sdk";',
-          'import { QueryRowProjectionFact, drizzleAdapter } from "@verule/adapter-drizzle";',
+          'import { QueryRowProjectionFact, createRustDrizzleAdapter, drizzleAdapter, rustDrizzleAdapter } from "@verule/adapter-drizzle";',
           "",
+          "const customRust = createRustDrizzleAdapter({ id: 'custom-rust' });",
           "const rule = defineRule({",
           '  id: "consumer-drizzle-rule",',
           "  run: async (ctx) => {",
-          '    const rows = await ctx.facts(QueryRowProjectionFact, { condition: { library: "drizzle" } });',
+          '    const rows = await ctx.facts(QueryRowProjectionFact, { condition: { library: "drizzle" }, providerId: "drizzle-rust" });',
           "    for (const row of rows) {",
           "      void row.value.projectedColumns;",
           "      void row.value.relations;",
@@ -672,7 +675,7 @@ void describe("@verule/adapter-drizzle", () => {
           "  },",
           "});",
           "",
-          'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [drizzleAdapter], rules: [rule] });',
+          'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [drizzleAdapter, rustDrizzleAdapter, customRust], rules: [rule] });',
           "",
         ].join("\n"),
         "utf8",
@@ -682,6 +685,215 @@ void describe("@verule/adapter-drizzle", () => {
         tscBin,
         ["-p", join(root, "tsconfig.json"), "--pretty", "false"],
         { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("extracts identical QueryRowProjectionFact values, evidence, and gaps via rustDrizzleAdapter (id: drizzle-rust) and supports zero-extraction when unqueried", async () => {
+    const root = createTempProject({
+      "src/drizzle-stub.ts": DRIZZLE_STUB,
+      "src/schema.ts": [
+        'import { integer, pgTable, relations, serial, sqliteTable, text } from "./drizzle-stub.js";',
+        "",
+        'export const users = sqliteTable("users", {',
+        '  id: integer("id").primaryKey(),',
+        '  fullName: text("full_name").notNull(),',
+        '  age: integer("user_age"),',
+        "});",
+        "",
+        'export const workspace = pgTable("workspace", {',
+        '  id: serial("id").primaryKey(),',
+        '  slug: text("slug").notNull(),',
+        '  name: text("display_name"),',
+        '  plan: text("plan").notNull().default("free"),',
+        "});",
+        "",
+        'export const page = sqliteTable("page", {',
+        '  id: integer("id").primaryKey(),',
+        '  workspaceId: integer("workspace_id").notNull(),',
+        '  slug: text("slug").notNull(),',
+        '  customDomain: text("custom_domain"),',
+        "});",
+        "",
+        "export const pageRelations = relations(page, ({ one }) => ({",
+        "  workspace: one(workspace),",
+        "}));",
+        "",
+      ].join("\n"),
+      "src/queries.ts": [
+        'import { db, eq, getTableColumns } from "./drizzle-stub.js";',
+        'import { users, workspace } from "./schema.js";',
+        "",
+        "declare function extraCols(): Record<string, unknown>;",
+        "",
+        "export async function getUserBrief() {",
+        "  return await db",
+        "    .select({",
+        "      id: users.id,",
+        "      displayName: users.fullName,",
+        "    })",
+        "    .from(users)",
+        "    .get();",
+        "}",
+        "",
+        "export async function getWorkspaceFull(workspaceId: number) {",
+        "  return await db",
+        "    .select()",
+        "    .from(workspace)",
+        "    .where(eq(workspace.id, workspaceId))",
+        "    .get();",
+        "}",
+        "",
+        "export async function getGatePage() {",
+        "  return await db.query.page.findFirst({",
+        "    columns: {",
+        "      slug: true,",
+        "      customDomain: true,",
+        "    },",
+        "    with: {",
+        "      workspace: true,",
+        "    },",
+        "  });",
+        "}",
+        "",
+        "export function getMixedAndHelper() {",
+        "  const a = db.select({ id: users.id, ...extraCols() }).from(users).get();",
+        "  const b = db.select({ ...getTableColumns(users) }).from(users).get();",
+        "  return { a, b };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let tsFacts: readonly FactResult<
+        "syntax" | "call" | "declaration",
+        QueryRowProjectionFactValue
+      >[] = [];
+      let rustFacts: readonly FactResult<
+        "syntax" | "call" | "declaration",
+        QueryRowProjectionFactValue
+      >[] = [];
+
+      const tsReport = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: [drizzleAdapter],
+          rules: [
+            defineRule({
+              id: "collect-ts",
+              run: async (ctx) => {
+                tsFacts = await ctx.facts(QueryRowProjectionFact);
+              },
+            }),
+          ],
+        }),
+        observe: "detail",
+      });
+      assert.equal(tsReport.status, "clean");
+
+      let rustOnExtractCount = 0;
+      const trackedRust = createRustDrizzleAdapter({
+        onExtract: () => {
+          rustOnExtractCount += 1;
+        },
+      });
+      assert.equal(rustDrizzleAdapter.id, "drizzle-rust");
+
+      const rustReport = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: [trackedRust],
+          rules: [
+            defineRule({
+              id: "collect-rust",
+              run: async (ctx) => {
+                rustFacts = await ctx.facts(QueryRowProjectionFact);
+              },
+            }),
+          ],
+        }),
+        observe: "detail",
+      });
+      assert.equal(rustReport.status, "clean");
+      assert.equal(rustOnExtractCount, 1);
+      assert.ok(rustReport.observation?.providers.includes("drizzle-rust"));
+      assert.equal(
+        rustReport.observation?.engineExtractions?.["drizzle-rust"]
+          ?.extractions,
+        1,
+      );
+
+      assert.equal(rustFacts.length, tsFacts.length);
+      const normalizeFact = (
+        f: FactResult<
+          "syntax" | "call" | "declaration",
+          QueryRowProjectionFactValue
+        >,
+      ) => ({
+        handleId: f.subject.handleId,
+        value: f.value,
+        evidence: f.evidence,
+        gaps: f.gaps,
+      });
+
+      const sortKey = (v: QueryRowProjectionFactValue) =>
+        [
+          v.queryKind,
+          v.tableName ?? "",
+          v.cardinality,
+          v.projectedColumns.join(","),
+          String(v.hasDynamicColumns),
+        ].join("|");
+      const tsNormalized = tsFacts
+        .map(normalizeFact)
+        .toSorted((a, b) => sortKey(a.value).localeCompare(sortKey(b.value)));
+      const rustNormalized = rustFacts
+        .map(normalizeFact)
+        .toSorted((a, b) => sortKey(a.value).localeCompare(sortKey(b.value)));
+
+      assert.equal(rustNormalized.length, 5);
+      for (let i = 0; i < tsNormalized.length; i += 1) {
+        assert.deepEqual(rustNormalized[i]!.value, tsNormalized[i]!.value);
+        assert.deepEqual(
+          rustNormalized[i]!.evidence,
+          tsNormalized[i]!.evidence,
+        );
+        assert.deepEqual(rustNormalized[i]!.gaps, tsNormalized[i]!.gaps);
+      }
+
+      // Unqueried check: rust extraction count MUST be 0
+      rustOnExtractCount = 0;
+      const unqueriedReport = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: [trackedRust],
+          rules: [
+            defineRule({
+              id: "no-fact-query",
+              run: async (ctx) => {
+                await ctx.findSyntax({ kinds: ["CallExpression"] });
+              },
+            }),
+          ],
+        }),
+        observe: "detail",
+      });
+      assert.equal(unqueriedReport.status, "clean");
+      assert.equal(rustOnExtractCount, 0);
+      assert.equal(
+        unqueriedReport.observation?.providers.includes("drizzle-rust"),
+        false,
+      );
+      assert.equal(
+        unqueriedReport.observation?.engineExtractions?.["drizzle-rust"]
+          ?.extractions ?? 0,
+        0,
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

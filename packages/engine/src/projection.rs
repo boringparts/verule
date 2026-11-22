@@ -25,6 +25,7 @@ use crate::calls_values::{
     run_callers_of, run_value_propagation,
 };
 use crate::cfg::GapItem;
+use crate::drizzle_facts::{EngineFactContributionPayload, run_extract_facts};
 use crate::instance_identity::{
     InstanceModelInput, InstanceProjectionRow, InstanceResolutionRow, InstanceSelect,
     run_project_instances, run_resolve_instances,
@@ -179,6 +180,18 @@ pub enum QueryStep {
         targets: Vec<String>,
         #[serde(default)]
         models: Vec<EffectsModelInput>,
+    },
+    ExtractFacts {
+        #[serde(rename = "factTypeId")]
+        fact_type_id: String,
+        #[serde(rename = "providerId")]
+        provider_id: String,
+        #[serde(default, rename = "reportProviderId")]
+        report_provider_id: Option<String>,
+        #[serde(default)]
+        targets: Option<Vec<String>>,
+        #[serde(default)]
+        condition: Option<Value>,
     },
 }
 
@@ -420,6 +433,9 @@ enum StepResult {
     },
     InstanceCleanup {
         items: Vec<InstanceCleanupScopeRow>,
+    },
+    ExtractFacts {
+        items: Vec<EngineFactContributionPayload>,
     },
 }
 
@@ -773,6 +789,27 @@ fn execute_step(
             step_start,
             observer,
         ),
+        other @ (QueryStep::ResolveInstances { .. }
+        | QueryStep::ProjectInstances { .. }
+        | QueryStep::ResolveImplementations { .. }
+        | QueryStep::CallEffects { .. }
+        | QueryStep::InstanceCleanup { .. }
+        | QueryStep::ExtractFacts { .. }) => execute_extended_step(
+            snapshot, project_id, program, checker, other, step_start, observer,
+        ),
+    }
+}
+
+fn execute_extended_step(
+    snapshot: &mut SnapshotState,
+    project_id: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    step: QueryStep,
+    step_start: Option<Instant>,
+    observer: &mut ObserveCollector,
+) -> Result<StepResult, RpcErr> {
+    match step {
         QueryStep::ResolveInstances { targets, models } => {
             let items =
                 run_resolve_instances(snapshot, project_id, program, checker, &targets, &models)?;
@@ -796,11 +833,33 @@ fn execute_step(
             );
             Ok(StepResult::ResolveImplementations { items })
         }
-        other @ (QueryStep::CallEffects { .. } | QueryStep::InstanceCleanup { .. }) => {
-            execute_effects_step(
-                snapshot, project_id, program, checker, other, step_start, observer,
-            )
+        QueryStep::ExtractFacts {
+            fact_type_id,
+            provider_id,
+            report_provider_id,
+            targets,
+            condition,
+        } => {
+            let target_list = targets.as_deref().unwrap_or(&[]);
+            let items = run_extract_facts(
+                snapshot,
+                project_id,
+                program,
+                checker,
+                &fact_type_id,
+                &provider_id,
+                report_provider_id.as_deref(),
+                target_list,
+                targets.is_some(),
+                condition.as_ref(),
+                step_start,
+                observer,
+            )?;
+            Ok(StepResult::ExtractFacts { items })
         }
+        other => execute_effects_step(
+            snapshot, project_id, program, checker, other, step_start, observer,
+        ),
     }
 }
 
@@ -1339,7 +1398,7 @@ fn collect_matching_nodes(
     });
 }
 
-fn safe_expression(node: P<Node>) -> Option<P<Node>> {
+pub fn safe_expression(node: P<Node>) -> Option<P<Node>> {
     match node.kind() {
         Kind::PropertyAccessExpression
         | Kind::ElementAccessExpression
@@ -1379,7 +1438,7 @@ fn safe_expression(node: P<Node>) -> Option<P<Node>> {
     }
 }
 
-fn safe_initializer(node: P<Node>) -> Option<P<Node>> {
+pub fn safe_initializer(node: P<Node>) -> Option<P<Node>> {
     match node.kind() {
         Kind::VariableDeclaration
         | Kind::Parameter
