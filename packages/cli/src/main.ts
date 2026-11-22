@@ -57,6 +57,17 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
     `Explanation [${exp.ruleId}] @ ${exp.target.file}${linePart}${colPart}: ${exp.status} (inCandidates=${String(exp.inCandidates)})`,
   );
   lines.push(`  summary: ${exp.summary}`);
+  if (exp.inlineIgnore?.matched) {
+    const atSuffix = exp.inlineIgnore.commentAt
+      ? ` at ${exp.inlineIgnore.commentAt.file}:${exp.inlineIgnore.commentAt.line}:${exp.inlineIgnore.commentAt.column}`
+      : "";
+    const reasonSuffix = exp.inlineIgnore.reason
+      ? ` -- ${exp.inlineIgnore.reason}`
+      : "";
+    lines.push(
+      `  inlineIgnore: suppressed by verule-ignore-next-code-line${atSuffix}${reasonSuffix}`,
+    );
+  }
   if (exp.excludedByCheckpoint) {
     const detailSuffix =
       exp.excludedByCheckpoint.detail !== undefined
