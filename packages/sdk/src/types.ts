@@ -348,6 +348,11 @@ export type ObservationOverhead = {
   readonly writeMs: number;
 };
 
+export type EngineProviderExtractionStats = {
+  readonly extractions: number;
+  readonly candidates: number;
+};
+
 export type ObservationDetailEntry = {
   readonly kind: "query" | "checkpoint" | "engineStep";
   readonly ruleId?: string;
@@ -377,6 +382,9 @@ export type ObservationReport = {
   readonly limit?: ObserveLimit;
   readonly truncated: boolean;
   readonly droppedCount: number;
+  readonly engineExtractions?: Readonly<
+    Record<string, EngineProviderExtractionStats>
+  >;
   readonly details?: readonly ObservationDetailEntry[];
 };
 

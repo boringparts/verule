@@ -22,6 +22,7 @@ import {
 export type RowProjectionValidatorRuleOptions = {
   readonly id?: string;
   readonly description?: string;
+  readonly drizzleProviderId?: string;
 };
 
 type QueryFact = FactResult<QueryRowSubjectKind, QueryRowProjectionFactValue>;
@@ -514,7 +515,12 @@ export function createRowProjectionSatisfiesValidatorRule(
       "Verify that statically projected database query rows satisfy all required input fields of downstream validators.",
     run: async (ctx) => {
       const [queryFacts, validatorFacts] = await Promise.all([
-        ctx.facts(QueryRowProjectionFact),
+        ctx.facts(
+          QueryRowProjectionFact,
+          options.drizzleProviderId !== undefined
+            ? { providerId: options.drizzleProviderId }
+            : undefined,
+        ),
         ctx.facts(ValidatorInputFieldsFact, {
           condition: { scope: "calls" },
         }),
