@@ -313,11 +313,28 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           `,
           expectedPattern: /TS2339/u,
         },
+        {
+          name: 'CallRef passed to FactType<"syntax">',
+          body: `
+            declare const callRef: CallRef;
+            declare const syntaxFact: FactType<"syntax", { readonly mode?: string } | undefined, string>;
+            await ctx.facts(syntaxFact, { targets: [callRef] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "wrong condition passed to FactType",
+          body: `
+            declare const syntaxFact: FactType<"syntax", { readonly mode: "a" | "b" }, string>;
+            await ctx.facts(syntaxFact, { condition: { mode: "c" } });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
       ];
 
       for (const testCase of negativeCases) {
         const snippet = [
-          'import type { CallRef, DeclarationRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
+          'import type { CallRef, DeclarationRef, FactType, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@verule/sdk";',
           "",
           "export async function checkContract(ctx: RuleContext): Promise<void> {",
           testCase.body,

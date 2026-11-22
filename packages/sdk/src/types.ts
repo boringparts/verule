@@ -4,6 +4,12 @@ import type {
   FunctionBranchesResult,
 } from "./branch-coverage.ts";
 import type {
+  FactQueryOptions,
+  FactResult,
+  FactType,
+  LibraryAdapter,
+} from "./facts.ts";
+import type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,
@@ -25,6 +31,7 @@ export type VeruleErrorCode =
   | "INVALID_CONFIG"
   | "PROJECT_LOAD_ERROR"
   | "RULE_EXECUTION_ERROR"
+  | "FACT_CONFLICT"
   | "STALE_REFERENCE"
   | "CROSS_PROJECT_REFERENCE"
   | "STALE_SNAPSHOT"
@@ -400,7 +407,7 @@ export type FindSyntaxOptions = {
 
 export type SyntaxNodeResult = {
   readonly ref: SyntaxRef;
-  readonly kind: SyntaxKind;
+  readonly kind: SyntaxKind | (string & {});
   readonly text: string;
   readonly location: DiagnosticLocation;
   readonly expression?: SyntaxRef;
@@ -464,9 +471,13 @@ export type RuleContext = {
     pairs: readonly AssignabilityPair[],
   ) => Promise<readonly AssignabilityResult[]>;
   syntaxOf: <const S extends SyntaxLookupSelection = Record<never, never>>(
-    targets: readonly (DeclarationRef | CallRef | SignatureRef)[],
+    targets: readonly (SyntaxRef | DeclarationRef | CallRef | SignatureRef)[],
     options?: { readonly select?: S },
   ) => Promise<readonly ProjectedSyntaxLookupRow<S>[]>;
+  facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
+    factType: FactType<SubjectKind, Condition, Value>,
+    options?: FactQueryOptions<NoInfer<SubjectKind>, NoInfer<Condition>>,
+  ) => Promise<readonly FactResult<SubjectKind, Value>[]>;
   report: (diagnostic: DiagnosticInput) => void;
   /**
    * Records a named TS judgment checkpoint for explainability and detail observation.
@@ -491,6 +502,7 @@ export type VeruleConfig = {
   readonly projects?: readonly string[];
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
+  readonly adapters?: readonly LibraryAdapter[];
 };
 
 export type NormalizedVeruleConfig = {
@@ -498,6 +510,7 @@ export type NormalizedVeruleConfig = {
   readonly projects?: readonly string[];
   readonly rules: readonly Rule[];
   readonly models: readonly Model[];
+  readonly adapters: readonly LibraryAdapter[];
 };
 
 export type SessionCheckOptions = {
@@ -551,6 +564,7 @@ export type SessionUpdateOptions = {
   readonly config?: VeruleConfig;
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
+  readonly adapters?: readonly LibraryAdapter[];
   readonly entries?: readonly string[];
 };
 

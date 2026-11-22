@@ -14,6 +14,15 @@ import {
 } from "./branch-coverage.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
 import {
+  FactCache,
+  executeFactQuery,
+  validateAdapters,
+  type AdapterContext,
+  type FactQueryOptions,
+  type FactType,
+  type LibraryAdapter,
+} from "./facts.ts";
+import {
   ObservationCollector,
   locationMatchesTarget,
   normalizeObserveConfig,
@@ -47,6 +56,7 @@ import {
   type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
+  type ProgramObjectKind,
   type ProjectSummary,
   type RecomputationScope,
   type ReportIdentity,
@@ -238,6 +248,7 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
   }
   const rules = validateRules(config.rules ?? []);
   const models = validateModels(config.models ?? []);
+  const adapters = validateAdapters(config.adapters ?? []);
   return {
     ...(config.tsconfig !== undefined ? { tsconfig: config.tsconfig } : {}),
     ...(config.projects !== undefined
@@ -245,6 +256,7 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
       : {}),
     rules,
     models,
+    adapters,
   };
 }
 
@@ -295,19 +307,32 @@ function summarizeModel(model: Model): ModelIdentitySummary {
   };
 }
 
+function summarizeAdapter(adapter: LibraryAdapter) {
+  return {
+    id: adapter.id,
+    version: adapter.version ?? null,
+    provides: adapter.provides
+      .map((provider) => provider.factType.id)
+      .toSorted(),
+  };
+}
+
 function computeReportIdentity(
   snapshotDigest: string,
   entries: readonly string[],
   rules: readonly Rule[],
   models: readonly Model[],
+  adapters: readonly LibraryAdapter[] = [],
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
   const modelSummaries = models.map(summarizeModel);
+  const adapterSummaries = adapters.map(summarizeAdapter);
   const configDigest = sha256Prefix(
     stableSerialize({
       entries,
       rules: ruleSummaries,
       models: modelSummaries,
+      ...(adapterSummaries.length > 0 ? { adapters: adapterSummaries } : {}),
     }),
   );
   return {
@@ -465,6 +490,9 @@ function resolveNextConfig(
   const models = options?.models
     ? validateModels(options.models)
     : current.models;
+  const adapters = options?.adapters
+    ? validateAdapters(options.adapters)
+    : current.adapters;
   if (options?.entries !== undefined) {
     if (options.entries.length === 0) {
       throw new VeruleExecutionError(
@@ -476,6 +504,7 @@ function resolveNextConfig(
       projects: [...options.entries],
       rules,
       models,
+      adapters,
     };
   }
   return {
@@ -483,6 +512,7 @@ function resolveNextConfig(
     ...(current.projects !== undefined ? { projects: current.projects } : {}),
     rules,
     models,
+    adapters,
   };
 }
 
@@ -503,12 +533,14 @@ function collectInvalidatedBy(
     prevEntries,
     prevConfig.rules,
     prevConfig.models,
+    prevConfig.adapters,
   );
   const nextIdentity = computeReportIdentity(
     "",
     nextEntries,
     nextConfig.rules,
     nextConfig.models,
+    nextConfig.adapters,
   );
   if (stableSerialize(prevEntries) !== stableSerialize(nextEntries)) {
     reasons.push("entries");
@@ -523,6 +555,12 @@ function collectInvalidatedBy(
     stableSerialize(nextIdentity.models)
   ) {
     reasons.push("models");
+  }
+  if (
+    stableSerialize(prevConfig.adapters.map(summarizeAdapter)) !==
+    stableSerialize(nextConfig.adapters.map(summarizeAdapter))
+  ) {
+    reasons.push("adapters");
   }
   if (options?.config !== undefined && reasons.length === 0) {
     reasons.push("config");
@@ -636,6 +674,7 @@ export async function openSession(
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
   const typeCache = new Map<string, Promise<TypeAtResult>>();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
+  const factCache = new FactCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
 
   function assertOpen(): void {
@@ -702,77 +741,70 @@ export async function openSession(
         : {}),
     });
 
-    return {
-      project,
-      models,
-      getModel: (id: string) => models.find((model) => model.id === id),
-      ...projectionQueries,
-      findSyntax: async (query: FindSyntaxOptions) => {
-        assertActiveSnapshot();
-        const cacheKey = JSON.stringify([
-          activeSnapshotId,
-          project.projectId,
-          query.kinds ? query.kinds.toSorted() : null,
-          query.files ? query.files.toSorted() : null,
-          query.range ?? null,
-        ]);
-        const cached = syntaxCache.get(cacheKey);
-        const queryStart = collector.isActive() ? performance.now() : 0;
+    const runFindSyntax = async (
+      query: FindSyntaxOptions,
+      recordRuleQuery: boolean,
+    ): Promise<readonly SyntaxNodeResult[]> => {
+      assertActiveSnapshot();
+      const cacheKey = JSON.stringify([
+        activeSnapshotId,
+        project.projectId,
+        query.kinds ? query.kinds.toSorted() : null,
+        query.files ? query.files.toSorted() : null,
+        query.range ?? null,
+      ]);
+      const cached = syntaxCache.get(cacheKey);
+      const queryStart = collector.isActive() ? performance.now() : 0;
 
-        let items: readonly SyntaxNodeResult[];
-        let cacheStatus: "computed" | "reused";
-        if (cached) {
-          cacheStatus = "reused";
-          items = await cached;
-        } else {
-          cacheStatus = "computed";
-          const promise = client
-            .request<EngineBatchResult>(
-              "query.batch",
-              {
-                snapshotId: activeSnapshotId,
-                projectId: project.projectId,
-                steps: [
-                  {
-                    op: "findSyntax",
-                    ...(query.kinds !== undefined
-                      ? { kinds: query.kinds }
-                      : {}),
-                    ...(query.files !== undefined
-                      ? { files: query.files }
-                      : {}),
-                    ...(query.range !== undefined
-                      ? { range: query.range }
-                      : {}),
-                  },
-                ],
-              },
-              buildRpcOptions(collector),
-            )
-            .then((batch) => {
-              const rawItems = (batch.results[0]?.items ??
-                []) as readonly EngineSyntaxItem[];
-              return rawItems.map((item) =>
-                toSyntaxNodeResult(
-                  item,
-                  sessionToken,
-                  project.projectId,
-                  activeSnapshotId,
-                  syntaxLocations,
-                ),
-              );
-            });
+      let items: readonly SyntaxNodeResult[];
+      let cacheStatus: "computed" | "reused";
+      if (cached) {
+        cacheStatus = "reused";
+        items = await cached;
+      } else {
+        cacheStatus = "computed";
+        const promise = client
+          .request<EngineBatchResult>(
+            "query.batch",
+            {
+              snapshotId: activeSnapshotId,
+              projectId: project.projectId,
+              steps: [
+                {
+                  op: "findSyntax",
+                  ...(query.kinds !== undefined ? { kinds: query.kinds } : {}),
+                  ...(query.files !== undefined ? { files: query.files } : {}),
+                  ...(query.range !== undefined ? { range: query.range } : {}),
+                },
+              ],
+            },
+            buildRpcOptions(collector),
+          )
+          .then((batch) => {
+            const rawItems = (batch.results[0]?.items ??
+              []) as readonly EngineSyntaxItem[];
+            return rawItems.map((item) =>
+              toSyntaxNodeResult(
+                item,
+                sessionToken,
+                project.projectId,
+                activeSnapshotId,
+                syntaxLocations,
+              ),
+            );
+          });
 
-          syntaxCache.set(cacheKey, promise);
-          items = await promise;
+        syntaxCache.set(cacheKey, promise);
+        items = await promise;
+      }
+
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        if (cacheStatus === "computed") {
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
         }
-
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          if (cacheStatus === "computed") {
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
-          }
+        if (recordRuleQuery) {
           const matchedLocations = collector.explainTarget
             ? items
                 .filter((item) =>
@@ -811,88 +843,94 @@ export async function openSession(
               : {}),
           });
         }
+      }
 
-        return items;
-      },
-      typeAt: async (targets: readonly SyntaxRef[]) => {
-        assertActiveSnapshot();
-        if (targets.length === 0) return [];
-        validateProgramRefs(
-          targets,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
+      return items;
+    };
+
+    const runTypeAt = async (
+      targets: readonly SyntaxRef[],
+      recordRuleQuery: boolean,
+    ): Promise<readonly TypeAtResult[]> => {
+      assertActiveSnapshot();
+      if (targets.length === 0) return [];
+      validateProgramRefs(
+        targets,
+        sessionToken,
+        activeSnapshotId,
+        project.projectId,
+      );
+
+      const missingTargets: SyntaxRef[] = [];
+      for (const target of targets) {
+        const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
+        if (!typeCache.has(key)) {
+          missingTargets.push(target);
+        }
+      }
+
+      const queryStart = collector.isActive() ? performance.now() : 0;
+      const cacheStatus: "computed" | "reused" =
+        missingTargets.length > 0 ? "computed" : "reused";
+
+      if (missingTargets.length > 0) {
+        const batchPromise = client.request<EngineBatchResult>(
+          "query.batch",
+          {
+            snapshotId: activeSnapshotId,
+            projectId: project.projectId,
+            steps: [
+              {
+                op: "typeAtLocation",
+                targets: missingTargets.map((target) => target.handleId),
+              },
+            ],
+          },
+          buildRpcOptions(collector),
         );
 
-        const missingTargets: SyntaxRef[] = [];
-        for (const target of targets) {
+        for (const [index, target] of missingTargets.entries()) {
           const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-          if (!typeCache.has(key)) {
-            missingTargets.push(target);
-          }
-        }
-
-        const queryStart = collector.isActive() ? performance.now() : 0;
-        const cacheStatus: "computed" | "reused" =
-          missingTargets.length > 0 ? "computed" : "reused";
-
-        if (missingTargets.length > 0) {
-          const batchPromise = client.request<EngineBatchResult>(
-            "query.batch",
-            {
-              snapshotId: activeSnapshotId,
-              projectId: project.projectId,
-              steps: [
-                {
-                  op: "typeAtLocation",
-                  targets: missingTargets.map((target) => target.handleId),
-                },
-              ],
-            },
-            buildRpcOptions(collector),
-          );
-
-          for (const [index, target] of missingTargets.entries()) {
-            const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-            const itemPromise = batchPromise.then((batch) => {
-              const items = (batch.results[0]?.items ??
-                []) as readonly EngineTypeItem[];
-              const raw = items[index];
-              if (!raw) {
-                throw new VeruleExecutionError(
-                  "ENGINE_ERROR",
-                  `Engine omitted type result for target "${target.handleId}".`,
-                );
-              }
-              if (raw.gaps) {
-                recordGaps(raw.gaps);
-              }
-              return toTypeAtResult(
-                raw,
-                target,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
+          const itemPromise = batchPromise.then((batch) => {
+            const items = (batch.results[0]?.items ??
+              []) as readonly EngineTypeItem[];
+            const raw = items[index];
+            if (!raw) {
+              throw new VeruleExecutionError(
+                "ENGINE_ERROR",
+                `Engine omitted type result for target "${target.handleId}".`,
               );
-            });
-            typeCache.set(key, itemPromise);
-          }
+            }
+            if (raw.gaps) {
+              recordGaps(raw.gaps);
+            }
+            return toTypeAtResult(
+              raw,
+              target,
+              sessionToken,
+              project.projectId,
+              activeSnapshotId,
+            );
+          });
+          typeCache.set(key, itemPromise);
         }
+      }
 
-        const results = await Promise.all(
-          targets.map((target) =>
-            typeCache.get(
-              `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
-            )!,
-          ),
-        );
+      const results = await Promise.all(
+        targets.map((target) =>
+          typeCache.get(
+            `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
+          )!,
+        ),
+      );
 
-        if (collector.isActive()) {
-          const durationMs = performance.now() - queryStart;
-          if (cacheStatus === "computed") {
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
-          }
+      if (collector.isActive()) {
+        const durationMs = performance.now() - queryStart;
+        if (cacheStatus === "computed") {
+          collector.addEngineQueryMs(durationMs);
+          recordRuleEngineMs(durationMs);
+        }
+        if (recordRuleQuery) {
           const matchedLocations: DiagnosticLocation[] = [];
           const matchedTypeTexts: string[] = [];
           if (collector.explainTarget) {
@@ -925,9 +963,64 @@ export async function openSession(
               : {}),
           });
         }
+      }
 
-        return results;
-      },
+      return results;
+    };
+
+    const adapterProjectionQueries = createProjectionQueries({
+      client,
+      sessionToken,
+      snapshotId: activeSnapshotId,
+      projectId: project.projectId,
+      assertOpen: assertActiveSnapshot,
+      recordGaps,
+      getRpcOptions: () => buildRpcOptions(collector),
+      ...(collector.isActive()
+        ? {
+            onQueryCompleted: (_op, _candidateCount, durationMs) => {
+              collector.addEngineQueryMs(durationMs);
+              recordRuleEngineMs(durationMs);
+            },
+          }
+        : {}),
+    });
+
+    const createAdapterContext = (): AdapterContext => ({
+      project,
+      models,
+      getModel: (id: string) => models.find((model) => model.id === id),
+      ...adapterProjectionQueries,
+      findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
+      typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
+    });
+
+    return {
+      project,
+      models,
+      getModel: (id: string) => models.find((model) => model.id === id),
+      ...projectionQueries,
+      findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, true),
+      typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, true),
+      facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
+        factType: FactType<SubjectKind, Condition, Value>,
+        factOptions?: FactQueryOptions<SubjectKind, Condition>,
+      ) =>
+        executeFactQuery({
+          factType,
+          options: factOptions,
+          adapters: normalizedConfig.adapters,
+          factCache,
+          sessionToken,
+          snapshotId: activeSnapshotId,
+          projectId: project.projectId,
+          ruleId,
+          assertActiveSnapshot,
+          createAdapterContext,
+          recordGaps,
+          collector,
+          syntaxLocations,
+        }),
       listBranches: async (functions: readonly SyntaxRef[]) => {
         assertActiveSnapshot();
         if (functions.length === 0) return [];
@@ -1257,6 +1350,7 @@ export async function openSession(
         resolveProjectEntries(normalizedConfig),
         rules,
         normalizedConfig.models,
+        normalizedConfig.adapters,
       ),
       ...(observation !== undefined ? { observation } : {}),
       ...(explanations !== undefined && explanations.length === 1
@@ -1324,6 +1418,7 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      factCache.clear();
 
       const recomputation: RecomputationScope = {
         recomputedProjects: updated.recomputedProjects,
@@ -1377,6 +1472,7 @@ export async function openSession(
       syntaxCache.clear();
       typeCache.clear();
       branchListCache.clear();
+      factCache.clear();
       try {
         await client.request("snapshot.release", {
           snapshotId: currentSnapshotId,

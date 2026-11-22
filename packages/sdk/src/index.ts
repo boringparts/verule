@@ -3,6 +3,22 @@ import { promisify } from "node:util";
 
 import { engineExecutablePath } from "@verule/engine/binary";
 
+export {
+  defineAdapter,
+  defineFactProvider,
+  defineFactType,
+  type AdapterContext,
+  type FactContribution,
+  type FactExtractionRequest,
+  type FactMergeOutcome,
+  type FactProvider,
+  type FactProviderContribution,
+  type FactQueryOptions,
+  type FactResult,
+  type FactType,
+  type FactTypeSpec,
+  type LibraryAdapter,
+} from "./facts.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {
   defineConfig,

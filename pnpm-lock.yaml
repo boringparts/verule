@@ -232,6 +232,9 @@ importers:
 
   packages/acceptance:
     dependencies:
+      '@verule/adapter-zod':
+        specifier: workspace:*
+        version: link:../adapter-zod
       '@verule/cli':
         specifier: workspace:*
         version: link:../cli
@@ -257,6 +260,31 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+
+  packages/adapter-zod:
+    dependencies:
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   packages/cli:
     dependencies:
