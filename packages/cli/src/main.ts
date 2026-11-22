@@ -5,6 +5,7 @@ import {
   VeruleExecutionError,
   getEngineVersion,
   parseObserveLimit,
+  requestSharedReport,
   runCheck,
 } from "@verule/sdk";
 import {
@@ -35,6 +36,11 @@ import {
   type WireObservation,
 } from "./report-wire.ts";
 import {
+  formatSessionReadyText,
+  sessionReadyRecordSchema,
+  streamSharedSession,
+} from "./session-command.ts";
+import {
   formatWatchReportText,
   streamWatchEvents,
   watchFailureRecordSchema,
@@ -57,6 +63,17 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
     `Explanation [${exp.ruleId}] @ ${exp.target.file}${linePart}${colPart}: ${exp.status} (inCandidates=${String(exp.inCandidates)})`,
   );
   lines.push(`  summary: ${exp.summary}`);
+  if (exp.inlineIgnore?.matched) {
+    const atSuffix = exp.inlineIgnore.commentAt
+      ? ` at ${exp.inlineIgnore.commentAt.file}:${exp.inlineIgnore.commentAt.line}:${exp.inlineIgnore.commentAt.column}`
+      : "";
+    const reasonSuffix = exp.inlineIgnore.reason
+      ? ` -- ${exp.inlineIgnore.reason}`
+      : "";
+    lines.push(
+      `  inlineIgnore: suppressed by verule-ignore-next-code-line${atSuffix}${reasonSuffix}`,
+    );
+  }
   if (exp.excludedByCheckpoint) {
     const detailSuffix =
       exp.excludedByCheckpoint.detail !== undefined
@@ -166,6 +183,7 @@ function formatCheckFindingsText(report: WireCheckReport) {
 
 type CheckCliInput = {
   readonly config?: string | undefined;
+  readonly session?: string | undefined;
   readonly rule?: string | undefined;
   readonly at?: string | undefined;
   readonly observe?: "off" | "summary" | "detail" | undefined;
@@ -181,6 +199,7 @@ function createCliContract(
   const versionInput = z.object({});
   const checkInput = z.object({
     config: z.string().min(1).optional(),
+    session: z.string().min(1).optional(),
     rule: z.string().min(1).optional(),
     at: z.string().min(1).optional(),
     observe: z.enum(["off", "summary", "detail"]).optional(),
@@ -188,6 +207,10 @@ function createCliContract(
   });
   const watchInput = z.object({
     config: z.string().min(1).optional(),
+  });
+  const sessionInput = z.object({
+    config: z.string().min(1).optional(),
+    socket: z.string().min(1),
   });
 
   async function executeCheck(input: CheckCliInput): Promise<
@@ -206,6 +229,24 @@ function createCliContract(
         input.observeLimit !== undefined
           ? parseObserveLimit(input.observeLimit)
           : undefined;
+
+      if (input.session !== undefined) {
+        if (input.config !== undefined) {
+          throw new VeruleExecutionError(
+            "INVALID_CONFIG",
+            'Cannot combine "--session" with "--config"; the shared session is already bound to a configuration.',
+          );
+        }
+        const report = await requestSharedReport({
+          endpoint: input.session,
+          cwd: workingDirectory,
+          ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
+          ...(input.at !== undefined ? { at: input.at } : {}),
+          ...(input.observe !== undefined ? { observe: input.observe } : {}),
+          ...(observeLimit !== undefined ? { observeLimit } : {}),
+        });
+        return { ok: true, report: toWireReport(report) };
+      }
 
       const configStart = performance.now();
       const config = await loadProjectConfig(workingDirectory, input.config);
@@ -323,6 +364,12 @@ function createCliContract(
             longOption: "--config",
             shortAlias: "-c",
             description: "Path to the Verule configuration file.",
+          },
+          session: {
+            kind: "valueOption",
+            longOption: "--session",
+            description:
+              "Query a running shared session socket instead of starting a new engine.",
           },
           rule: {
             kind: "valueOption",
@@ -501,6 +548,95 @@ function createCliContract(
                 streamWatchEvents(
                   workingDirectory,
                   input.config,
+                  signal,
+                  outcome,
+                ),
+            }),
+          },
+        })),
+      }),
+      ...define.command("session")({
+        kind: "command",
+        parent: "verule",
+        name: "session",
+        description:
+          "Start an explicit shared analysis session bound to a configuration and socket endpoint.",
+        fields: {
+          config: {
+            kind: "valueOption",
+            longOption: "--config",
+            shortAlias: "-c",
+            description: "Path to the Verule configuration file.",
+          },
+          socket: {
+            kind: "valueOption",
+            longOption: "--socket",
+            description: "Local Unix domain socket or Windows named pipe path.",
+          },
+        },
+        input: sessionInput,
+        outputs: define.outputModes("session", sessionInput, (mode) => ({
+          default: "text",
+          modes: {
+            text: mode.stream({
+              format: "text",
+              description: "Emit shared session readiness and shutdown text.",
+              success: {
+                kind: "stream",
+                records: {
+                  ready: {
+                    description:
+                      "Shared session is initialized and listening for queries.",
+                    schema: sessionReadyRecordSchema,
+                    text: formatSessionReadyText,
+                  },
+                },
+                text: () => text.line("Shared session stopped."),
+              },
+              failures: {
+                failed: {
+                  description: "Shared session failed to start.",
+                  schema: checkFailureSchema,
+                  exitCode: 2,
+                  text: ({ code, message }) =>
+                    text.line(`Session failed [${code}]: ${message}`),
+                },
+              },
+              handler: ({ input, outcome }) =>
+                streamSharedSession(
+                  workingDirectory,
+                  input.config,
+                  input.socket,
+                  signal,
+                  outcome,
+                ),
+            }),
+            ndjson: mode.stream({
+              format: "structured",
+              description:
+                "Emit shared session readiness and lifecycle events as NDJSON.",
+              success: {
+                kind: "stream",
+                records: {
+                  ready: {
+                    description:
+                      "Shared session is initialized and listening for queries.",
+                    schema: sessionReadyRecordSchema,
+                  },
+                },
+              },
+              failures: {
+                failed: {
+                  description: "Shared session failed to start.",
+                  schema: checkFailureSchema,
+                  exitCode: 2,
+                },
+              },
+              handler: ({ input, outcome }) =>
+                streamSharedSession(
+                  workingDirectory,
+                  input.config,
+                  input.socket,
                   signal,
                   outcome,
                 ),

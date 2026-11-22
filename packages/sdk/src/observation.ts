@@ -718,6 +718,12 @@ export class ObservationCollector {
     readonly ruleId: string;
     readonly projects: readonly ProjectSummary[];
     readonly diagnostics: readonly Diagnostic[];
+    readonly suppressions?: readonly {
+      readonly ruleId: string;
+      readonly at: DiagnosticLocation;
+      readonly directiveAt: DiagnosticLocation;
+      readonly reason: string;
+    }[];
   }): ExplainResult {
     const target = this.explainTarget;
     if (!target) {
@@ -771,6 +777,10 @@ export class ObservationCollector {
       (diag) =>
         diag.ruleId === params.ruleId && locationMatchesTarget(diag.at, target),
     );
+    const matchingSuppression = params.suppressions?.find(
+      (sup) =>
+        sup.ruleId === params.ruleId && locationMatchesTarget(sup.at, target),
+    );
     const targetInAnyProject = params.projects.some((project) =>
       project.sourceFiles.includes(target.file),
     );
@@ -789,10 +799,27 @@ export class ObservationCollector {
     let summary: string;
     let excludedByQuery: ExplainQueryStep | undefined;
     let excludedByCheckpoint: ExplainCheckpointTrace | undefined;
+    let inlineIgnore:
+      | {
+          readonly matched: boolean;
+          readonly ruleId?: string;
+          readonly reason?: string;
+          readonly commentAt?: DiagnosticLocation;
+        }
+      | undefined;
 
     if (matchingDiagnostic) {
       status = "reported";
       summary = `Rule "${params.ruleId}" reported a diagnostic at ${formatTarget(target)}.`;
+    } else if (matchingSuppression) {
+      status = "suppressed_by_ignore";
+      inlineIgnore = {
+        matched: true,
+        ruleId: matchingSuppression.ruleId,
+        reason: matchingSuppression.reason,
+        commentAt: matchingSuppression.directiveAt,
+      };
+      summary = `Diagnostic for rule "${params.ruleId}" at ${formatTarget(target)} was suppressed by verule-ignore-next-code-line at ${matchingSuppression.directiveAt.file}:${matchingSuppression.directiveAt.line}:${matchingSuppression.directiveAt.column} (reason: ${matchingSuppression.reason}).`;
     } else if (!targetInAnyProject) {
       status = "target_not_in_project";
       summary = `Target "${target.file}" is not part of any opened compiler project.`;
@@ -822,6 +849,7 @@ export class ObservationCollector {
       matchingCandidates,
       ...(excludedByQuery !== undefined ? { excludedByQuery } : {}),
       ...(excludedByCheckpoint !== undefined ? { excludedByCheckpoint } : {}),
+      ...(inlineIgnore !== undefined ? { inlineIgnore } : {}),
       queries: querySteps,
       checkpoints: relevantCheckpoints,
       gaps: [],

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempDisposableSync,
   readFileSync,
@@ -69,6 +70,7 @@ void test("runs the independently deployed CLI with its production SDK and engin
   assert.match(help.stdout, /--schema/u);
   assert.match(help.stdout, /check/u);
   assert.match(help.stdout, /watch/u);
+  assert.match(help.stdout, /session/u);
 
   const schema = invoke(tmpdir(), "--schema");
   assert.equal(schema.status, 0, schema.stderr);
@@ -592,7 +594,6 @@ void test("runs the independently deployed CLI with its production SDK and engin
     data: import("@verule/sdk").CheckReport;
   };
   assert.equal("observation" in offExplainEnv.data, false);
-  const { existsSync } = await import("node:fs");
   assert.equal(existsSync(explainMarkerPath), false);
 
   const detailStartMs = performance.now();
@@ -1042,4 +1043,361 @@ void test("runs the independently deployed CLI with its production SDK and engin
       watchChild.kill("SIGKILL");
     }
   }
+
+  // 6. Deployed `verule session` + cross-process `verule check --session <socketPath>`
+  using sessionSocketDir = mkdtempDisposableSync(
+    join(tmpdir(), "verule-e2e-sock-"),
+  );
+  const sharedSocketPath = join(sessionSocketDir.path, "verule.sock");
+  const sessionChild = spawn(
+    process.execPath,
+    [
+      entry,
+      "session",
+      "--config",
+      rulesConfigPath,
+      "--socket",
+      sharedSocketPath,
+      "--output",
+      "ndjson",
+    ],
+    {
+      cwd: host.path,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  const sessionRecords: Record<string, unknown>[] = [];
+  let sessionStderr = "";
+  let sessionBuffer = "";
+  let sessionWaiters: (() => void)[] = [];
+
+  sessionChild.stdout.setEncoding("utf8");
+  sessionChild.stdout.on("data", (chunk: string) => {
+    sessionBuffer += chunk;
+    while (true) {
+      const idx = sessionBuffer.indexOf("\n");
+      if (idx === -1) break;
+      const line = sessionBuffer.slice(0, idx).trim();
+      sessionBuffer = sessionBuffer.slice(idx + 1);
+      if (line.length > 0) {
+        sessionRecords.push(JSON.parse(line) as Record<string, unknown>);
+        const pending = sessionWaiters;
+        sessionWaiters = [];
+        for (const wake of pending) wake();
+      }
+    }
+  });
+  sessionChild.stderr.setEncoding("utf8");
+  sessionChild.stderr.on("data", (chunk: string) => {
+    sessionStderr += chunk;
+  });
+
+  async function waitForSessionRecord(
+    predicate: (item: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 10_000;
+    let cursor = 0;
+    while (true) {
+      while (cursor < sessionRecords.length) {
+        const item = sessionRecords[cursor]!;
+        cursor += 1;
+        if (predicate(item)) return item;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for deployed session record. Records=${JSON.stringify(sessionRecords)} stderr=${sessionStderr}`,
+        );
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 100);
+        sessionWaiters.push(() => {
+          clearTimeout(timer);
+          resolveWait();
+        });
+      });
+    }
+  }
+
+  function invokeAndCompareShared(label: string, expectedStatus: 0 | 1) {
+    const t0 = performance.now();
+    const sharedRes = invoke(
+      tmpdir(),
+      "check",
+      "--session",
+      sharedSocketPath,
+      "--output",
+      "json",
+    );
+    const sharedMs = performance.now() - t0;
+    t.diagnostic(
+      `Deployed cross-process check --session (${label}): ${sharedMs.toFixed(2)} ms`,
+    );
+    assert.equal(sharedRes.status, expectedStatus, sharedRes.stderr);
+
+    const coldRes = invoke(
+      host.path,
+      "check",
+      "--config",
+      rulesConfigPath,
+      "--output",
+      "json",
+    );
+    assert.equal(coldRes.status, expectedStatus, coldRes.stderr);
+
+    const sharedData = (
+      JSON.parse(sharedRes.stdout) as {
+        data: import("@verule/sdk").CheckReport;
+      }
+    ).data;
+    const coldData = (
+      JSON.parse(coldRes.stdout) as { data: import("@verule/sdk").CheckReport }
+    ).data;
+    assert.deepEqual(sharedData, coldData);
+    return sharedData;
+  }
+
+  try {
+    await waitForSessionRecord((r) => r.kind === "stream");
+    const readyRec = await waitForSessionRecord(
+      (r) => r.kind === "record" && r.variant === "ready",
+    );
+    assert.equal(
+      (readyRec.data as { endpoint?: string }).endpoint,
+      sharedSocketPath,
+    );
+    assert.equal(existsSync(sharedSocketPath), true);
+
+    // (2) Initial clean report via second process
+    invokeAndCompareShared("initial-clean", 0);
+
+    // (3) Introduce violation -> immediately query from second process (0ms sleep)
+    const handlersPath = join(host.path, "src", "handlers.ts");
+    writeFileSync(handlersPath, hostSource, "utf8");
+    const findingsReport = invokeAndCompareShared("immediate-violation", 1);
+    assert.equal(findingsReport.diagnostics.length, 2);
+
+    // (4) Fix violation -> immediately query from second process (0ms sleep) -> retracted
+    writeFileSync(
+      handlersPath,
+      "export function safeOnly(): string {\n  return 'ok';\n}\n",
+      "utf8",
+    );
+    const cleanReport = invokeAndCompareShared("immediate-fix", 0);
+    assert.equal(cleanReport.diagnostics.length, 0);
+
+    // (5) Break config -> client gets exit 2 while session stays alive -> restore -> recovers
+    const validRulesConfig = readFileSync(rulesConfigPath, "utf8");
+    writeFileSync(rulesConfigPath, "export default { broken(", "utf8");
+    const failedShared = invoke(
+      tmpdir(),
+      "check",
+      "--session",
+      sharedSocketPath,
+      "--output",
+      "json",
+    );
+    assert.equal(failedShared.status, 2);
+    const failedEnv = JSON.parse(failedShared.stderr) as {
+      kind: string;
+      variant: string;
+      data: { code: string };
+    };
+    assert.equal(failedEnv.kind, "failure");
+    assert.equal(failedEnv.data.code, "INVALID_CONFIG");
+
+    writeFileSync(rulesConfigPath, validRulesConfig, "utf8");
+    invokeAndCompareShared("immediate-recover", 0);
+
+    // (6) SIGINT closes session, cleans socket, and standalone check still matches
+    sessionChild.kill("SIGINT");
+    const sessionExit = await new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolveExit) => {
+      sessionChild.once("exit", (code, sig) =>
+        resolveExit({ code, signal: sig }),
+      );
+    });
+    assert.equal(sessionExit.code, 0, sessionStderr);
+    assert.equal(sessionStderr, "");
+    assert.equal(sessionRecords.at(-1)?.kind, "streamSuccess");
+    assert.equal(existsSync(sharedSocketPath), false);
+
+    const postCloseStandalone = invoke(
+      host.path,
+      "check",
+      "--config",
+      rulesConfigPath,
+      "--output",
+      "json",
+    );
+    assert.equal(postCloseStandalone.status, 0, postCloseStandalone.stderr);
+  } finally {
+    if (sessionChild.exitCode === null && sessionChild.signalCode === null) {
+      sessionChild.kill("SIGKILL");
+    }
+  }
+
+  // 7. Deployed CLI E2E for inline-ignore suppression, explain, unused exit 1, and ambiguity
+  using inlineHost = mkdtempDisposableSync(
+    join(tmpdir(), "verule-inline-ignore-host-"),
+  );
+  mkdirSync(join(inlineHost.path, "src"), { recursive: true });
+  mkdirSync(join(inlineHost.path, "node_modules", "@verule"), {
+    recursive: true,
+  });
+  symlinkSync(
+    deployedSdkPackageDir,
+    join(inlineHost.path, "node_modules", "@verule", "sdk"),
+    "dir",
+  );
+  writeFileSync(
+    join(inlineHost.path, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+        },
+        include: ["src/**/*.ts"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  writeFileSync(
+    join(inlineHost.path, "verule.config.ts"),
+    [
+      'import { defineConfig, defineRule } from "@verule/sdk";',
+      "",
+      "const noLegacyCall = defineRule({",
+      '  id: "no-legacy-call",',
+      "  run: async (ctx) => {",
+      '    const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
+      "    for (const call of calls) {",
+      '      if (call.text.startsWith("legacy(")) {',
+      "        ctx.report({",
+      "          at: call.location,",
+      '          message: "legacy() is deprecated",',
+      "        });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  rules: [noLegacyCall],",
+      "});",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): void;",
+      "",
+      "export function run(): void {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  legacy("one");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const inlineClean = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineClean.status, 0, inlineClean.stderr);
+  const inlineCleanEnv = JSON.parse(inlineClean.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineCleanEnv.variant, "clean");
+  assert.deepEqual(inlineCleanEnv.data.diagnostics, []);
+
+  const inlineExplain = invoke(
+    inlineHost.path,
+    "check",
+    "--rule",
+    "no-legacy-call",
+    "--at",
+    "src/entry.ts:5:3",
+    "--output",
+    "json",
+  );
+  assert.equal(inlineExplain.status, 0, inlineExplain.stderr);
+  const inlineExplainEnv = JSON.parse(inlineExplain.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineExplainEnv.data.explanation?.status,
+    "suppressed_by_ignore",
+  );
+  assert.equal(
+    inlineExplainEnv.data.explanation?.inlineIgnore?.reason,
+    "Approved temporary bridge.",
+  );
+
+  // Fix violation while keeping directive -> exit 1 with unused directive finding
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineUnused = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineUnused.status, 1, inlineUnused.stderr);
+  const inlineUnusedEnv = JSON.parse(inlineUnused.stdout) as {
+    variant: string;
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(inlineUnusedEnv.variant, "findings");
+  assert.equal(inlineUnusedEnv.data.diagnostics.length, 1);
+  assert.equal(
+    inlineUnusedEnv.data.diagnostics[0]?.ruleId,
+    sdk.INLINE_IGNORE_RULE_ID,
+  );
+
+  // Two distinct calls on same line -> ambiguous diagnostic + both violations retained
+  writeFileSync(
+    join(inlineHost.path, "src", "entry.ts"),
+    [
+      "declare function legacy(id: string): number;",
+      "",
+      "export function run(): number {",
+      "  // verule-ignore-next-code-line no-legacy-call -- Approved temporary bridge.",
+      '  return legacy("a") + legacy("b");',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const inlineAmbiguous = invoke(inlineHost.path, "check", "--output", "json");
+  assert.equal(inlineAmbiguous.status, 1, inlineAmbiguous.stderr);
+  const inlineAmbiguousEnv = JSON.parse(inlineAmbiguous.stdout) as {
+    data: import("@verule/sdk").CheckReport;
+  };
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === "no-legacy-call",
+    ).length,
+    2,
+  );
+  assert.equal(
+    inlineAmbiguousEnv.data.diagnostics.filter(
+      (d) => d.ruleId === sdk.INLINE_IGNORE_RULE_ID,
+    ).length,
+    1,
+  );
 });

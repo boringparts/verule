@@ -963,3 +963,113 @@ fn truncates_observation_details_by_items_and_bytes() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn scans_inline_ignore_directives_across_comments_jsx_crlf_and_excludes_jsdoc_and_strings() {
+    let temp = TempDirGuard::new("verule-engine-serve-directives");
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir).expect("create src dir");
+
+    let tsconfig_path = temp.path().join("tsconfig.json");
+    fs::write(
+        &tsconfig_path,
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}
+"#,
+    )
+    .expect("write tsconfig");
+
+    let crlf_source = [
+        "declare function sink(v: string): void;",
+        "/** verule-ignore-next-code-line r1 -- JSDoc example must not match */",
+        "export function demo(): void {",
+        "  // verule-ignore-next-code-line r1 -- Line reason",
+        "  sink(\"ok\");",
+        "  /* verule-ignore-next-code-line r2 --",
+        "   * Block reason",
+        "   */",
+        "  // leading note",
+        "  sink(\"ok\");",
+        "  // verule-ignore-next-code-line r3 -- Blank line truncates",
+        "",
+        "  sink(\"ok\");",
+        "  // verule-ignore-next-code-line r1 r2 -- malformed multiple IDs",
+        "  const s = \"// verule-ignore-next-code-line r1 -- inside string\";",
+        "  void s;",
+        "}",
+        "",
+    ]
+    .join("\r\n");
+    fs::write(src_dir.join("app.ts"), crlf_source).expect("write app.ts");
+
+    fs::write(
+        src_dir.join("view.tsx"),
+        [
+            "declare function Item(): unknown;",
+            "export function View() {",
+            "  return (",
+            "    <div>",
+            "      {/* verule-ignore-next-code-line r-jsx -- JSX comment */}",
+            "      <Item />",
+            "    </div>",
+            "  );",
+            "}",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write view.tsx");
+
+    let tsconfig_str = normalized(&tsconfig_path);
+    let cwd_str = normalized(temp.path());
+    let (child, mut stdin, mut reader) = spawn_engine_stdio();
+    let (snapshot_id, _, _) = open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
+
+    let resp = rpc_call(
+        &mut stdin,
+        &mut reader,
+        &json!({
+            "id": 2,
+            "method": "directives.scan",
+            "params": { "snapshotId": snapshot_id }
+        }),
+    );
+    assert_eq!(resp["ok"], json!(true), "directives.scan failed: {resp}");
+    let directives = resp["result"]["directives"]
+        .as_array()
+        .expect("directives array");
+
+    assert_eq!(directives.len(), 5, "unexpected directives: {resp}");
+    assert_eq!(directives[0]["kind"], json!("valid"));
+    assert_eq!(directives[0]["ruleId"], json!("r1"));
+    assert_eq!(directives[0]["targetLine"], json!(5));
+    assert_eq!(directives[1]["kind"], json!("valid"));
+    assert_eq!(directives[1]["ruleId"], json!("r2"));
+    assert_eq!(directives[1]["reason"], json!("Block reason"));
+    assert_eq!(directives[1]["targetLine"], json!(10));
+    assert_eq!(directives[2]["kind"], json!("valid"));
+    assert_eq!(directives[2]["ruleId"], json!("r3"));
+    assert_eq!(directives[2]["targetLine"], Value::Null);
+    assert_eq!(directives[3]["kind"], json!("malformed"));
+    assert_eq!(directives[3]["at"]["line"], json!(14));
+    assert_eq!(directives[4]["kind"], json!("valid"));
+    assert_eq!(directives[4]["ruleId"], json!("r-jsx"));
+    assert_eq!(directives[4]["at"]["file"], json!("src/view.tsx"));
+    assert_eq!(directives[4]["targetLine"], json!(6));
+
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for engine exit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

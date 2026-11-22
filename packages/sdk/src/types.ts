@@ -367,8 +367,28 @@ export type ExplainResult = {
   readonly cleanupPaths: readonly unknown[];
   readonly inlineIgnore?: {
     readonly matched: boolean;
+    readonly ruleId?: string;
     readonly reason?: string;
+    readonly commentAt?: DiagnosticLocation;
   };
+};
+
+export type InlineIgnoreStatus =
+  | "suppressed"
+  | "unused"
+  | "ambiguous"
+  | "malformed"
+  | "unknown_rule"
+  | "undetermined";
+
+export type InlineIgnoreEntry = {
+  readonly status: InlineIgnoreStatus;
+  readonly at: DiagnosticLocation;
+  readonly targetLine?: number;
+  readonly ruleId?: string;
+  readonly reason?: string;
+  readonly matchedLocations?: readonly DiagnosticLocation[];
+  readonly message?: string;
 };
 
 export type CheckReport = {
@@ -379,6 +399,7 @@ export type CheckReport = {
   readonly diagnostics: readonly Diagnostic[];
   readonly gaps: readonly Gap[];
   readonly identity: ReportIdentity;
+  readonly inlineIgnores?: readonly InlineIgnoreEntry[];
   readonly observation?: ObservationReport;
   readonly explanation?: ExplainResult;
   readonly explanations?: readonly ExplainResult[];
@@ -626,3 +647,34 @@ export type WatchFailureEvent = {
 };
 
 export type WatchEvent = WatchReportEvent | WatchFailureEvent;
+
+export type SharedSessionOptions = {
+  readonly cwd: string;
+  readonly endpoint: string;
+  readonly config?: VeruleConfig;
+  readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
+  readonly watchFiles?: readonly string[];
+  readonly observe?: ObserveMode;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly debounceMs?: number;
+  readonly signal?: AbortSignal;
+};
+
+export type SharedSession = {
+  readonly endpoint: string;
+  readonly snapshotId: number;
+  readonly projects: readonly ProjectSummary[];
+  readonly closed: boolean;
+  waitUntilClosed: () => Promise<void>;
+  close: () => Promise<void>;
+};
+
+export type RequestSharedReportOptions = {
+  readonly endpoint: string;
+  readonly cwd?: string;
+  readonly ruleIds?: readonly string[];
+  readonly at?: string | SourceTarget;
+  readonly observe?: ObserveMode | ObserveOptions;
+  readonly observeLimit?: ObserveLimitInput;
+  readonly timeoutMs?: number;
+};

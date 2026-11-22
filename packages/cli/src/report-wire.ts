@@ -3,6 +3,7 @@ import {
   type CheckReport,
   type ExplainResult,
   type ObservationReport,
+  type ProjectSummary,
 } from "@verule/sdk";
 import { z } from "zod";
 
@@ -196,9 +197,28 @@ export const explainResultSchema = z.object({
   inlineIgnore: z
     .object({
       matched: z.boolean(),
+      ruleId: z.string().optional(),
       reason: z.string().optional(),
+      commentAt: locationSchema.optional(),
     })
     .optional(),
+});
+
+export const inlineIgnoreEntrySchema = z.object({
+  status: z.enum([
+    "suppressed",
+    "unused",
+    "ambiguous",
+    "malformed",
+    "unknown_rule",
+    "undetermined",
+  ]),
+  at: locationSchema,
+  targetLine: z.number().int().positive().optional(),
+  ruleId: z.string().optional(),
+  reason: z.string().optional(),
+  matchedLocations: z.array(locationSchema).optional(),
+  message: z.string().optional(),
 });
 
 export const checkReportSchema = z.object({
@@ -209,12 +229,14 @@ export const checkReportSchema = z.object({
   diagnostics: z.array(diagnosticSchema),
   gaps: z.array(gapSchema),
   identity: reportIdentitySchema,
+  inlineIgnores: z.array(inlineIgnoreEntrySchema).optional(),
   observation: observationSchema.optional(),
   explanation: explainResultSchema.optional(),
   explanations: z.array(explainResultSchema).optional(),
 });
 
 export type WireCheckReport = z.infer<typeof checkReportSchema>;
+export type WireProjectSummary = z.infer<typeof projectSummarySchema>;
 export type WireObservation = z.infer<typeof observationSchema>;
 export type WireExplainResult = z.infer<typeof explainResultSchema>;
 
@@ -327,8 +349,14 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
       ? {
           inlineIgnore: {
             matched: exp.inlineIgnore.matched,
+            ...(exp.inlineIgnore.ruleId !== undefined
+              ? { ruleId: exp.inlineIgnore.ruleId }
+              : {}),
             ...(exp.inlineIgnore.reason !== undefined
               ? { reason: exp.inlineIgnore.reason }
+              : {}),
+            ...(exp.inlineIgnore.commentAt !== undefined
+              ? { commentAt: { ...exp.inlineIgnore.commentAt } }
               : {}),
           },
         }
@@ -336,44 +364,50 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
   };
 }
 
+export function toWireProjects(
+  projects: readonly ProjectSummary[],
+): WireProjectSummary[] {
+  return projects.map((project) => ({
+    projectId: project.projectId,
+    configFile: project.configFile,
+    entryConfig: project.entryConfig,
+    entryChain: [...project.entryChain],
+    referencedBy: [...project.referencedBy],
+    projectReferences: [...project.projectReferences],
+    compilerOptions: {
+      strict: project.compilerOptions.strict,
+      allowJs: project.compilerOptions.allowJs,
+      checkJs: project.compilerOptions.checkJs,
+      composite: project.compilerOptions.composite,
+      ...(project.compilerOptions.target !== undefined
+        ? { target: project.compilerOptions.target }
+        : {}),
+      ...(project.compilerOptions.module !== undefined
+        ? { module: project.compilerOptions.module }
+        : {}),
+      ...(project.compilerOptions.moduleResolution !== undefined
+        ? { moduleResolution: project.compilerOptions.moduleResolution }
+        : {}),
+      ...(project.compilerOptions.jsx !== undefined
+        ? { jsx: project.compilerOptions.jsx }
+        : {}),
+      paths: Object.fromEntries(
+        Object.entries(project.compilerOptions.paths).map(([key, vals]) => [
+          key,
+          [...vals],
+        ]),
+      ),
+      customConditions: [...project.compilerOptions.customConditions],
+    },
+    sourceFiles: [...project.sourceFiles],
+  }));
+}
+
 export function toWireReport(report: CheckReport): WireCheckReport {
   return {
     reportVersion: report.reportVersion,
     status: report.status,
-    projects: report.projects.map((project) => ({
-      projectId: project.projectId,
-      configFile: project.configFile,
-      entryConfig: project.entryConfig,
-      entryChain: [...project.entryChain],
-      referencedBy: [...project.referencedBy],
-      projectReferences: [...project.projectReferences],
-      compilerOptions: {
-        strict: project.compilerOptions.strict,
-        allowJs: project.compilerOptions.allowJs,
-        checkJs: project.compilerOptions.checkJs,
-        composite: project.compilerOptions.composite,
-        ...(project.compilerOptions.target !== undefined
-          ? { target: project.compilerOptions.target }
-          : {}),
-        ...(project.compilerOptions.module !== undefined
-          ? { module: project.compilerOptions.module }
-          : {}),
-        ...(project.compilerOptions.moduleResolution !== undefined
-          ? { moduleResolution: project.compilerOptions.moduleResolution }
-          : {}),
-        ...(project.compilerOptions.jsx !== undefined
-          ? { jsx: project.compilerOptions.jsx }
-          : {}),
-        paths: Object.fromEntries(
-          Object.entries(project.compilerOptions.paths).map(([key, vals]) => [
-            key,
-            [...vals],
-          ]),
-        ),
-        customConditions: [...project.compilerOptions.customConditions],
-      },
-      sourceFiles: [...project.sourceFiles],
-    })),
+    projects: toWireProjects(report.projects),
     fileOrigins: report.fileOrigins.map((origin) => ({
       file: origin.file,
       projects: origin.projects.map((proj) => ({
@@ -413,6 +447,27 @@ export function toWireReport(report: CheckReport): WireCheckReport {
         digest: model.digest,
       })),
     },
+    ...(report.inlineIgnores !== undefined
+      ? {
+          inlineIgnores: report.inlineIgnores.map((entry) => ({
+            status: entry.status,
+            at: { ...entry.at },
+            ...(entry.targetLine !== undefined
+              ? { targetLine: entry.targetLine }
+              : {}),
+            ...(entry.ruleId !== undefined ? { ruleId: entry.ruleId } : {}),
+            ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            ...(entry.matchedLocations !== undefined
+              ? {
+                  matchedLocations: entry.matchedLocations.map((loc) => ({
+                    ...loc,
+                  })),
+                }
+              : {}),
+            ...(entry.message !== undefined ? { message: entry.message } : {}),
+          })),
+        }
+      : {}),
     ...(report.observation !== undefined
       ? { observation: toWireObservation(report.observation) }
       : {}),

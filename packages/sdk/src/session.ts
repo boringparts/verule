@@ -23,6 +23,12 @@ import {
   type LibraryAdapter,
 } from "./facts.ts";
 import {
+  INLINE_IGNORE_RULE_ID,
+  resolveInlineIgnores,
+  type EngineDirectiveItem,
+  type EngineDirectivesScanResult,
+} from "./inline-ignore.ts";
+import {
   ObservationCollector,
   locationMatchesTarget,
   normalizeObserveConfig,
@@ -133,6 +139,12 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
       throw new VeruleExecutionError(
         "INVALID_CONFIG",
         `Duplicate rule id: "${rule.id}".`,
+      );
+    }
+    if (rule.id === INLINE_IGNORE_RULE_ID) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Rule id "${INLINE_IGNORE_RULE_ID}" is reserved.`,
       );
     }
     if (typeof rule.run !== "function") {
@@ -676,6 +688,30 @@ export async function openSession(
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const factCache = new FactCache();
   const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
+  let cachedDirectives:
+    | {
+        readonly snapshotId: number;
+        readonly promise: Promise<readonly EngineDirectiveItem[]>;
+      }
+    | undefined;
+
+  function scanDirectives(
+    snapshotId: number,
+    collector: ObservationCollector,
+  ): Promise<readonly EngineDirectiveItem[]> {
+    if (cachedDirectives?.snapshotId === snapshotId) {
+      return cachedDirectives.promise;
+    }
+    const promise = client
+      .request<EngineDirectivesScanResult>(
+        "directives.scan",
+        { snapshotId },
+        buildRpcOptions(collector),
+      )
+      .then((res) => res.directives);
+    cachedDirectives = { snapshotId, promise };
+    return promise;
+  }
 
   function assertOpen(): void {
     if (closed) {
@@ -1325,7 +1361,21 @@ export async function openSession(
       }
     }
 
-    const diagnostics = buildDiagnostics(collected);
+    const scannedDirectives = await scanDirectives(
+      currentSnapshotId,
+      collector,
+    );
+    const settlement = resolveInlineIgnores({
+      directives: scannedDirectives,
+      collected,
+      projects: currentProjects,
+      configuredRuleIds: new Set(baseRules.map((rule) => rule.id)),
+      executedRuleIds: new Set(rules.map((rule) => rule.id)),
+      isPartialRuleSelection:
+        runOptions?.ruleIds !== undefined && runOptions.ruleIds.length > 0,
+    });
+
+    const diagnostics = buildDiagnostics(settlement.diagnostics);
     const gaps = buildGaps(collectedGaps);
     const observation = collector.buildObservationReport();
     const explanations = explainTarget
@@ -1334,6 +1384,7 @@ export async function openSession(
             ruleId: rule.id,
             projects: currentProjects,
             diagnostics,
+            suppressions: settlement.suppressions,
           }),
         )
       : undefined;
@@ -1352,6 +1403,9 @@ export async function openSession(
         normalizedConfig.models,
         normalizedConfig.adapters,
       ),
+      ...(settlement.entries.length > 0
+        ? { inlineIgnores: settlement.entries }
+        : {}),
       ...(observation !== undefined ? { observation } : {}),
       ...(explanations !== undefined && explanations.length === 1
         ? { explanation: explanations[0] }
@@ -1419,6 +1473,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       factCache.clear();
+      cachedDirectives = undefined;
 
       const recomputation: RecomputationScope = {
         recomputedProjects: updated.recomputedProjects,
@@ -1473,6 +1528,7 @@ export async function openSession(
       typeCache.clear();
       branchListCache.clear();
       factCache.clear();
+      cachedDirectives = undefined;
       try {
         await client.request("snapshot.release", {
           snapshotId: currentSnapshotId,

@@ -19,6 +19,7 @@ export {
   type FactTypeSpec,
   type LibraryAdapter,
 } from "./facts.ts";
+export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {
   defineConfig,
@@ -27,6 +28,7 @@ export {
   openSession,
   runCheck,
 } from "./session.ts";
+export { requestSharedReport, startSharedSession } from "./shared-session.ts";
 export { watchProject } from "./watch.ts";
 export type {
   BranchCoverageItem,
@@ -85,6 +87,8 @@ export {
   type ExplainStatus,
   type FindSyntaxOptions,
   type Gap,
+  type InlineIgnoreEntry,
+  type InlineIgnoreStatus,
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
@@ -104,6 +108,7 @@ export {
   type ProjectSummary,
   type RecomputationScope,
   type ReportIdentity,
+  type RequestSharedReportOptions,
   type Rule,
   type RuleContext,
   type RuleIdentitySummary,
@@ -111,6 +116,8 @@ export {
   type SessionCheckOptions,
   type SessionUpdateOptions,
   type SessionUpdateResult,
+  type SharedSession,
+  type SharedSessionOptions,
   type SignatureRef,
   type SourceFileOrigin,
   type SourceFileProjectOrigin,
