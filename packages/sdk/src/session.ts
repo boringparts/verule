@@ -1463,9 +1463,23 @@ export async function openSession(
       recordRuleQuery: boolean,
     ): Promise<readonly BranchCoverageItem[]> => {
       assertActiveSnapshot();
+      if (query.function !== undefined && query.scope !== undefined) {
+        throw new VeruleExecutionError(
+          "INVALID_CONFIG",
+          'branchCoverage accepts either "function" or "scope", not both.',
+        );
+      }
       if (query.function !== undefined) {
         assertValidProgramRef(
           query.function,
+          sessionToken,
+          activeSnapshotId,
+          project.projectId,
+        );
+      }
+      if (query.scope !== undefined) {
+        assertValidProgramRef(
+          query.scope,
           sessionToken,
           activeSnapshotId,
           project.projectId,
@@ -1500,6 +1514,9 @@ export async function openSession(
               op: "branchCoverage",
               ...(query.function !== undefined
                 ? { function: query.function.handleId }
+                : {}),
+              ...(query.scope !== undefined
+                ? { scope: query.scope.handleId }
                 : {}),
               branches: query.branches.map((branch) => branch.handleId),
               targets: query.targets.map((target) => target.handleId),

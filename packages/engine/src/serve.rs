@@ -17,7 +17,8 @@ use tsrs_vfs::{FS, bundled, osvfs};
 
 use crate::calls_values::ProjectCallGraph;
 use crate::cfg::{
-    EvidenceItem, FunctionCfg, GapItem, normalize_function_node, resolve_enclosing_function,
+    EvidenceItem, FunctionCfg, GapItem, normalize_cfg_scope_node, normalize_function_node,
+    resolve_enclosing_function,
 };
 use crate::directives::{ScannedDirective, scan_snapshot_directives};
 use crate::instance_identity::{FieldWriteIndex, InstanceHandleData};
@@ -499,7 +500,7 @@ impl SnapshotState {
             });
         };
         let rel_file = relative_to_cwd(&self.cwd, sf.file_name());
-        let built = FunctionCfg::build(sf, &rel_file, fn_node).map(Arc::new);
+        let built = FunctionCfg::build_scope(sf, &rel_file, fn_node).map(Arc::new);
         self.cfg_cache.insert(key, built.clone());
         built
     }
@@ -846,13 +847,15 @@ pub fn run_list_branches(
     let mut fn_nodes = Vec::with_capacity(targets.len());
     for handle_id in targets {
         let node = snapshot.get_syntax_node(project_id, handle_id)?;
-        let Some(fn_node) = normalize_function_node(node) else {
+        let Some(scope_node) = normalize_cfg_scope_node(node) else {
             return Err(RpcErr::new(
                 "INVALID_REFERENCE_KIND",
-                format!("Program reference {handle_id} is not a function-like syntax node."),
+                format!(
+                    "Program reference {handle_id} is not a function, block, or statement syntax node."
+                ),
             ));
         };
-        fn_nodes.push((handle_id.clone(), fn_node));
+        fn_nodes.push((handle_id.clone(), scope_node));
     }
 
     let mut items = Vec::with_capacity(fn_nodes.len());
@@ -902,10 +905,18 @@ pub fn run_branch_coverage(
     snapshot: &mut SnapshotState,
     project_id: &str,
     function_handle: Option<&str>,
+    scope_handle: Option<&str>,
     branch_handles: &[String],
     target_handles: &[String],
 ) -> Result<Vec<BranchCoverageItem>, RpcErr> {
-    let explicit_fn = if let Some(fn_id) = function_handle {
+    if function_handle.is_some() && scope_handle.is_some() {
+        return Err(RpcErr::new(
+            "INVALID_CONFIG",
+            "branchCoverage accepts either 'function' or 'scope', not both.".to_string(),
+        ));
+    }
+
+    let explicit_scope = if let Some(fn_id) = function_handle {
         let node = snapshot.get_syntax_node(project_id, fn_id)?;
         let Some(fn_node) = normalize_function_node(node) else {
             return Err(RpcErr::new(
@@ -914,6 +925,17 @@ pub fn run_branch_coverage(
             ));
         };
         Some(fn_node)
+    } else if let Some(scope_id) = scope_handle {
+        let node = snapshot.get_syntax_node(project_id, scope_id)?;
+        let Some(scope_node) = normalize_cfg_scope_node(node) else {
+            return Err(RpcErr::new(
+                "INVALID_REFERENCE_KIND",
+                format!(
+                    "Program reference {scope_id} is not a function, block, or statement syntax node."
+                ),
+            ));
+        };
+        Some(scope_node)
     } else {
         None
     };
@@ -939,7 +961,7 @@ pub fn run_branch_coverage(
 
     let mut items = Vec::with_capacity(resolved_targets.len());
     for (target_id, target_node, target_loc) in resolved_targets {
-        let scope_fn = explicit_fn.or_else(|| resolve_enclosing_function(target_node));
+        let scope_fn = explicit_scope.or_else(|| resolve_enclosing_function(target_node));
         let Some(fn_node) = scope_fn else {
             items.push(BranchCoverageItem {
                 target: target_id,
@@ -972,7 +994,7 @@ pub fn run_branch_coverage(
         for branch in &resolved_branches {
             if branch.function_node == fn_node {
                 selected_edges.push(branch.edge_index);
-            } else if explicit_fn.is_some() {
+            } else if explicit_scope.is_some() {
                 extra_gaps.push(GapItem {
                     kind: "foreign-branch-reference",
                     message:

@@ -130,6 +130,8 @@ pub enum QueryStep {
     BranchCoverage {
         #[serde(default)]
         function: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
         branches: Vec<String>,
         targets: Vec<String>,
     },
@@ -737,12 +739,14 @@ fn execute_step(
         }
         QueryStep::BranchCoverage {
             function,
+            scope,
             branches,
             targets,
         } => execute_branch_coverage_step(
             snapshot,
             project_id,
             function.as_deref(),
+            scope.as_deref(),
             &branches,
             &targets,
             step_start,
@@ -1064,16 +1068,21 @@ fn execute_list_branches_step(
     Ok(StepResult::ListBranches { items })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Executes branchCoverage step with optional function or local scope handle."
+)]
 fn execute_branch_coverage_step(
     snapshot: &mut SnapshotState,
     project_id: &str,
     function: Option<&str>,
+    scope: Option<&str>,
     branches: &[String],
     targets: &[String],
     step_start: Option<Instant>,
     observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
-    let items = run_branch_coverage(snapshot, project_id, function, branches, targets)?;
+    let items = run_branch_coverage(snapshot, project_id, function, scope, branches, targets)?;
     let raw_details = if observer.is_detail() {
         items
             .iter()

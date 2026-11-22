@@ -82,3 +82,16 @@ export {
   type HostResolutionAudit,
   type VerifyHostResolutionOptions,
 } from "./verify.ts";
+export {
+  VUE_REQUEUE_AFTER_SHA,
+  VUE_REQUEUE_BEFORE_SHA,
+  VUE_REQUEUE_CONFIG_SOURCE,
+  VUE_REQUEUE_DIRECT_PACKAGES,
+  VUE_REQUEUE_PACKAGE_BATCH,
+  runVueRequeueReplay,
+  type RunVueRequeueOptions,
+  type VueRequeueCliEnvelope,
+  type VueRequeueReplayOutcome,
+  type VueRequeueRevisionLabel,
+  type VueRequeueRevisionResult,
+} from "./vue-requeue.ts";
