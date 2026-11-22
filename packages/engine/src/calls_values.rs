@@ -143,7 +143,7 @@ pub fn node_location_rel(cwd: &str, node: P<Node>) -> Option<SourceLocation> {
     Some(node_location(sf, &rel, node))
 }
 
-fn node_text(node: P<Node>) -> Option<String> {
+pub fn node_text(node: P<Node>) -> Option<String> {
     let sf = get_source_file_of_node(node)?;
     let loc = node_location(sf, "", node);
     Some(slice_source_text(sf, loc.start, loc.end))
@@ -173,7 +173,7 @@ pub fn canonical_symbol_for_node(checker: &mut CheckerHandle, node: P<Node>) -> 
         .filter(|&s| s != checker.get_unknown_symbol())
 }
 
-fn extract_callable_from_decl(decl: P<Node>) -> Option<P<Node>> {
+pub fn extract_callable_from_decl(decl: P<Node>) -> Option<P<Node>> {
     if is_function_like_declaration(Some(decl)) {
         return Some(decl);
     }
@@ -192,7 +192,7 @@ fn extract_callable_from_decl(decl: P<Node>) -> Option<P<Node>> {
     }
 }
 
-fn pick_preferred_impl_decl(sym: P<Symbol>, sig_opt: Option<P<Signature>>) -> Option<P<Node>> {
+pub fn pick_preferred_impl_decl(sym: P<Symbol>, sig_opt: Option<P<Signature>>) -> Option<P<Node>> {
     let mut candidates = Vec::new();
     for &d in sym.declarations() {
         candidates.push(d);
@@ -311,7 +311,7 @@ fn is_unresolved_sig(checker: &mut CheckerHandle, sig: P<Signature>) -> bool {
     false
 }
 
-fn resolve_property_in_object_literal(obj_lit: P<Node>, prop_name: &str) -> Option<P<Node>> {
+pub fn resolve_property_in_object_literal(obj_lit: P<Node>, prop_name: &str) -> Option<P<Node>> {
     for &prop in obj_lit.as_object_literal_expression().properties().nodes() {
         match prop.kind() {
             Kind::PropertyAssignment => {
@@ -959,15 +959,15 @@ pub fn run_callees_of(
                 .collect();
 
             if let Some(loc) = target.location.clone() {
-                evidence.push(EvidenceItem {
-                    kind: "source",
-                    message: format!(
+                evidence.push(EvidenceItem::simple(
+                    "source",
+                    format!(
                         "{}: {}",
                         target.reason,
                         target.name.as_deref().unwrap_or("<anonymous>")
                     ),
-                    at: Some(loc),
-                });
+                    Some(loc),
+                ));
             }
 
             target_refs.push(decl_ref.clone());
@@ -1063,13 +1063,13 @@ struct WriteSpan {
     is_unconditional: bool,
 }
 
-fn node_byte_span(node: P<Node>) -> (u32, u32) {
+pub fn node_byte_span(node: P<Node>) -> (u32, u32) {
     let start = node.pos().source_offset().unwrap_or(0);
     let end = node.end().source_offset().unwrap_or(start).max(start);
     (start, end)
 }
 
-fn enclosing_block(node: P<Node>) -> Option<P<Node>> {
+pub fn enclosing_block(node: P<Node>) -> Option<P<Node>> {
     let mut cur = node.parent();
     while let Some(p) = cur {
         if matches!(p.kind(), Kind::Block | Kind::SourceFile) {
@@ -1083,7 +1083,7 @@ fn enclosing_block(node: P<Node>) -> Option<P<Node>> {
     None
 }
 
-fn is_direct_block_statement(node: P<Node>, block: P<Node>) -> bool {
+pub fn is_direct_block_statement(node: P<Node>, block: P<Node>) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
         if p == block {
@@ -1113,7 +1113,7 @@ fn is_direct_block_statement(node: P<Node>, block: P<Node>) -> bool {
     false
 }
 
-fn is_ancestor_of(ancestor: P<Node>, mut descendant: P<Node>) -> bool {
+pub fn is_ancestor_of(ancestor: P<Node>, mut descendant: P<Node>) -> bool {
     loop {
         if descendant == ancestor {
             return true;
@@ -1125,7 +1125,7 @@ fn is_ancestor_of(ancestor: P<Node>, mut descendant: P<Node>) -> bool {
     }
 }
 
-fn enclosing_loop(node: P<Node>) -> Option<P<Node>> {
+pub fn enclosing_loop(node: P<Node>) -> Option<P<Node>> {
     let mut cur = node.parent();
     while let Some(p) = cur {
         if matches!(
@@ -1311,7 +1311,7 @@ fn collect_reachable_reads(
     out
 }
 
-fn prop_key_text(node: P<Node>) -> Option<String> {
+pub fn prop_key_text(node: P<Node>) -> Option<String> {
     let raw = node_text(node)?;
     if matches!(
         node.kind(),
@@ -1469,24 +1469,24 @@ impl<'a> PropagationRunner<'a> {
             if item.gap_indices.is_empty() && self.found_paths[idx].len() < MAX_PATHS_PER_PAIR {
                 let mut evidence = Vec::with_capacity(item.steps.len() + 1);
                 if let Some(first) = item.steps.first() {
-                    evidence.push(EvidenceItem {
-                        kind: "source",
-                        message: "Origin value starts here".to_string(),
-                        at: Some(first.from_location.clone()),
-                    });
+                    evidence.push(EvidenceItem::simple(
+                        "source",
+                        "Origin value starts here".to_string(),
+                        Some(first.from_location.clone()),
+                    ));
                 } else if let Some(loc) = node_location_rel(self.cwd, item.key.node) {
-                    evidence.push(EvidenceItem {
-                        kind: "source",
-                        message: "Origin value matches target directly".to_string(),
-                        at: Some(loc),
-                    });
+                    evidence.push(EvidenceItem::simple(
+                        "source",
+                        "Origin value matches target directly".to_string(),
+                        Some(loc),
+                    ));
                 }
                 for step in &item.steps {
-                    evidence.push(EvidenceItem {
-                        kind: "source",
-                        message: step.description.clone(),
-                        at: Some(step.to_location.clone()),
-                    });
+                    evidence.push(EvidenceItem::simple(
+                        "source",
+                        step.description.clone(),
+                        Some(step.to_location.clone()),
+                    ));
                 }
                 self.found_paths[idx].push(ValuePropagationPathPayload {
                     from: from_id.to_string(),
@@ -2329,7 +2329,8 @@ fn resolve_endpoint_spec(
         }
         crate::serve::HandlePayload::Signature { .. }
         | crate::serve::HandlePayload::Type { .. }
-        | crate::serve::HandlePayload::Branch(_) => Err(crate::serve::RpcErr::new(
+        | crate::serve::HandlePayload::Branch(_)
+        | crate::serve::HandlePayload::Instance(_) => Err(crate::serve::RpcErr::new(
             "INVALID_REFERENCE_KIND",
             format!(
                 "Program reference {handle_id} cannot be used as a value propagation endpoint."

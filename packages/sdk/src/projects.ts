@@ -37,6 +37,10 @@ function normalizeEvidence(evidence: readonly Evidence[]): readonly Evidence[] {
     kind: item.kind,
     message: item.message,
     ...(item.at !== undefined ? { at: normalizeLocation(item.at) } : {}),
+    ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
+    ...(item.declaration !== undefined
+      ? { declaration: item.declaration }
+      : {}),
   }));
 }
 
@@ -50,6 +54,10 @@ function canonicalEvidenceKey(evidence: readonly Evidence[]): string {
       kind: item.kind,
       message: item.message,
       ...(item.at !== undefined ? { at: canonicalLocationKey(item.at) } : {}),
+      ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
+      ...(item.declaration !== undefined
+        ? { declaration: item.declaration }
+        : {}),
     })),
   );
 }

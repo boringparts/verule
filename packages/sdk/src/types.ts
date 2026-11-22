@@ -20,6 +20,13 @@ import type {
   LibraryAdapter,
 } from "./facts.ts";
 import type {
+  InstanceModelBehavior,
+  InstanceProjectionSelection,
+  InstanceResolutionResult,
+  InstanceTargetRef,
+  ProjectedInstanceRow,
+} from "./instance-identity.ts";
+import type {
   AssignabilityPair,
   AssignabilityResult,
   CallProjectionSelection,
@@ -131,7 +138,8 @@ export type ProgramObjectKind =
   | "call"
   | "signature"
   | "type"
-  | "branch";
+  | "branch"
+  | "instance";
 
 export interface ProgramRef<K extends ProgramObjectKind = ProgramObjectKind> {
   readonly [objectKindBrand]: K;
@@ -147,6 +155,7 @@ export type CallRef = ProgramRef<"call">;
 export type SignatureRef = ProgramRef<"signature">;
 export type TypeRef = ProgramRef<"type">;
 export type BranchRef = ProgramRef<"branch">;
+export type InstanceRef = ProgramRef<"instance">;
 
 const refSessionTokens = new WeakMap<object, symbol>();
 
@@ -187,9 +196,11 @@ export type CheckpointTarget =
   | { readonly location: DiagnosticLocation };
 
 export type Evidence = {
-  readonly kind: "source" | "type" | "note";
+  readonly kind: "source" | "type" | "note" | "model";
   readonly message: string;
   readonly at?: DiagnosticLocation;
+  readonly modelId?: string;
+  readonly declaration?: string;
 };
 
 export type Gap = {
@@ -255,6 +266,7 @@ export type Model = {
   readonly version?: string;
   readonly description?: string;
   readonly facts?: Readonly<Record<string, unknown>>;
+  readonly instanceBehaviors?: readonly InstanceModelBehavior[];
 };
 
 export type RuleIdentitySummary = {
@@ -519,6 +531,15 @@ export type RuleContext = {
   valuePropagation: (
     options: ValuePropagationOptions,
   ) => Promise<ValuePropagationResult>;
+  resolveInstances: (
+    targets: readonly InstanceTargetRef[],
+  ) => Promise<readonly InstanceResolutionResult[]>;
+  projectInstances: <
+    const S extends InstanceProjectionSelection = Record<never, never>,
+  >(
+    instances: readonly InstanceRef[],
+    options?: { readonly select?: S },
+  ) => Promise<readonly ProjectedInstanceRow<S>[]>;
   facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
     factType: FactType<SubjectKind, Condition, Value>,
     options?: FactQueryOptions<NoInfer<SubjectKind>, NoInfer<Condition>>,
