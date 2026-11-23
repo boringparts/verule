@@ -22,6 +22,7 @@ import type {
   ValuePropagationResult,
 } from "./calls-values.ts";
 import type {
+  ConfiguredAdapter,
   FactQueryOptions,
   FactResult,
   FactType,
@@ -65,6 +66,8 @@ export type VeruleErrorCode =
   | "CROSS_PROJECT_REFERENCE"
   | "STALE_SNAPSHOT"
   | "SESSION_CLOSED"
+  | "NATIVE_ADAPTER_LOAD"
+  | "NATIVE_ADAPTER_EXTRACT"
   | "ENGINE_ERROR";
 
 export type FactConflictParty = {
@@ -640,7 +643,7 @@ export type VeruleConfig = {
   readonly projects?: readonly string[];
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
-  readonly adapters?: readonly LibraryAdapter[];
+  readonly adapters?: readonly ConfiguredAdapter[];
   readonly additionalInputs?: readonly string[];
 };
 
@@ -650,6 +653,7 @@ export type NormalizedVeruleConfig = {
   readonly rules: readonly Rule[];
   readonly models: readonly Model[];
   readonly adapters: readonly LibraryAdapter[];
+  readonly adapterPackages: readonly string[];
   readonly additionalInputs: readonly string[];
 };
 
@@ -672,7 +676,9 @@ export type ExplainOptions = {
 
 export type OpenSessionOptions = {
   readonly cwd: string;
-  readonly config?: VeruleConfig;
+  readonly config?: VeruleConfig | NormalizedVeruleConfig;
+  /** Directory used to resolve adapter package names; defaults to `cwd`. */
+  readonly adapterResolutionRoot?: string;
   readonly observe?: ObserveMode | ObserveOptions;
   readonly observeLimit?: ObserveLimitInput;
   readonly configLoadMs?: number;
@@ -701,10 +707,11 @@ export type SessionUpdateOptions = {
   readonly changed?: readonly string[];
   readonly created?: readonly string[];
   readonly deleted?: readonly string[];
-  readonly config?: VeruleConfig;
+  readonly config?: VeruleConfig | NormalizedVeruleConfig;
+  readonly adapterResolutionRoot?: string;
   readonly rules?: readonly Rule[];
   readonly models?: readonly Model[];
-  readonly adapters?: readonly LibraryAdapter[];
+  readonly adapters?: readonly ConfiguredAdapter[];
   readonly entries?: readonly string[];
   readonly additionalInputs?: readonly string[];
 };
@@ -742,11 +749,14 @@ export type WatchTrigger = "initial" | "change";
 export type WatchConfigLoadResult = {
   readonly config: VeruleConfig;
   readonly watchFiles?: readonly string[];
+  readonly adapterResolutionRoot?: string;
 };
 
 export type WatchProjectOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig;
+  /** Directory used to resolve adapter package names; defaults to `cwd`. */
+  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;
@@ -779,6 +789,8 @@ export type SharedSessionOptions = {
   readonly cwd: string;
   readonly endpoint: string;
   readonly config?: VeruleConfig;
+  /** Directory used to resolve adapter package names; defaults to `cwd`. */
+  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;

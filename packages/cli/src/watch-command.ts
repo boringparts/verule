@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { REPORT_SCHEMA_VERSION, watchProject } from "@verule/sdk";
 import { text } from "@ykdz/cli-contract";
@@ -98,6 +98,7 @@ export async function* streamWatchEvents<
       return {
         config: loaded.config,
         watchFiles: loaded.watchFiles,
+        adapterResolutionRoot: dirname(loaded.configPath),
       };
     },
   });

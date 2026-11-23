@@ -22,6 +22,7 @@ use crate::cfg::{
 };
 use crate::directives::{ScannedDirective, scan_snapshot_directives};
 use crate::instance_identity::{FieldWriteIndex, InstanceHandleData};
+use crate::native_adapter::{NativeAdapterPackageInput, NativeAdapterRegistry};
 use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
 use crate::package_impl::PackageImplCache;
 use crate::projection::{QueryStep, execute_query_batch};
@@ -78,6 +79,8 @@ impl RpcErr {
 struct SnapshotOpenParams {
     cwd: String,
     entries: Vec<String>,
+    #[serde(default, rename = "nativeAdapters")]
+    native_adapters: Vec<NativeAdapterPackageInput>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +95,8 @@ struct SnapshotUpdateParams {
     created: Vec<String>,
     #[serde(default)]
     deleted: Vec<String>,
+    #[serde(default, rename = "nativeAdapters")]
+    native_adapters: Option<Vec<NativeAdapterPackageInput>>,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +257,7 @@ pub struct SnapshotState {
     pub call_graph_cache: FxHashMap<String, Arc<ProjectCallGraph>>,
     pub field_write_index: FxHashMap<String, Arc<FieldWriteIndex>>,
     pub package_impl_cache: PackageImplCache,
+    pub native_adapters: NativeAdapterRegistry,
     pub next_handle_id: u64,
 }
 
@@ -630,6 +636,8 @@ impl EngineServer {
     }
 
     fn open_snapshot(&mut self, params: &SnapshotOpenParams) -> Result<SnapshotOpenResult, RpcErr> {
+        let native_adapters =
+            crate::native_adapter::load_configured_adapters(&params.native_adapters)?;
         let cwd = normalize_path(&params.cwd);
         let session = self.ensure_session(&cwd);
         let opened = open_projects_snapshot(&session, &cwd, &params.entries)
@@ -655,6 +663,7 @@ impl EngineServer {
                 call_graph_cache: FxHashMap::default(),
                 field_write_index: FxHashMap::default(),
                 package_impl_cache: PackageImplCache::default(),
+                native_adapters,
                 next_handle_id: 0,
             },
         );
@@ -685,6 +694,7 @@ impl EngineServer {
             old_opened_configs,
             old_snapshot_data,
             old_project_ids,
+            old_native_adapters,
         ) = {
             let Some(old_state) = self.snapshots.get(&params.snapshot_id) else {
                 return Err(RpcErr::new(
@@ -699,7 +709,13 @@ impl EngineServer {
                 old_state.opened_configs.clone(),
                 Arc::clone(&old_state.snapshot_data),
                 old_state.project_ids.clone(),
+                old_state.native_adapters.clone(),
             )
+        };
+
+        let native_adapters = match params.native_adapters.as_deref() {
+            Some(inputs) => crate::native_adapter::load_configured_adapters(inputs)?,
+            None => old_native_adapters,
         };
 
         let updated = update_projects_snapshot(
@@ -744,6 +760,7 @@ impl EngineServer {
                 call_graph_cache: FxHashMap::default(),
                 field_write_index: FxHashMap::default(),
                 package_impl_cache: PackageImplCache::default(),
+                native_adapters,
                 next_handle_id: 0,
             },
         );

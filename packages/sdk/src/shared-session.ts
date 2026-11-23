@@ -191,6 +191,9 @@ export async function startSharedSession(
 
   const controller = createWorkspaceController({
     cwd: absCwd,
+    ...(options.adapterResolutionRoot !== undefined
+      ? { adapterResolutionRoot: options.adapterResolutionRoot }
+      : {}),
     ...(options.config !== undefined ? { config: options.config } : {}),
     ...(options.loadConfig !== undefined
       ? { loadConfig: options.loadConfig }

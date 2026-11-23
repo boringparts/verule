@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
@@ -23,7 +24,7 @@ import { isNodeBrokenPipe } from "@ykdz/cli-contract/node";
 import { z } from "zod";
 
 import type { CliCommandIdentity } from "./cli-command-identity.ts";
-import { loadProjectConfig } from "./config-loader.ts";
+import { loadProjectConfigWithDependencies } from "./config-loader.ts";
 import {
   appendGapLines,
   checkFailureSchema,
@@ -258,12 +259,16 @@ function createCliContract(
       }
 
       const configStart = performance.now();
-      const config = await loadProjectConfig(workingDirectory, input.config);
+      const loaded = await loadProjectConfigWithDependencies(
+        workingDirectory,
+        input.config,
+      );
       const configLoadMs = performance.now() - configStart;
 
       const report = await runCheck({
         cwd: workingDirectory,
-        config,
+        config: loaded.config,
+        adapterResolutionRoot: dirname(loaded.configPath),
         configLoadMs,
         ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
         ...(input.at !== undefined ? { at: input.at } : {}),

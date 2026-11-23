@@ -317,7 +317,7 @@ fn collect_file_syntax(
     walk(sf.as_node(), calls, var_decls, import_specs);
 }
 
-fn resolve_decl_for_ref(
+pub fn resolve_decl_for_ref(
     cwd: &str,
     checker: &mut CheckerHandle,
     node: P<Node>,
@@ -2002,13 +2002,13 @@ fn resolve_requested_targets(
     Ok(Some(set))
 }
 
-struct CollectedDrizzleNodes {
-    all_calls: Vec<P<Node>>,
-    all_var_decls: Vec<P<Node>>,
+pub struct CollectedDrizzleNodes {
+    pub all_calls: Vec<P<Node>>,
+    pub all_var_decls: Vec<P<Node>>,
     inner_receiver_locs: FxHashSet<(String, u32, u32)>,
 }
 
-fn collect_all_drizzle_nodes(
+pub fn collect_all_drizzle_nodes(
     cwd: &str,
     program: &'static Program,
     checker: &mut CheckerHandle,

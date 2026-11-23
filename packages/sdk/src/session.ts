@@ -39,6 +39,7 @@ import {
   type FactContribution,
   type FactQueryOptions,
   type FactType,
+  type ConfiguredAdapter,
   type LibraryAdapter,
 } from "./facts.ts";
 import {
@@ -52,6 +53,7 @@ import {
   createInstanceIdentityQueries,
   validateInstanceBehaviors,
 } from "./instance-identity.ts";
+import { resolveNativeAdapterPackages } from "./native-adapters.ts";
 import {
   ObservationCollector,
   locationMatchesTarget,
@@ -153,6 +155,7 @@ type EngineTypeItem = {
 type EngineBatchResult = {
   readonly results: readonly {
     readonly items: readonly unknown[];
+    readonly additionalInputs?: readonly string[];
   }[];
 };
 
@@ -287,7 +290,9 @@ export function defineRule(rule: Rule): Rule {
 }
 
 /** Validates and normalizes a Verule project configuration, defaulting to zero rules. */
-export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
+export function defineConfig(
+  config: VeruleConfig | NormalizedVeruleConfig,
+): NormalizedVeruleConfig {
   if (config.tsconfig !== undefined && config.projects !== undefined) {
     throw new VeruleExecutionError(
       "INVALID_CONFIG",
@@ -302,7 +307,18 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
   }
   const rules = validateRules(config.rules ?? []);
   const models = validateModels(config.models ?? []);
-  const adapters = validateAdapters(config.adapters ?? []);
+  const configuredAdapters = config.adapters ?? [];
+  const adapters = validateAdapters(
+    configuredAdapters.filter(
+      (adapter): adapter is LibraryAdapter => typeof adapter !== "string",
+    ),
+  );
+  const adapterPackages = validateAdapterPackageNames([
+    ...("adapterPackages" in config ? config.adapterPackages : []),
+    ...configuredAdapters.filter(
+      (adapter): adapter is string => typeof adapter === "string",
+    ),
+  ]);
   const additionalInputs = validateAdditionalInputPaths(
     config.additionalInputs,
   );
@@ -314,8 +330,52 @@ export function defineConfig(config: VeruleConfig): NormalizedVeruleConfig {
     rules,
     models,
     adapters,
+    adapterPackages,
     additionalInputs,
   };
+}
+
+function validateAdapterPackageNames(
+  packageNames: readonly string[],
+): readonly string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const rawName of packageNames) {
+    if (typeof rawName !== "string" || rawName.trim() === "") {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        "Adapter package names must be non-empty strings.",
+      );
+    }
+    const packageName = rawName.trim();
+    if (seen.has(packageName)) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Duplicate adapter package name: "${packageName}".`,
+      );
+    }
+    seen.add(packageName);
+    normalized.push(packageName);
+  }
+  return normalized;
+}
+
+function combineConfiguredAdapters(
+  configuredAdapters: readonly LibraryAdapter[],
+  packageAdapters: readonly LibraryAdapter[],
+  packageNames: readonly string[],
+): readonly LibraryAdapter[] {
+  try {
+    return validateAdapters([...configuredAdapters, ...packageAdapters]);
+  } catch (error) {
+    if (packageNames.length === 0) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      `Configured adapter package(s) ${packageNames.map((name) => `"${name}"`).join(", ")} could not be registered: ${detail}`,
+      { cause: error },
+    );
+  }
 }
 
 function stableSerialize(value: unknown): string {
@@ -391,6 +451,7 @@ function computeReportIdentity(
   models: readonly Model[],
   additionalInputs: readonly string[] = [],
   adapters: readonly LibraryAdapter[] = [],
+  adapterPackages: readonly string[] = [],
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
   const modelSummaries = models.map(summarizeModel);
@@ -404,6 +465,7 @@ function computeReportIdentity(
       models: modelSummaries,
       ...(additionalInputs.length > 0 ? { additionalInputs } : {}),
       ...(adapterSummaries.length > 0 ? { adapters: adapterSummaries } : {}),
+      ...(adapterPackages.length > 0 ? { adapterPackages } : {}),
     }),
   );
   return {
@@ -562,8 +624,19 @@ function resolveNextConfig(
     ? validateModels(options.models)
     : current.models;
   const adapters = options?.adapters
-    ? validateAdapters(options.adapters)
+    ? validateAdapters(
+        options.adapters.filter(
+          (adapter): adapter is LibraryAdapter => typeof adapter !== "string",
+        ),
+      )
     : current.adapters;
+  const adapterPackages = options?.adapters
+    ? validateAdapterPackageNames(
+        options.adapters.filter(
+          (adapter): adapter is string => typeof adapter === "string",
+        ),
+      )
+    : current.adapterPackages;
   const additionalInputs =
     options?.additionalInputs !== undefined
       ? validateAdditionalInputPaths(options.additionalInputs)
@@ -580,6 +653,7 @@ function resolveNextConfig(
       rules,
       models,
       adapters,
+      adapterPackages,
       additionalInputs,
     };
   }
@@ -589,6 +663,7 @@ function resolveNextConfig(
     rules,
     models,
     adapters,
+    adapterPackages,
     additionalInputs,
   };
 }
@@ -619,6 +694,7 @@ function collectInvalidatedBy(
     prevConfig.models,
     prevConfig.additionalInputs,
     prevConfig.adapters,
+    prevConfig.adapterPackages,
   );
   const nextIdentity = computeReportIdentity(
     "",
@@ -627,6 +703,7 @@ function collectInvalidatedBy(
     nextConfig.models,
     nextConfig.additionalInputs,
     nextConfig.adapters,
+    nextConfig.adapterPackages,
   );
   if (stableSerialize(prevEntries) !== stableSerialize(nextEntries)) {
     reasons.push("entries");
@@ -661,6 +738,12 @@ function collectInvalidatedBy(
     )
   ) {
     reasons.push("adapters");
+  }
+  if (
+    stableSerialize(prevConfig.adapterPackages) !==
+    stableSerialize(nextConfig.adapterPackages)
+  ) {
+    reasons.push("adapterPackages");
   }
   if (options?.config !== undefined && reasons.length === 0) {
     reasons.push("config");
@@ -714,8 +797,18 @@ export async function openSession(
   let normalizedConfig = options.config
     ? defineConfig(options.config)
     : defineConfig({});
-  const initialEntries = resolveProjectEntries(normalizedConfig);
   const absCwd = resolve(options.cwd);
+  let adapterResolutionRoot = resolve(options.adapterResolutionRoot ?? absCwd);
+  let packageResolution = await resolveNativeAdapterPackages(
+    normalizedConfig.adapterPackages,
+    adapterResolutionRoot,
+  );
+  let activeAdapters = combineConfiguredAdapters(
+    normalizedConfig.adapters,
+    packageResolution.adapters,
+    normalizedConfig.adapterPackages,
+  );
+  const initialEntries = resolveProjectEntries(normalizedConfig);
   const sessionObserve = normalizeObserveConfig(
     options.observe,
     options.observeLimit,
@@ -750,6 +843,7 @@ export async function openSession(
       {
         cwd: absCwd,
         entries: initialEntries,
+        nativeAdapters: packageResolution.nativeAdapters,
       },
       openRpcOptions,
     );
@@ -1679,11 +1773,16 @@ export async function openSession(
 
           const rawItems = (batch.results[0]?.items ?? []) as readonly {
             readonly subject: string;
-            readonly subjectLocation: DiagnosticLocation;
+            readonly subjectLocation?: DiagnosticLocation;
             readonly value: Value;
             readonly evidence?: readonly Evidence[];
             readonly gaps?: readonly Gap[];
           }[];
+          const additionalInputs = batch.results[0]?.additionalInputs ?? [];
+          for (const filePath of additionalInputs) {
+            onAdditionalInput(filePath);
+            scopedAdapterInputs.registerAdditionalInput(filePath);
+          }
 
           return rawItems.map((item) => {
             const ref = makeProgramRef(
@@ -1693,7 +1792,9 @@ export async function openSession(
               activeSnapshotId,
               item.subject,
             );
-            syntaxLocations.set(ref, item.subjectLocation);
+            if (item.subjectLocation !== undefined) {
+              syntaxLocations.set(ref, item.subjectLocation);
+            }
             return {
               subject: ref as unknown as ProgramRef<SubjectKind>,
               value: item.value,
@@ -1746,7 +1847,7 @@ export async function openSession(
         executeFactQuery({
           factType,
           options: factOptions,
-          adapters: normalizedConfig.adapters,
+          adapters: activeAdapters,
           factCache,
           sessionToken,
           snapshotId: activeSnapshotId,
@@ -1971,7 +2072,8 @@ export async function openSession(
         rules,
         normalizedConfig.models,
         normalizedConfig.additionalInputs,
-        normalizedConfig.adapters,
+        activeAdapters,
+        normalizedConfig.adapterPackages,
       ),
       ...(settlement.entries.length > 0
         ? { inlineIgnores: settlement.entries }
@@ -2024,6 +2126,27 @@ export async function openSession(
       assertOpen();
       const changedAdditionalFiles = sessionRegistry.refresh();
       const nextConfig = resolveNextConfig(normalizedConfig, updateOptions);
+      const nextAdapterResolutionRoot = resolve(
+        updateOptions?.adapterResolutionRoot ?? adapterResolutionRoot,
+      );
+      const adapterPackagesChanged =
+        nextAdapterResolutionRoot !== adapterResolutionRoot ||
+        stableSerialize(nextConfig.adapterPackages) !==
+          stableSerialize(normalizedConfig.adapterPackages);
+      const nextPackageResolution = adapterPackagesChanged
+        ? await resolveNativeAdapterPackages(
+            nextConfig.adapterPackages,
+            nextAdapterResolutionRoot,
+          )
+        : packageResolution;
+      const nextActiveAdapters = combineConfiguredAdapters(
+        nextConfig.adapters,
+        nextPackageResolution.adapters,
+        nextConfig.adapterPackages,
+      );
+      const nativeAdapterSpecsChanged =
+        stableSerialize(nextPackageResolution.nativeAdapters) !==
+        stableSerialize(packageResolution.nativeAdapters);
       const nextEntries = resolveProjectEntries(nextConfig);
       const previousSnapshotId = currentSnapshotId;
 
@@ -2035,6 +2158,9 @@ export async function openSession(
           changed: updateOptions?.changed ?? [],
           created: updateOptions?.created ?? [],
           deleted: updateOptions?.deleted ?? [],
+          ...(nativeAdapterSpecsChanged
+            ? { nativeAdapters: nextPackageResolution.nativeAdapters }
+            : {}),
         },
       );
 
@@ -2047,6 +2173,9 @@ export async function openSession(
       const updatedFileOrigins = buildFileOrigins(updated.projects);
 
       normalizedConfig = nextConfig;
+      adapterResolutionRoot = nextAdapterResolutionRoot;
+      packageResolution = nextPackageResolution;
+      activeAdapters = nextActiveAdapters;
       currentSnapshotId = updated.snapshotId;
       currentSnapshotDigest = updated.snapshotDigest;
       currentProjects = updated.projects;

@@ -30,6 +30,7 @@ use crate::instance_identity::{
     InstanceModelInput, InstanceProjectionRow, InstanceResolutionRow, InstanceSelect,
     run_project_instances, run_resolve_instances,
 };
+use crate::native_adapter;
 use crate::observe::{EngineStepDetail, ObserveCollector};
 use crate::package_impl::{ImplementationResolutionRow, run_resolve_implementations};
 use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
@@ -379,7 +380,7 @@ pub struct QueryBatchResult {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all_fields = "camelCase")]
 enum StepResult {
     FindSyntax {
         items: Vec<SyntaxItem>,
@@ -440,6 +441,10 @@ enum StepResult {
     },
     ExtractFacts {
         items: Vec<EngineFactContributionPayload>,
+    },
+    NativeFacts {
+        items: Vec<verule_adapter_api::NativeContribution>,
+        additional_inputs: Vec<String>,
     },
 }
 
@@ -849,6 +854,26 @@ fn execute_extended_step(
             condition,
         } => {
             let target_list = targets.as_deref().unwrap_or(&[]);
+            if snapshot.native_adapters.contains_key(&provider_id) {
+                let output = native_adapter::extract(
+                    snapshot,
+                    project_id,
+                    program,
+                    checker,
+                    &provider_id,
+                    report_provider_id.as_deref(),
+                    &fact_type_id,
+                    target_list,
+                    targets.is_some(),
+                    condition.as_ref(),
+                    step_start,
+                    observer,
+                )?;
+                return Ok(StepResult::NativeFacts {
+                    items: output.contributions,
+                    additional_inputs: output.additional_inputs,
+                });
+            }
             let items = run_extract_facts(
                 snapshot,
                 project_id,
