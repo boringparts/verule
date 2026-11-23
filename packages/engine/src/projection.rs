@@ -143,6 +143,8 @@ pub enum QueryStep {
     },
     CallersOf {
         targets: Vec<String>,
+        #[serde(default, rename = "lookupFiles")]
+        lookup_files: Option<Vec<String>>,
     },
     CalleesOf {
         targets: Vec<String>,
@@ -152,11 +154,15 @@ pub enum QueryStep {
         propagation: Option<String>,
         from: Vec<String>,
         to: Vec<String>,
+        #[serde(default, rename = "lookupFiles")]
+        lookup_files: Option<Vec<String>>,
     },
     ResolveInstances {
         targets: Vec<String>,
         #[serde(default)]
         models: Vec<InstanceModelInput>,
+        #[serde(default, rename = "lookupFiles")]
+        lookup_files: Option<Vec<String>>,
     },
     ProjectInstances {
         targets: Vec<String>,
@@ -185,6 +191,8 @@ pub enum QueryStep {
         targets: Vec<String>,
         #[serde(default)]
         models: Vec<EffectsModelInput>,
+        #[serde(default, rename = "lookupFiles")]
+        lookup_files: Option<Vec<String>>,
     },
     ExtractFacts {
         #[serde(rename = "factTypeId")]
@@ -781,16 +789,28 @@ fn execute_step(
             step_start,
             observer,
         ),
-        QueryStep::CallersOf { targets } => execute_call_graph_step(
-            snapshot, project_id, program, checker, &targets, true, step_start, observer,
+        QueryStep::CallersOf {
+            targets,
+            lookup_files,
+        } => execute_call_graph_step(
+            snapshot,
+            project_id,
+            program,
+            checker,
+            &targets,
+            true,
+            lookup_files.as_deref(),
+            step_start,
+            observer,
         ),
         QueryStep::CalleesOf { targets } => execute_call_graph_step(
-            snapshot, project_id, program, checker, &targets, false, step_start, observer,
+            snapshot, project_id, program, checker, &targets, false, None, step_start, observer,
         ),
         QueryStep::ValuePropagation {
             propagation,
             from,
             to,
+            lookup_files,
         } => execute_value_propagation_step(
             snapshot,
             project_id,
@@ -799,6 +819,7 @@ fn execute_step(
             propagation.as_deref(),
             &from,
             &to,
+            lookup_files.as_deref(),
             step_start,
             observer,
         ),
@@ -823,9 +844,20 @@ fn execute_extended_step(
     observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
     match step {
-        QueryStep::ResolveInstances { targets, models } => {
-            let items =
-                run_resolve_instances(snapshot, project_id, program, checker, &targets, &models)?;
+        QueryStep::ResolveInstances {
+            targets,
+            models,
+            lookup_files,
+        } => {
+            let items = run_resolve_instances(
+                snapshot,
+                project_id,
+                program,
+                checker,
+                &targets,
+                &models,
+                lookup_files.as_deref(),
+            )?;
             observer.record_step("resolveInstances", step_start, items.len(), Vec::new());
             Ok(StepResult::ResolveInstances { items })
         }
@@ -933,9 +965,17 @@ fn execute_effects_step(
             scopes,
             targets,
             models,
+            lookup_files,
         } => {
             let items = run_instance_cleanup(
-                snapshot, project_id, program, checker, &scopes, &targets, &models,
+                snapshot,
+                project_id,
+                program,
+                checker,
+                &scopes,
+                &targets,
+                &models,
+                lookup_files.as_deref(),
             )?;
             observer.record_step("instanceCleanup", step_start, items.len(), Vec::new());
             Ok(StepResult::InstanceCleanup { items })
@@ -1020,11 +1060,19 @@ fn execute_call_graph_step(
     checker: &mut CheckerHandle,
     targets: &[String],
     is_callers: bool,
+    lookup_files: Option<&[String]>,
     step_start: Option<Instant>,
     observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
     if is_callers {
-        let items = run_callers_of(snapshot, project_id, program, checker, targets)?;
+        let items = run_callers_of(
+            snapshot,
+            project_id,
+            program,
+            checker,
+            targets,
+            lookup_files,
+        )?;
         observer.record_step("callersOf", step_start, items.len(), Vec::new());
         Ok(StepResult::CallersOf { items })
     } else {
@@ -1046,6 +1094,7 @@ fn execute_value_propagation_step(
     propagation: Option<&str>,
     from: &[String],
     to: &[String],
+    lookup_files: Option<&[String]>,
     step_start: Option<Instant>,
     observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
@@ -1057,6 +1106,7 @@ fn execute_value_propagation_step(
         propagation,
         from,
         to,
+        lookup_files,
     )?;
     observer.record_step(
         "valuePropagation",

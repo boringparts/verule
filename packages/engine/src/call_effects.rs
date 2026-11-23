@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
@@ -10,8 +10,8 @@ use tsrs_compiler::{CheckerHandle, Program};
 use tsrs_core::P;
 
 use crate::calls_values::{
-    ProjectCallGraph, canonical_symbol_for_node, get_or_build_call_graph, node_byte_span,
-    node_location_rel, node_text, pick_preferred_impl_decl, prop_key_text, resolve_call_targets,
+    canonical_symbol_for_node, node_byte_span, node_location_rel, node_text,
+    pick_preferred_impl_decl, prop_key_text, resolve_call_targets,
     resolve_property_in_object_literal, unwrap_expr_wrappers,
 };
 use crate::cfg::{
@@ -20,8 +20,8 @@ use crate::cfg::{
 use crate::instance_identity::{
     CallFrame, CalleeDeclMetadata, InstanceHandleData, InstanceModelBehaviorInput,
     InstanceModelInput, InstanceModelMatchInput, InstanceResolver, ResolvedOrigin,
-    collect_callee_decl_metadata, extract_call_receiver, get_or_build_field_index,
-    is_external_declaration, score_model_match,
+    collect_callee_decl_metadata, extract_call_receiver, is_external_declaration,
+    score_model_match,
 };
 use crate::projects::{is_project_source_file, relative_to_cwd};
 use crate::serve::{HandlePayload, RpcErr, SnapshotState, SourceLocation};
@@ -482,9 +482,24 @@ impl CleanupProjectIndex {
         program: &'static Program,
         checker: &mut CheckerHandle,
         models: &[EffectsModelInput],
+        lookup_files: Option<&[String]>,
     ) -> Self {
         let mut registrations = Vec::new();
         let mut slot_writes = Vec::new();
+        let include_registrations = models.iter().any(|model| {
+            model
+                .cleanup_operations
+                .iter()
+                .any(|operation| operation.kind == "registers-into-container")
+        });
+        let include_slot_writes = models.iter().any(|model| {
+            model
+                .cleanup_operations
+                .iter()
+                .any(|operation| operation.kind == "replaces-previous-value")
+        });
+        let lookup_file_set =
+            lookup_files.map(|files| files.iter().map(String::as_str).collect::<FxHashSet<_>>());
 
         let mut source_files: Vec<(String, P<SourceFile>)> = program
             .get_source_files()
@@ -492,6 +507,11 @@ impl CleanupProjectIndex {
             .copied()
             .filter(|&sf| is_project_source_file(program, sf))
             .map(|sf| (relative_to_cwd(cwd, sf.file_name()), sf))
+            .filter(|(file, _)| {
+                lookup_file_set
+                    .as_ref()
+                    .is_none_or(|lookup_files| lookup_files.contains(file.as_str()))
+            })
             .collect();
         source_files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -500,6 +520,8 @@ impl CleanupProjectIndex {
                 cwd,
                 checker,
                 models,
+                include_registrations,
+                include_slot_writes,
                 sf.as_node(),
                 &mut registrations,
                 &mut slot_writes,
@@ -513,16 +535,22 @@ impl CleanupProjectIndex {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Recursive cleanup indexing carries file scope, operation filters, and both result lists."
+)]
 fn collect_cleanup_index_in_node(
     cwd: &str,
     checker: &mut CheckerHandle,
     models: &[EffectsModelInput],
+    include_registrations: bool,
+    include_slot_writes: bool,
     node: P<Node>,
     registrations: &mut Vec<RegistrationSite>,
     slot_writes: &mut Vec<SlotWriteSite>,
 ) {
     match node.kind() {
-        Kind::CallExpression => {
+        Kind::CallExpression if include_registrations => {
             let metas = collect_call_callee_metadata(cwd, checker, node);
             let recv = node
                 .expression()
@@ -551,7 +579,7 @@ fn collect_cleanup_index_in_node(
                 }
             }
         }
-        Kind::BinaryExpression => {
+        Kind::BinaryExpression if include_slot_writes => {
             let bin = node.as_binary_expression();
             if bin.operator_token().kind() == Kind::EqualsToken
                 && let Some((_, recv_expr, prop_name)) = extract_member_access(bin.left())
@@ -579,7 +607,16 @@ fn collect_cleanup_index_in_node(
     }
 
     node.for_each_child(&mut |child| {
-        collect_cleanup_index_in_node(cwd, checker, models, child, registrations, slot_writes);
+        collect_cleanup_index_in_node(
+            cwd,
+            checker,
+            models,
+            include_registrations,
+            include_slot_writes,
+            child,
+            registrations,
+            slot_writes,
+        );
         false
     });
 }
@@ -609,45 +646,72 @@ struct ResolvedCallable {
 }
 
 struct EffectsEngine<'a> {
+    snapshot: &'a mut SnapshotState,
+    project_id: &'a str,
+    lookup_files: Option<&'a [String]>,
     cwd: String,
     program: &'static Program,
     checker: &'a mut CheckerHandle,
-    call_graph: Arc<ProjectCallGraph>,
     instance_models: Vec<InstanceModelInput>,
     models: &'a [EffectsModelInput],
-    field_index: Arc<crate::instance_identity::FieldWriteIndex>,
     package_impl_cache: crate::package_impl::PackageImplCache,
     cleanup_index: Option<CleanupProjectIndex>,
+    cleanup_index_enabled: bool,
 }
 
 impl<'a> EffectsEngine<'a> {
     fn new(
-        snapshot: &SnapshotState,
-        call_graph: Arc<ProjectCallGraph>,
-        field_index: Arc<crate::instance_identity::FieldWriteIndex>,
+        snapshot: &'a mut SnapshotState,
+        project_id: &'a str,
+        lookup_files: Option<&'a [String]>,
         program: &'static Program,
         checker: &'a mut CheckerHandle,
         models: &'a [EffectsModelInput],
         build_cleanup_index: bool,
     ) -> Self {
         let cwd = snapshot.cwd.clone();
-        let cleanup_index = if build_cleanup_index {
-            Some(CleanupProjectIndex::build(&cwd, program, checker, models))
-        } else {
-            None
-        };
+        let has_registration_models = models.iter().any(|model| {
+            model
+                .cleanup_operations
+                .iter()
+                .any(|operation| operation.kind == "registers-into-container")
+        });
+        let has_slot_models = models.iter().any(|model| {
+            model
+                .cleanup_operations
+                .iter()
+                .any(|operation| operation.kind == "replaces-previous-value")
+        });
+        let cleanup_index_enabled =
+            build_cleanup_index && (has_registration_models || has_slot_models);
         let instance_models = to_instance_models(models);
+        let package_impl_cache = snapshot.package_impl_cache.clone();
         Self {
+            snapshot,
+            project_id,
+            lookup_files,
             cwd,
             program,
             checker,
-            call_graph,
             instance_models,
             models,
-            field_index,
-            package_impl_cache: snapshot.package_impl_cache.clone(),
-            cleanup_index,
+            package_impl_cache,
+            cleanup_index: None,
+            cleanup_index_enabled,
         }
+    }
+
+    fn cleanup_index(&mut self) -> Option<&CleanupProjectIndex> {
+        if self.cleanup_index.is_none() && self.cleanup_index_enabled {
+            self.cleanup_index = Some(CleanupProjectIndex::build(
+                &self.cwd,
+                self.program,
+                self.checker,
+                self.models,
+                self.lookup_files,
+            ));
+        }
+        self.cleanup_index.as_ref()
     }
 
     fn resolve_expr_instances(
@@ -659,8 +723,11 @@ impl<'a> EffectsEngine<'a> {
             cwd: &self.cwd,
             program: self.program,
             checker: self.checker,
-            call_graph: Arc::clone(&self.call_graph),
-            field_index: Arc::clone(&self.field_index),
+            snapshot: self.snapshot,
+            project_id: self.project_id,
+            lookup_files: self.lookup_files,
+            call_graph: None,
+            field_index: None,
             package_impl_cache: self.package_impl_cache.clone(),
             models: &self.instance_models,
         };
@@ -687,8 +754,11 @@ impl<'a> EffectsEngine<'a> {
             cwd: &self.cwd,
             program: self.program,
             checker: self.checker,
-            call_graph: Arc::clone(&self.call_graph),
-            field_index: Arc::clone(&self.field_index),
+            snapshot: self.snapshot,
+            project_id: self.project_id,
+            lookup_files: self.lookup_files,
+            call_graph: None,
+            field_index: None,
             package_impl_cache: self.package_impl_cache.clone(),
             models: &self.instance_models,
         }
@@ -851,8 +921,7 @@ impl<'a> EffectsEngine<'a> {
     ) -> Vec<(ResolvedOrigin, String, EvidenceItem)> {
         let mut children = Vec::new();
         let Some((registrations, slot_writes)) = self
-            .cleanup_index
-            .as_ref()
+            .cleanup_index()
             .map(|idx| (idx.registrations.clone(), idx.slot_writes.clone()))
         else {
             return children;
@@ -1297,10 +1366,8 @@ impl<'a> EffectsEngine<'a> {
                             meta.display_label.clone(),
                         );
 
-                        if let Some(slot_writes) = self
-                            .cleanup_index
-                            .as_ref()
-                            .map(|idx| idx.slot_writes.clone())
+                        if let Some(slot_writes) =
+                            self.cleanup_index().map(|idx| idx.slot_writes.clone())
                         {
                             for slot_origin in &slot_origins {
                                 for sw in &slot_writes {
@@ -2039,6 +2106,10 @@ struct ScopeEvalData {
     clippy::too_many_lines,
     reason = "Evaluates cleanup coverage across resolved scope functions and target instances."
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Forwards scope, target, model, and candidate-file inputs to cleanup analysis."
+)]
 pub fn run_instance_cleanup(
     snapshot: &mut SnapshotState,
     project_id: &str,
@@ -2047,6 +2118,7 @@ pub fn run_instance_cleanup(
     scopes: &[String],
     targets: &[String],
     models: &[EffectsModelInput],
+    lookup_files: Option<&[String]>,
 ) -> Result<Vec<InstanceCleanupScopeRow>, RpcErr> {
     let mut scope_nodes = Vec::with_capacity(scopes.len());
     for handle_id in scopes {
@@ -2062,16 +2134,13 @@ pub fn run_instance_cleanup(
         target_instances.push((handle_id.clone(), data));
     }
 
-    let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
-    let field_index = get_or_build_field_index(snapshot, project_id, program);
-
     let mut scope_results = Vec::with_capacity(scope_nodes.len());
     let mut eval_items = Vec::with_capacity(scope_nodes.len());
     {
         let mut engine = EffectsEngine::new(
             snapshot,
-            call_graph,
-            field_index,
+            project_id,
+            lookup_files,
             program,
             checker,
             models,
@@ -2351,20 +2420,10 @@ pub fn run_call_effects(
         include_writes,
         max_depth: max_depth.unwrap_or(MAX_EFFECT_CALL_DEPTH),
     };
-    let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
-    let field_index = get_or_build_field_index(snapshot, project_id, program);
-
     let mut collected_items = Vec::with_capacity(target_nodes.len());
     {
-        let mut engine = EffectsEngine::new(
-            snapshot,
-            call_graph,
-            field_index,
-            program,
-            checker,
-            models,
-            false,
-        );
+        let mut engine =
+            EffectsEngine::new(snapshot, project_id, None, program, checker, models, false);
 
         for (target_handle, target_node) in target_nodes {
             let mut collected = CollectedCallEffects::default();

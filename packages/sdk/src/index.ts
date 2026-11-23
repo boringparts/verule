@@ -159,6 +159,7 @@ export {
   type InlineIgnoreEntry,
   type InlineIgnoreStatus,
   type InstanceRef,
+  type LookupFilesOptions,
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
