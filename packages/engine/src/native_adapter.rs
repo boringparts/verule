@@ -1,22 +1,23 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use serde_json::Value;
-use tsrs_ast::{Kind, Node, get_source_file_of_node};
+use tsrs_ast::{Kind, Node, SourceFile, Symbol, SymbolFlags, get_source_file_of_node};
 use tsrs_checker::TypeFormatFlags;
 use tsrs_compiler::{CheckerHandle, Program};
-use tsrs_core::P;
+use tsrs_core::{P, tspath};
 use verule_adapter_api::{
     DeclarationInfo, HostAccess, HostValue, NativeAdapterOutput, NativeFactRequest, NativeLibrary,
     NodeKind, NodeOperation, SourceLocation,
 };
 
-use crate::calls_values::{node_location_rel, node_text, unwrap_expr_wrappers};
-use crate::drizzle_facts::{collect_all_drizzle_nodes, resolve_decl_for_ref};
+use crate::calls_values::{
+    canonical_symbol_for_node, node_location_rel, node_text, unwrap_expr_wrappers,
+};
 use crate::observe::{EngineStepDetail, ObserveCollector};
-use crate::projection::safe_initializer;
-use crate::projects::resolve_against_cwd;
+use crate::projection::{safe_expression, safe_initializer};
+use crate::projects::{is_project_source_file, relative_to_cwd, resolve_against_cwd};
 use crate::serve::{HandlePayload, RpcErr, SnapshotState};
 
 pub type NativeAdapterRegistry = BTreeMap<String, Rc<NativeLibrary>>;
@@ -82,10 +83,10 @@ pub fn extract(
             )
         })?;
     let targets = resolve_targets(snapshot, project_id, target_handles, has_targets)?;
-    let candidates = collect_all_drizzle_nodes(&snapshot.cwd, program, checker);
+    let candidates = collect_native_adapter_nodes(&snapshot.cwd, program, checker);
     let candidate_nodes = candidates;
-    let calls = candidate_nodes.all_calls;
-    let variables = candidate_nodes.all_var_decls;
+    let calls = candidate_nodes.calls;
+    let variables = candidate_nodes.variables;
     let mut table = NodeTable::default();
     let call_ids = table.list(calls.iter().copied());
     let variable_ids = table.list(variables.iter().copied());
@@ -146,6 +147,207 @@ pub fn extract(
         details,
     );
     Ok(output)
+}
+
+struct NativeAdapterCandidates {
+    calls: Vec<P<Node>>,
+    variables: Vec<P<Node>>,
+}
+
+/// Collect syntax candidates for native adapters, including nearby workspace declarations reached from imports and calls.
+fn collect_native_adapter_nodes(
+    cwd: &str,
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+) -> NativeAdapterCandidates {
+    let project_files: Vec<P<SourceFile>> = program
+        .get_source_files()
+        .iter()
+        .copied()
+        .filter(|&source_file| is_project_source_file(program, source_file))
+        .collect();
+
+    let mut calls = Vec::new();
+    let mut variables = Vec::new();
+    let mut imports = Vec::new();
+    for &source_file in &project_files {
+        collect_file_syntax(source_file, &mut calls, &mut variables, &mut imports);
+    }
+
+    let extra_files = discover_workspace_files(cwd, checker, &project_files, &calls, &imports);
+    for source_file in extra_files {
+        let mut unused_imports = Vec::new();
+        collect_file_syntax(source_file, &mut calls, &mut variables, &mut unused_imports);
+    }
+
+    NativeAdapterCandidates { calls, variables }
+}
+
+fn collect_file_syntax(
+    source_file: P<SourceFile>,
+    calls: &mut Vec<P<Node>>,
+    variables: &mut Vec<P<Node>>,
+    imports: &mut Vec<P<Node>>,
+) {
+    fn walk(
+        node: P<Node>,
+        calls: &mut Vec<P<Node>>,
+        variables: &mut Vec<P<Node>>,
+        imports: &mut Vec<P<Node>>,
+    ) {
+        match node.kind() {
+            Kind::CallExpression => calls.push(node),
+            Kind::VariableDeclaration => variables.push(node),
+            Kind::ImportSpecifier => imports.push(node),
+            _ => {}
+        }
+        node.for_each_child(&mut |child| {
+            walk(child, calls, variables, imports);
+            false
+        });
+    }
+
+    walk(source_file.as_node(), calls, variables, imports);
+}
+
+fn discover_workspace_files(
+    cwd: &str,
+    checker: &mut CheckerHandle,
+    project_files: &[P<SourceFile>],
+    initial_calls: &[P<Node>],
+    initial_imports: &[P<Node>],
+) -> Vec<P<SourceFile>> {
+    let mut visited_files: FxHashSet<String> = project_files
+        .iter()
+        .map(|source_file| relative_to_cwd(cwd, source_file.file_name()))
+        .collect();
+    let mut discovered_files = Vec::new();
+    let mut frontier_calls = initial_calls.to_vec();
+    let mut frontier_imports = initial_imports.to_vec();
+
+    // Follow workspace entrypoints only two hops so adapters can inspect package sources without walking dependencies.
+    for _ in 0..2 {
+        let mut references = Vec::with_capacity(frontier_imports.len() + frontier_calls.len() * 3);
+        references.extend(frontier_imports.iter().copied());
+        for &call in &frontier_calls {
+            if let Some(expression) = safe_expression(call) {
+                references.push(expression);
+                if let Some(inner_expression) = safe_expression(expression) {
+                    references.push(inner_expression);
+                }
+            }
+            references.extend(call.arguments().iter().copied());
+        }
+        if references.is_empty() {
+            break;
+        }
+
+        let mut next_files = Vec::new();
+        for node in references {
+            let Some((_, declaration)) = resolve_decl_for_ref(cwd, checker, node) else {
+                continue;
+            };
+            let Some(source_file) = get_source_file_of_node(declaration) else {
+                continue;
+            };
+            let relative_path = relative_to_cwd(cwd, source_file.file_name());
+            if is_declaration_file(&relative_path) || is_node_modules_file(&relative_path) {
+                continue;
+            }
+            if visited_files.insert(relative_path) {
+                discovered_files.push(source_file);
+                next_files.push(source_file);
+            }
+        }
+        if next_files.is_empty() {
+            break;
+        }
+
+        frontier_calls.clear();
+        frontier_imports.clear();
+        for source_file in next_files {
+            let mut unused_variables = Vec::new();
+            collect_file_syntax(
+                source_file,
+                &mut frontier_calls,
+                &mut unused_variables,
+                &mut frontier_imports,
+            );
+        }
+    }
+
+    discovered_files
+}
+
+fn is_declaration_file(path: &str) -> bool {
+    tspath::is_declaration_file_name(path)
+}
+
+fn is_node_modules_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("node_modules/") || normalized.contains("/node_modules/")
+}
+
+fn can_follow_declaration(cwd: &str, declaration: P<Node>) -> bool {
+    let Some(source_file) = get_source_file_of_node(declaration) else {
+        return false;
+    };
+    if source_file.is_declaration_file() {
+        return false;
+    }
+    let relative_path = relative_to_cwd(cwd, source_file.file_name());
+    !is_declaration_file(&relative_path) && !is_node_modules_file(&relative_path)
+}
+
+fn resolve_decl_for_ref(
+    cwd: &str,
+    checker: &mut CheckerHandle,
+    node: P<Node>,
+) -> Option<(Option<String>, P<Node>)> {
+    if matches!(node.kind(), Kind::CallExpression | Kind::NewExpression) {
+        let signature = checker.get_resolved_signature_exported(node);
+        let signature_declaration = (signature != checker.get_unknown_signature())
+            .then(|| {
+                signature
+                    .declaration()
+                    .or_else(|| signature.target().and_then(|target| target.declaration()))
+            })
+            .flatten();
+        let callee_symbol = node
+            .expression()
+            .and_then(|expression| checker.get_symbol_at_location_exported(expression))
+            .map(|symbol| unwrap_alias(checker, symbol))
+            .filter(|&symbol| symbol != checker.get_unknown_symbol());
+        let primary = signature_declaration.or_else(|| {
+            callee_symbol.and_then(|symbol| {
+                symbol
+                    .value_declaration()
+                    .or_else(|| symbol.declarations().first().copied())
+            })
+        })?;
+        let name = callee_symbol.map(|symbol| symbol.name().to_string());
+        return can_follow_declaration(cwd, primary).then_some((name, primary));
+    }
+
+    let symbol = canonical_symbol_for_node(checker, node)?;
+    let primary = symbol
+        .value_declaration()
+        .or_else(|| symbol.declarations().first().copied())?;
+    let name = Some(symbol.name().to_string());
+    can_follow_declaration(cwd, primary).then_some((name, primary))
+}
+
+fn unwrap_alias(checker: &mut CheckerHandle, mut symbol: P<Symbol>) -> P<Symbol> {
+    let mut seen = Vec::new();
+    while symbol.flags().intersects(SymbolFlags::Alias) && !seen.contains(&symbol) {
+        seen.push(symbol);
+        let next = checker.get_aliased_symbol(symbol);
+        if next == symbol || next == checker.get_unknown_symbol() {
+            break;
+        }
+        symbol = next;
+    }
+    symbol
 }
 
 fn resolve_targets(

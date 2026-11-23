@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
-  existsSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,503 +12,590 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
-import { promisify } from "node:util";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  installArtifactPackages,
   packWorkspaceArtifacts,
-  startArtifactRegistry,
+  runBareVeruleInHost,
+  verifyHostArtifactResolution,
 } from "@verule/acceptance";
+import type { PackedArtifact } from "@verule/acceptance";
+import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
 
-const execFileAsync = promisify(execFile);
-const maxOutputBytes = 16 * 1024 * 1024;
+const adapterPackageNames = [
+  "@verule/adapter-drizzle",
+  "@verule/adapter-zod",
+] as const;
+const directPackageNames = [
+  "@verule/sdk",
+  "@verule/cli",
+  ...adapterPackageNames,
+  "@verule/rules-reference",
+] as const;
+const mainConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
+const multiSourceConfigPath = "packages/app/verule.multiple-sources.config.ts";
 
-async function runCliCheck(
-  veruleBin: string,
-  hostDir: string,
-): Promise<{
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}> {
-  try {
-    const res = await execFileAsync(
-      veruleBin,
-      ["check", "--observe", "detail", "--output", "json"],
-      { cwd: hostDir, encoding: "utf8", maxBuffer: maxOutputBytes },
-    );
-    return { exitCode: 0, stdout: res.stdout, stderr: res.stderr };
-  } catch (err: unknown) {
-    const execErr = err as {
-      readonly code?: number;
-      readonly stdout?: string;
-      readonly stderr?: string;
-    };
-    return {
-      exitCode: execErr.code ?? 1,
-      stdout: execErr.stdout ?? "",
-      stderr: execErr.stderr ?? "",
-    };
+type CliEnvelope = {
+  readonly kind: string;
+  readonly variant: string;
+  readonly data: CheckReport;
+};
+
+type HostConfigModule = {
+  readonly default: NormalizedVeruleConfig;
+};
+
+function resolveExportedPackageRoot(packageName: string): string {
+  const manifestPath = fileURLToPath(
+    import.meta.resolve(packageName + "/package.json"),
+  );
+  return dirname(realpathSync(manifestPath));
+}
+
+function copyExportedPackage(
+  packageName: string,
+  destination: string,
+  excludedParts: readonly string[] = [],
+): void {
+  const source = resolveExportedPackageRoot(packageName);
+  const excluded = new Set([
+    "dist",
+    "host-root",
+    "node_modules",
+    "test",
+    "drizzle-overlay",
+    "zod-overlay",
+    "drizzle-zod-overlay",
+    ...excludedParts,
+  ]);
+  cpSync(source, destination, {
+    recursive: true,
+    filter: (sourcePath) => {
+      const parts = relative(source, sourcePath).split(sep);
+      return !parts.some((part) => excluded.has(part));
+    },
+  });
+}
+
+function createArtifactHost(environmentDir: string): {
+  readonly hostDir: string;
+  readonly appDir: string;
+  readonly storeDir: string;
+} {
+  const hostDir = join(environmentDir, "host");
+  const appRoot = resolveExportedPackageRoot("@verule/acceptance-host-app");
+  const overlayDir = join(appRoot, "drizzle-zod-overlay");
+  const appDir = join(hostDir, "packages/app");
+  const dataDir = join(hostDir, "packages/data");
+  const storeDir = join(environmentDir, "pnpm-store");
+
+  mkdirSync(join(hostDir, "packages"), { recursive: true });
+  mkdirSync(storeDir);
+  cpSync(join(appRoot, "host-root"), hostDir, { recursive: true });
+  copyExportedPackage("@verule/acceptance-host-app", appDir);
+  copyExportedPackage("@verule/acceptance-host-data", dataDir);
+
+  cpSync(
+    join(overlayDir, "host-root/pnpm-workspace.yaml"),
+    join(hostDir, "pnpm-workspace.yaml"),
+  );
+  cpSync(
+    join(overlayDir, "host-root/tsconfig.json"),
+    join(hostDir, "tsconfig.json"),
+  );
+  cpSync(join(overlayDir, "app"), appDir, { recursive: true });
+  cpSync(join(overlayDir, "data"), dataDir, { recursive: true });
+
+  return { hostDir, appDir, storeDir };
+}
+
+function findInstalledPackageRoot(
+  entryPath: string,
+  packageName: string,
+): string {
+  let current = dirname(entryPath);
+  while (true) {
+    try {
+      const manifest = JSON.parse(
+        readFileSync(join(current, "package.json"), "utf8"),
+      ) as { readonly name?: unknown };
+      if (manifest.name === packageName) return current;
+    } catch {
+      // Keep walking until the installed package manifest is found.
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      throw new Error(
+        "Could not locate " + packageName + " above " + entryPath,
+      );
+    }
+    current = parent;
   }
 }
 
-void test("packs @verule/adapter-drizzle, @verule/adapter-zod, @verule/rules-reference with core packages, installs in an isolated multi-package host, and runs verule check", async () => {
-  const bundle = await packWorkspaceArtifacts({
-    additionalPackages: [
-      "@verule/adapter-zod",
-      "@verule/adapter-drizzle",
-      "@verule/rules-reference",
-    ],
+function semanticReport(report: CheckReport) {
+  return {
+    status: report.status,
+    diagnostics: report.diagnostics.map((diagnostic) => ({
+      id: diagnostic.id,
+      ruleId: diagnostic.ruleId,
+      at: diagnostic.at,
+      message: diagnostic.message,
+      evidence: diagnostic.evidence,
+    })),
+    gaps: report.gaps,
+  };
+}
+
+async function runCliCheck(
+  hostDir: string,
+  storeDir: string,
+  configPath: string,
+): Promise<{ readonly report: CheckReport; readonly status: number }> {
+  const result = await runBareVeruleInHost({
+    checkoutDir: hostDir,
+    args: ["check", "--config", configPath, "--output", "json"],
+    isolated: true,
+    pnpmStoreDir: storeDir,
   });
-  const registry = await startArtifactRegistry(bundle.artifacts);
-  const hostDir = mkdtempSync(
-    join(tmpdir(), "verule-drizzle-zod-packed-host-"),
+  assert.ok(result.status === 0 || result.status === 1, result.stderr);
+  assert.equal(result.isolation?.controlProbeBlocked, true);
+  const envelope = JSON.parse(result.stdout) as CliEnvelope;
+  assert.equal(envelope.kind, "data");
+  return { report: envelope.data, status: result.status };
+}
+
+async function readWatchReport(
+  iterator: AsyncIterator<unknown>,
+): Promise<CheckReport> {
+  let timer: NodeJS.Timeout | undefined;
+  const result = await Promise.race([
+    iterator.next(),
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Timed out waiting for a watch report.")),
+        90_000,
+      );
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+  assert.equal(result.done, false);
+  const event = result.value as {
+    readonly kind: string;
+    readonly report?: CheckReport;
+  };
+  assert.equal(event.kind, "report");
+  assert.ok(event.report);
+  return event.report;
+}
+
+async function loadConfig(configPath: string): Promise<NormalizedVeruleConfig> {
+  const module = (await import(
+    pathToFileURL(configPath).href
+  )) as HostConfigModule;
+  return module.default;
+}
+
+async function loadInstalledSdk(
+  hostDir: string,
+): Promise<typeof import("@verule/sdk")> {
+  const hostRequire = createRequire(join(hostDir, "package.json"));
+  const sdkPath = realpathSync(hostRequire.resolve("@verule/sdk"));
+  return (await import(
+    pathToFileURL(sdkPath).href
+  )) as typeof import("@verule/sdk");
+}
+
+function getInstalledNativeLibrary(
+  hostDir: string,
+  packageName: string,
+  artifact: PackedArtifact,
+): { readonly path: string; readonly sha256: string } {
+  const hostRequire = createRequire(join(hostDir, "package.json"));
+  const entryPath = realpathSync(
+    hostRequire.resolve(packageName + "/verule-adapter"),
   );
+  const packagePath = findInstalledPackageRoot(entryPath, packageName);
+  const manifest = JSON.parse(
+    readFileSync(join(packagePath, "package.json"), "utf8"),
+  ) as {
+    readonly verule?: {
+      readonly native?: Readonly<Record<string, string>>;
+    };
+  };
+  const relativeLibraryPath = manifest.verule?.native?.["linux-x64"];
+  assert.ok(relativeLibraryPath);
+  const libraryPath = realpathSync(join(packagePath, relativeLibraryPath));
+  const archiveLibraryPath = relativeLibraryPath.replace(/^\.\//u, "");
+  const packedBytes = execFileSync(
+    "tar",
+    ["-xOf", artifact.filename, "package/" + archiveLibraryPath],
+    { encoding: "buffer" },
+  );
+  const installedSha256 = createHash("sha256")
+    .update(readFileSync(libraryPath))
+    .digest("hex");
+  assert.equal(
+    installedSha256,
+    createHash("sha256").update(packedBytes).digest("hex"),
+  );
+  assert.ok(libraryPath.startsWith(realpathSync(hostDir) + sep));
+  return { path: libraryPath, sha256: installedSha256 };
+}
+
+void test("loads both installed native adapters from the neutral static host and keeps reports stable across CLI, watch, and shared sessions", async (t) => {
+  const environmentDir = mkdtempSync(
+    join(tmpdir(), "verule-drizzle-zod-host-"),
+  );
+  const { hostDir, appDir, storeDir } = createArtifactHost(environmentDir);
+  const bundle = await packWorkspaceArtifacts({
+    additionalPackages: [...adapterPackageNames, "@verule/rules-reference"],
+  });
+  let watchAbort: AbortController | undefined;
+  let watchIterator: AsyncIterator<unknown> | undefined;
+  let sharedSession:
+    | { readonly endpoint: string; close(): Promise<void> }
+    | undefined;
 
   try {
-    for (const pkgName of [
-      "@verule/adapter-drizzle",
+    for (const packageName of [
+      ...adapterPackageNames,
       "@verule/rules-reference",
     ]) {
-      const artifact = bundle.artifacts.find((a) => a.name === pkgName);
-      assert.ok(artifact, `Expected packed ${pkgName} artifact`);
-      const manifestExports = artifact.manifest.exports as
+      const artifact = bundle.artifacts.find(
+        (candidate) => candidate.name === packageName,
+      );
+      assert.ok(artifact, "Expected packed artifact " + packageName);
+      const exports = artifact.manifest.exports as
         | Record<string, Record<string, string>>
         | undefined;
-      assert.equal(manifestExports?.["."]?.default, "./dist/index.js");
-      assert.equal(manifestExports?.["."]?.types, "./dist/index.d.ts");
-      assert.equal(manifestExports?.["."]?.source, undefined);
-      const deps = artifact.manifest.dependencies as
+      assert.equal(exports?.["."]?.default, "./dist/index.js");
+      assert.equal(exports?.["."]?.types, "./dist/index.d.ts");
+      assert.equal(exports?.["."]?.source, undefined);
+      const dependencies = artifact.manifest.dependencies as
         | Record<string, string>
         | undefined;
-      assert.equal(deps?.["@verule/engine"], undefined);
+      assert.equal(dependencies?.["@verule/engine"], undefined);
     }
 
-    writeFileSync(
-      join(hostDir, "package.json"),
-      JSON.stringify(
-        {
-          name: "isolated-drizzle-zod-monorepo",
-          private: true,
-          type: "module",
-        },
-        null,
-        2,
+    const installation = await installArtifactPackages({
+      checkoutDir: hostDir,
+      packageManager: "pnpm",
+      artifacts: bundle.artifacts,
+      directPackages: directPackageNames,
+      storeDir,
+    });
+    assert.equal(installation.status, "ready", JSON.stringify(installation));
+
+    const audit = await verifyHostArtifactResolution({
+      checkoutDir: hostDir,
+      artifacts: bundle.artifacts,
+      directPackages: directPackageNames,
+      allowedStorePaths: [storeDir],
+    });
+    const adapterArtifacts = adapterPackageNames.map((packageName) => {
+      const artifact = bundle.artifacts.find(
+        (candidate) => candidate.name === packageName,
+      );
+      assert.ok(artifact);
+      return {
+        packageName,
+        ...getInstalledNativeLibrary(hostDir, packageName, artifact),
+      };
+    });
+    const engineArtifact = bundle.artifacts.find(
+      (candidate) => candidate.name === "@verule/engine",
+    );
+    assert.ok(engineArtifact?.binarySha256);
+    assert.equal(audit.engineBinarySha256, engineArtifact.binarySha256);
+
+    const sdk = await loadInstalledSdk(hostDir);
+    const mainConfigAbsPath = join(hostDir, mainConfigPath);
+    const mainConfig = await loadConfig(mainConfigAbsPath);
+    assert.deepEqual(mainConfig.adapterPackages, adapterPackageNames);
+
+    const coldInitial = await runCliCheck(hostDir, storeDir, mainConfigPath);
+    assert.equal(
+      coldInitial.status,
+      0,
+      JSON.stringify(coldInitial.report, null, 2),
+    );
+    assert.equal(coldInitial.report.diagnostics.length, 0);
+    const sdkInitial = await sdk.runCheck({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    assert.deepEqual(
+      semanticReport(sdkInitial),
+      semanticReport(coldInitial.report),
+    );
+    assert.ok(
+      coldInitial.report.gaps.some(
+        (gap) =>
+          gap.kind === "dynamic-query-projection" &&
+          gap.at?.file === "packages/data/src/drizzle-projections.ts",
       ),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "pnpm-workspace.yaml"),
-      "packages:\n  - packages/*\n",
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, ".npmrc"),
-      `@verule:registry=${registry.url}/\n`,
-      "utf8",
     );
 
-    mkdirSync(join(hostDir, "packages/db/src"), { recursive: true });
-    mkdirSync(join(hostDir, "packages/api/src"), { recursive: true });
-
-    writeFileSync(
-      join(hostDir, "packages/db/package.json"),
-      JSON.stringify(
-        {
-          name: "@host/db",
-          version: "1.0.0",
-          private: true,
-          type: "module",
-          exports: { ".": "./src/index.ts" },
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "packages/api/package.json"),
-      JSON.stringify(
-        {
-          name: "@host/api",
-          version: "1.0.0",
-          private: true,
-          type: "module",
-          dependencies: {
-            "@host/db": "workspace:*",
-          },
-        },
-        null,
-        2,
-      ),
-      "utf8",
+    watchAbort = new AbortController();
+    const watch = sdk.watchProject({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+      debounceMs: 50,
+      signal: watchAbort.signal,
+    });
+    watchIterator = watch[Symbol.asyncIterator]();
+    const watchInitial = await readWatchReport(watchIterator);
+    assert.deepEqual(
+      semanticReport(watchInitial),
+      semanticReport(coldInitial.report),
     );
 
-    const sdkArtifact = bundle.artifacts.find((a) => a.name === "@verule/sdk");
-    assert.ok(sdkArtifact);
-
-    await execFileAsync(
-      "pnpm",
-      [
-        "add",
-        "-w",
-        "--save-dev",
-        "--ignore-scripts",
-        "--prefer-offline",
-        `@verule/cli@${sdkArtifact.version}`,
-        `@verule/sdk@${sdkArtifact.version}`,
-        `@verule/adapter-zod@${sdkArtifact.version}`,
-        `@verule/adapter-drizzle@${sdkArtifact.version}`,
-        `@verule/rules-reference@${sdkArtifact.version}`,
-        "zod",
-      ],
-      {
-        cwd: hostDir,
-        encoding: "utf8",
-        maxBuffer: maxOutputBytes,
-      },
+    sharedSession = await sdk.startSharedSession({
+      cwd: hostDir,
+      endpoint: join(environmentDir, "shared.sock"),
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+      debounceMs: 50,
+    });
+    const sharedInitial = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    assert.deepEqual(
+      semanticReport(sharedInitial),
+      semanticReport(coldInitial.report),
     );
 
-    rmSync(join(hostDir, ".npmrc"), { force: true });
-    await registry.close();
+    const projectionsPath = join(
+      hostDir,
+      "packages/data/src/drizzle-projections.ts",
+    );
+    const originalProjections = readFileSync(projectionsPath, "utf8");
+    const missingRequiredColumn = originalProjections.replace(
+      "      status: users.status,\n",
+      "",
+    );
+    assert.notEqual(missingRequiredColumn, originalProjections);
+    writeFileSync(projectionsPath, missingRequiredColumn, "utf8");
 
-    // Verify all resolved Verule packages (including transitive @verule/engine) live inside hostDir
-    const hostRequire = createRequire(join(hostDir, "package.json"));
-    const hostReal = realpathSync(hostDir) + sep;
-    for (const pkgName of [
-      "@verule/cli/package.json",
-      "@verule/sdk",
-      "@verule/adapter-zod",
-      "@verule/adapter-drizzle",
-      "@verule/rules-reference",
-    ]) {
-      const resolved = realpathSync(hostRequire.resolve(pkgName));
-      assert.ok(
-        resolved.startsWith(hostReal),
-        `Expected ${pkgName} to resolve inside ${hostReal}, got ${resolved}`,
+    const coldMissing = await runCliCheck(hostDir, storeDir, mainConfigPath);
+    assert.equal(coldMissing.status, 1);
+    const sdkMissing = await sdk.runCheck({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    const watchMissing = await readWatchReport(watchIterator);
+    const sharedMissing = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    for (const [label, report] of [
+      ["SDK", sdkMissing],
+      ["watch", watchMissing],
+      ["shared", sharedMissing],
+    ] as const) {
+      assert.deepEqual(
+        semanticReport(report),
+        semanticReport(coldMissing.report),
+        label,
       );
     }
-    const sdkRequire = createRequire(hostRequire.resolve("@verule/sdk"));
-    const resolvedEngine = realpathSync(
-      sdkRequire.resolve("@verule/engine/binary"),
-    );
-    assert.ok(
-      resolvedEngine.startsWith(hostReal),
-      `Expected @verule/engine/binary to resolve inside ${hostReal}, got ${resolvedEngine}`,
-    );
 
-    const hostManifest = JSON.parse(
-      readFileSync(join(hostDir, "package.json"), "utf8"),
-    ) as { readonly devDependencies: Record<string, string> };
-    assert.equal("@verule/engine" in hostManifest.devDependencies, false);
-
-    // Populate multi-package host TypeScript sources
-    writeFileSync(
-      join(hostDir, "packages/db/tsconfig.json"),
-      JSON.stringify(
-        {
-          compilerOptions: {
-            strict: true,
-            target: "ES2022",
-            module: "NodeNext",
-            moduleResolution: "NodeNext",
-          },
-          include: ["src/**/*.ts"],
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "packages/api/tsconfig.json"),
-      JSON.stringify(
-        {
-          compilerOptions: {
-            strict: true,
-            target: "ES2022",
-            module: "NodeNext",
-            moduleResolution: "NodeNext",
-          },
-          include: ["src/**/*.ts"],
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-
-    writeFileSync(
-      join(hostDir, "packages/db/src/drizzle.ts"),
-      [
-        "export type Column<T = unknown> = {",
-        "  readonly _type: T;",
-        "  notNull: () => Column<T>;",
-        "  primaryKey: () => Column<T>;",
-        "  default: (v: T) => Column<T>;",
-        "};",
-        "declare const col: Column<any>;",
-        "export const integer = (_name?: string) => col;",
-        "export const text = (_name?: string) => col;",
-        "export function sqliteTable<Cols extends Record<string, unknown>>(_name: string, cols: Cols): Cols { return cols; }",
-        "export function relations<T>(_table: T, _cb: (h: { one: any; many: any }) => Record<string, unknown>) { return {}; }",
-        "export function createSelectSchema(_table: unknown): any { return {}; }",
-        "export type SelectChain = {",
-        "  from: (t: unknown) => SelectChain;",
-        "  get: () => Promise<Record<string, unknown> | undefined>;",
-        "};",
-        "export type RelQuery = {",
-        "  findFirst: (opts?: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;",
-        "};",
-        "export declare const db: {",
-        "  select: (fields?: Record<string, unknown>) => SelectChain;",
-        "  query: Record<string, RelQuery>;",
-        "};",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "packages/db/src/schema.ts"),
-      [
-        'import { z } from "zod";',
-        'import { createSelectSchema, integer, relations, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const users = sqliteTable("users", {',
-        '  id: integer("id").primaryKey(),',
-        '  name: text("name").notNull(),',
-        '  age: integer("user_age").notNull(),',
-        "});",
-        "",
-        'export const workspace = sqliteTable("workspace", {',
-        '  id: integer("id").primaryKey(),',
-        '  slug: text("slug").notNull(),',
-        '  plan: text("plan").notNull().default("free"),',
-        "});",
-        "",
-        'export const page = sqliteTable("page", {',
-        '  id: integer("id").primaryKey(),',
-        '  slug: text("slug").notNull(),',
-        '  customDomain: text("custom_domain"),',
-        '  password: text("password"),',
-        "});",
-        "",
-        "export const pageRelations = relations(page, ({ one }) => ({",
-        "  workspace: one(workspace),",
-        "}));",
-        "",
-        "export const selectWorkspaceSchema = createSelectSchema(workspace)",
-        "  .extend({",
-        '    plan: z.enum(["free", "pro"]).nullable().prefault("free"),',
-        "  })",
-        "  .transform((v: Record<string, unknown>) => ({ ...v }));",
-        "",
-        "export const selectPageSchema = createSelectSchema(page).extend({",
-        '  password: z.string().nullable().prefault(""),',
-        "});",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "packages/db/src/queries.ts"),
-      [
-        'import { db } from "./drizzle.js";',
-        'import { users } from "./schema.js";',
-        "",
-        "export async function fetchUserBrief() {",
-        "  return await db.select({ id: users.id, name: users.name }).from(users).get();",
-        "}",
-        "",
-        "export async function fetchUserFull() {",
-        "  return await db.select({ id: users.id, name: users.name, age: users.age }).from(users).get();",
-        "}",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "packages/db/src/index.ts"),
-      [
-        'export { db } from "./drizzle.js";',
-        'export { page, pageRelations, selectPageSchema, selectWorkspaceSchema, users, workspace } from "./schema.js";',
-        'export { fetchUserBrief, fetchUserFull } from "./queries.js";',
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-
-    const apiHandlerPath = join(hostDir, "packages/api/src/handler.ts");
-    const initialHandlerSource = [
-      'import { z } from "zod";',
-      'import { db, fetchUserBrief, fetchUserFull, selectPageSchema, selectWorkspaceSchema, users } from "@host/db";',
-      "",
-      "declare function extraCols(): Record<string, unknown>;",
-      "",
-      "const strictUserSchema = z.object({",
-      "  id: z.number(),",
-      "  name: z.string(),",
-      "  age: z.number(),",
-      "});",
-      "",
-      "const defaultedAgeSchema = z.object({",
-      "  id: z.number(),",
-      "  name: z.string(),",
-      "  age: z.number().prefault(18),",
-      "});",
-      "",
-      "const gateFieldsSchema = selectPageSchema.pick({",
-      "  slug: true,",
-      "  customDomain: true,",
-      "  password: true,",
-      "});",
-      "",
-      "export async function runHandlers() {",
-      "  const brief = await fetchUserBrief();",
-      "  const full = await fetchUserFull();",
-      "  const missingAge = brief ? strictUserSchema.parse(brief) : null;",
-      "  const okFull = full ? strictUserSchema.parse(full) : null;",
-      "  const okDefault = brief ? defaultedAgeSchema.parse(brief) : null;",
-      "",
-      "  const dyn = await db.select({ id: users.id, ...extraCols() }).from(users).get();",
-      "  const dynCheck = dyn ? strictUserSchema.parse(dyn) : null;",
-      "",
-      "  const _page = await db.query.page.findFirst({",
-      "    columns: {",
-      "      slug: true,",
-      "      customDomain: true,",
-      "    },",
-      "    with: { workspace: true },",
-      "  });",
-      "  if (!_page) return { missingAge, okFull, okDefault, dynCheck };",
-      "  const ws = selectWorkspaceSchema.safeParse(_page.workspace);",
-      "  const { workspace: _ws, ...rest } = _page;",
-      "  const gate = gateFieldsSchema.parse(rest);",
-      "  return { missingAge, okFull, okDefault, dynCheck, ws, gate };",
-      "}",
-      "",
-    ].join("\n");
-    writeFileSync(apiHandlerPath, initialHandlerSource, "utf8");
-
-    writeFileSync(
-      join(hostDir, "verule.config.mjs"),
-      [
-        'import { defineConfig } from "@verule/sdk";',
-        'import { drizzleAdapter } from "@verule/adapter-drizzle";',
-        'import { zodAdapter } from "@verule/adapter-zod";',
-        'import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";',
-        "",
-        "export default defineConfig({",
-        '  projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],',
-        "  adapters: [drizzleAdapter, zodAdapter],",
-        "  rules: [rowProjectionSatisfiesValidatorRule],",
-        "});",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-
-    const veruleBin = join(hostDir, "node_modules", ".bin", "verule");
-    assert.equal(existsSync(veruleBin), true, "Missing installed verule bin");
-
-    const run1 = await runCliCheck(veruleBin, hostDir);
+    assert.equal(coldMissing.report.diagnostics.length, 1);
+    const missingDiagnostic = coldMissing.report.diagnostics[0]!;
     assert.equal(
-      run1.exitCode,
-      1,
-      `Expected exit 1 (findings), stderr: ${run1.stderr}`,
+      missingDiagnostic.ruleId,
+      "row-projection-satisfies-validator",
     );
-
-    type CliJsonReport = {
-      readonly kind: string;
-      readonly variant: string;
-      readonly data: {
-        readonly status: string;
-        readonly diagnostics: readonly {
-          readonly ruleId: string;
-          readonly message: string;
-          readonly at: { readonly file: string; readonly line: number };
-          readonly evidence: readonly {
-            readonly at?: { readonly file: string };
-          }[];
-        }[];
-        readonly gaps: readonly {
-          readonly kind: string;
-          readonly at?: { readonly file: string };
-        }[];
-        readonly observation: {
-          readonly providers: readonly string[];
-        };
-      };
-    };
-
-    const parsed1 = JSON.parse(run1.stdout) as CliJsonReport;
-    assert.equal(parsed1.kind, "data");
-    assert.equal(parsed1.variant, "findings");
-    assert.equal(parsed1.data.diagnostics.length, 1);
     assert.equal(
-      parsed1.data.diagnostics[0]!.at.file,
-      "packages/api/src/handler.ts",
+      missingDiagnostic.at.file,
+      "packages/app/src/row-projection.ts",
     );
-    assert.ok(parsed1.data.diagnostics[0]!.message.includes("age"));
+    assert.ok(missingDiagnostic.message.includes("status"));
     assert.ok(
-      parsed1.data.diagnostics[0]!.evidence.some(
-        (ev) => ev.at?.file === "packages/db/src/queries.ts",
+      missingDiagnostic.evidence.some(
+        (item) => item.at?.file === "packages/data/src/drizzle-projections.ts",
       ),
     );
     assert.ok(
-      parsed1.data.diagnostics[0]!.evidence.some(
-        (ev) => ev.at?.file === "packages/api/src/handler.ts",
+      missingDiagnostic.evidence.some(
+        (item) => item.at?.file === "packages/data/src/drizzle-schema.ts",
       ),
     );
     assert.ok(
-      parsed1.data.gaps.some(
-        (g) =>
-          g.kind === "dynamic-query-projection" &&
-          g.at?.file === "packages/api/src/handler.ts",
+      missingDiagnostic.evidence.some(
+        (item) => item.at?.file === "packages/app/src/row-projection.ts",
       ),
     );
-    assert.ok(parsed1.data.observation.providers.includes("drizzle"));
-    assert.ok(parsed1.data.observation.providers.includes("zod"));
 
-    // Fix brief -> fetchUserFull and remove `slug: true` from getGate -> missing slug ONLY on gateFieldsSchema.parse(rest)
-    const editedSource = initialHandlerSource
-      .replace(
-        "  const brief = await fetchUserBrief();",
-        "  const brief = await fetchUserFull();",
-      )
-      .replace("      slug: true,\n", "");
-    writeFileSync(apiHandlerPath, editedSource, "utf8");
+    writeFileSync(projectionsPath, originalProjections, "utf8");
+    const coldRestored = await runCliCheck(hostDir, storeDir, mainConfigPath);
+    assert.equal(coldRestored.status, 0);
+    const sdkRestored = await sdk.runCheck({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    const watchRestored = await readWatchReport(watchIterator);
+    const sharedRestored = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    for (const report of [sdkRestored, watchRestored, sharedRestored]) {
+      assert.deepEqual(
+        semanticReport(report),
+        semanticReport(coldRestored.report),
+      );
+    }
+    assert.equal(coldRestored.report.diagnostics.length, 0);
 
-    const run2 = await runCliCheck(veruleBin, hostDir);
-    assert.equal(
-      run2.exitCode,
-      1,
-      `Expected exit 1 for missing slug, stderr: ${run2.stderr}`,
+    const schemaPath = join(hostDir, "packages/data/src/drizzle-schema.ts");
+    const originalSchema = readFileSync(schemaPath, "utf8");
+    const schemaWithTenantId = originalSchema.replace(
+      '  status: text("status").notNull(),\n',
+      '  status: text("status").notNull(),\n  tenantId: integer("tenant_id").notNull(),\n',
     );
-    const parsed2 = JSON.parse(run2.stdout) as CliJsonReport;
-    assert.equal(parsed2.data.diagnostics.length, 1);
-    assert.ok(parsed2.data.diagnostics[0]!.message.includes("slug"));
+    assert.notEqual(schemaWithTenantId, originalSchema);
+    writeFileSync(schemaPath, schemaWithTenantId, "utf8");
 
-    // Restore `slug: true` -> zero findings (exit code 0)
-    const cleanSource = initialHandlerSource.replace(
-      "  const brief = await fetchUserBrief();",
-      "  const brief = await fetchUserFull();",
+    const coldSchemaChanged = await runCliCheck(
+      hostDir,
+      storeDir,
+      mainConfigPath,
     );
-    writeFileSync(apiHandlerPath, cleanSource, "utf8");
+    assert.equal(coldSchemaChanged.status, 1);
+    assert.equal(coldSchemaChanged.report.diagnostics.length, 3);
+    for (const diagnostic of coldSchemaChanged.report.diagnostics) {
+      assert.ok(diagnostic.message.includes("tenantId"));
+      assert.ok(
+        diagnostic.evidence.some(
+          (item) =>
+            item.at?.file === "packages/data/src/drizzle-schema.ts" &&
+            item.message.includes("tenantId"),
+        ),
+      );
+    }
+    const sdkSchemaChanged = await sdk.runCheck({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    const watchSchemaChanged = await readWatchReport(watchIterator);
+    const sharedSchemaChanged = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    for (const report of [
+      sdkSchemaChanged,
+      watchSchemaChanged,
+      sharedSchemaChanged,
+    ]) {
+      assert.deepEqual(
+        semanticReport(report),
+        semanticReport(coldSchemaChanged.report),
+      );
+    }
 
-    const run3 = await runCliCheck(veruleBin, hostDir);
-    assert.equal(
-      run3.exitCode,
-      0,
-      `Expected exit 0 (clean), stderr: ${run3.stderr}`,
+    const multiConfig = await loadConfig(join(hostDir, multiSourceConfigPath));
+    const coldMultiple = await runCliCheck(
+      hostDir,
+      storeDir,
+      multiSourceConfigPath,
     );
-    const parsed3 = JSON.parse(run3.stdout) as CliJsonReport;
-    assert.equal(parsed3.variant, "clean");
-    assert.equal(parsed3.data.diagnostics.length, 0);
+    assert.equal(coldMultiple.status, 1);
+    const multiDiagnostics = coldMultiple.report.diagnostics;
+    assert.equal(multiDiagnostics.length, 2, JSON.stringify(multiDiagnostics));
+    assert.equal(multiDiagnostics[0]!.at.file, multiDiagnostics[1]!.at.file);
+    assert.equal(multiDiagnostics[0]!.at.start, multiDiagnostics[1]!.at.start);
+    assert.equal(multiDiagnostics[0]!.message, multiDiagnostics[1]!.message);
+    assert.notEqual(multiDiagnostics[0]!.id, multiDiagnostics[1]!.id);
+    const multiSourceStarts = multiDiagnostics.map((diagnostic) => {
+      const source = diagnostic.evidence.find(
+        (item) =>
+          item.at?.file === "packages/data/src/drizzle-projections.ts" &&
+          item.message === "Drizzle .select() query",
+      );
+      assert.ok(source?.at);
+      return source.at.start;
+    });
+    assert.notEqual(multiSourceStarts[0], multiSourceStarts[1]);
+
+    const sdkMultiple = await sdk.runCheck({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: multiConfig,
+    });
+    assert.deepEqual(
+      semanticReport(sdkMultiple),
+      semanticReport(coldMultiple.report),
+    );
+    const multiWatchAbort = new AbortController();
+    const multiWatch = sdk.watchProject({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: multiConfig,
+      debounceMs: 50,
+      signal: multiWatchAbort.signal,
+    });
+    const multiWatchIterator = multiWatch[Symbol.asyncIterator]();
+    try {
+      const multiWatchReport = await readWatchReport(multiWatchIterator);
+      assert.deepEqual(
+        semanticReport(multiWatchReport),
+        semanticReport(coldMultiple.report),
+      );
+    } finally {
+      multiWatchAbort.abort();
+      await multiWatchIterator.return?.();
+    }
+
+    const multiShared = await sdk.startSharedSession({
+      cwd: hostDir,
+      endpoint: join(environmentDir, "multiple-sources.sock"),
+      adapterResolutionRoot: appDir,
+      config: multiConfig,
+      debounceMs: 50,
+    });
+    try {
+      const multiSharedReport = await sdk.requestSharedReport({
+        cwd: hostDir,
+        endpoint: multiShared.endpoint,
+      });
+      assert.deepEqual(
+        semanticReport(multiSharedReport),
+        semanticReport(coldMultiple.report),
+      );
+    } finally {
+      await multiShared.close();
+    }
+
+    t.diagnostic(
+      [
+        "Installed native adapters:",
+        ...adapterArtifacts.map(
+          (adapter) =>
+            adapter.packageName +
+            " " +
+            adapter.path +
+            " SHA-256 " +
+            adapter.sha256,
+        ),
+        "Engine binary SHA-256 " + audit.engineBinarySha256,
+      ].join("\n"),
+    );
   } finally {
-    await registry.close().catch(() => {});
+    watchAbort?.abort();
+    await watchIterator?.return?.();
+    await sharedSession?.close();
     bundle.dispose();
-    rmSync(hostDir, { recursive: true, force: true });
+    rmSync(environmentDir, { recursive: true, force: true });
   }
 });

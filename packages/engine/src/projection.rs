@@ -25,7 +25,6 @@ use crate::calls_values::{
     run_callees_of, run_callers_of, run_value_propagation, unwrap_expr_wrappers,
 };
 use crate::cfg::GapItem;
-use crate::drizzle_facts::{EngineFactContributionPayload, run_extract_facts};
 use crate::instance_identity::{
     InstanceModelInput, InstanceProjectionRow, InstanceResolutionRow, InstanceSelect,
     run_project_instances, run_resolve_instances,
@@ -448,9 +447,6 @@ enum StepResult {
     },
     InstanceCleanup {
         items: Vec<InstanceCleanupScopeRow>,
-    },
-    ExtractFacts {
-        items: Vec<EngineFactContributionPayload>,
     },
     NativeFacts {
         items: Vec<verule_adapter_api::NativeContribution>,
@@ -890,41 +886,24 @@ fn execute_extended_step(
             condition,
         } => {
             let target_list = targets.as_deref().unwrap_or(&[]);
-            if snapshot.native_adapters.contains_key(&provider_id) {
-                let output = native_adapter::extract(
-                    snapshot,
-                    project_id,
-                    program,
-                    checker,
-                    &provider_id,
-                    report_provider_id.as_deref(),
-                    &fact_type_id,
-                    target_list,
-                    targets.is_some(),
-                    condition.as_ref(),
-                    step_start,
-                    observer,
-                )?;
-                return Ok(StepResult::NativeFacts {
-                    items: output.contributions,
-                    additional_inputs: output.additional_inputs,
-                });
-            }
-            let items = run_extract_facts(
+            let output = native_adapter::extract(
                 snapshot,
                 project_id,
                 program,
                 checker,
-                &fact_type_id,
                 &provider_id,
                 report_provider_id.as_deref(),
+                &fact_type_id,
                 target_list,
                 targets.is_some(),
                 condition.as_ref(),
                 step_start,
                 observer,
             )?;
-            Ok(StepResult::ExtractFacts { items })
+            Ok(StepResult::NativeFacts {
+                items: output.contributions,
+                additional_inputs: output.additional_inputs,
+            })
         }
         other => execute_effects_step(
             snapshot, project_id, program, checker, other, step_start, observer,
