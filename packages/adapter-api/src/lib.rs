@@ -7,7 +7,10 @@
 //! The only cross-library data is a versioned C ABI carrying opaque node IDs, UTF-8 byte
 //! slices, and JSON fact values; no compiler AST or Rust allocation crosses the boundary.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    hash::{Hash, Hasher},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -316,6 +319,7 @@ pub enum NodeOperation {
     Properties = 14,
     Children = 15,
     ProgramReference = 16,
+    DeclarationNode = 17,
 }
 
 impl TryFrom<u32> for NodeOperation {
@@ -339,6 +343,7 @@ impl TryFrom<u32> for NodeOperation {
             14 => Ok(Self::Properties),
             15 => Ok(Self::Children),
             16 => Ok(Self::ProgramReference),
+            17 => Ok(Self::DeclarationNode),
             _ => Err(AdapterError::Host {
                 message: format!("unknown node operation {value}"),
             }),
@@ -540,6 +545,13 @@ impl PartialEq for NodeRef<'_> {
 
 impl Eq for NodeRef<'_> {}
 
+impl Hash for NodeRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::from_ref(self.context).hash(state);
+        self.id.hash(state);
+    }
+}
+
 impl NodeRef<'_> {
     /// Stable TypeScript syntax kind for this node.
     pub fn kind(self) -> Result<NodeKind, AdapterError> {
@@ -614,6 +626,14 @@ impl NodeRef<'_> {
                 message: "host returned the wrong value for a declaration read".to_string(),
             }),
         }
+    }
+
+    /// Follows a local identifier or call to its declaration as an opaque snapshot node.
+    ///
+    /// References that resolve outside the analyzed project, or cannot be resolved, return
+    /// `None`; adapters never receive compiler-specific declaration types.
+    pub fn declaration_node(self) -> Result<Option<Self>, AdapterError> {
+        self.node_operation(NodeOperation::DeclarationNode)
     }
 
     /// Direct call arguments in source order.

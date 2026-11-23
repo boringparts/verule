@@ -14,12 +14,14 @@ overrides: {}
 packages:
   - apps/*
   - packages/*
+  - adapters/*
   - fixtures/acceptance-host/data
   - fixtures/acceptance-host/app
 catalog:
   "@changesets/cli": 3.0.3
   "@types/node": ^26.0.0
   "@verule/sdk": "workspace:*"
+  drizzle-orm: 0.45.3
   "@ykdz/cli-contract": 0.5.0
   oxfmt: ^0.79.0
   oxlint: 1.94.0
