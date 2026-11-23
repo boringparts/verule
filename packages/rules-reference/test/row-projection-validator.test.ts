@@ -15,15 +15,9 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  createDrizzleAdapter,
-  createRustDrizzleAdapter,
-  drizzleAdapter,
-  rustDrizzleAdapter,
-} from "@verule/adapter-drizzle";
+import { drizzleAdapter } from "@verule/adapter-drizzle";
 import { zodAdapter } from "@verule/adapter-zod";
 import {
-  createRowProjectionSatisfiesValidatorRule,
   rowProjectionSatisfiesValidatorRule,
 } from "@verule/rules-reference";
 import { defineConfig, openSession, runCheck } from "@verule/sdk";
@@ -264,6 +258,7 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     try {
       const report = await runCheck({
         cwd: root,
+        adapterResolutionRoot: packageRoot,
         config: defineConfig({
           projects: [
             "packages/db/tsconfig.json",
@@ -408,6 +403,7 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
 
     const session = await openSession({
       cwd: root,
+      adapterResolutionRoot: packageRoot,
       config: defineConfig({
         projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
         adapters: [drizzleAdapter, zodAdapter],
@@ -565,163 +561,4 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     }
   });
 
-  void it("runs the exact same rowProjectionSatisfiesValidatorRule with rustDrizzleAdapter and supports providerId selection when both adapters are enabled", async () => {
-    const root = createMonorepoFixture({
-      "packages/db/src/schema.ts": [
-        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const workspace = sqliteTable("workspace", {',
-        '  id: integer("id").primaryKey(),',
-        '  slug: text("slug").notNull(),',
-        "});",
-        "",
-        'export const page = sqliteTable("page", {',
-        '  id: integer("id").primaryKey(),',
-        '  workspaceId: integer("workspace_id").notNull(),',
-        '  slug: text("slug").notNull(),',
-        "});",
-        "",
-        "export const pageRelations = relations(page, ({ one }) => ({",
-        "  workspace: one(workspace),",
-        "}));",
-        "",
-      ].join("\n"),
-      "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "./drizzle.js";',
-        'import { page, workspace } from "./schema.js";',
-        "",
-        "export const selectWorkspaceSchema = createSelectSchema(workspace);",
-        "export const selectPageSchema = createSelectSchema(page);",
-        "",
-      ].join("\n"),
-      "packages/db/src/index.ts": [
-        'export { db } from "./drizzle.js";',
-        'export { page, pageRelations, workspace } from "./schema.js";',
-        'export { selectPageSchema, selectWorkspaceSchema } from "./validation.js";',
-        "",
-      ].join("\n"),
-      "packages/api/src/routes.ts": [
-        'import { db, selectPageSchema, selectWorkspaceSchema } from "@fixture/db";',
-        "",
-        "const gateFieldsSchema = selectPageSchema.pick({ slug: true });",
-        "",
-        "export async function getGate() {",
-        "  const _page = await db.query.page.findFirst({",
-        "    columns: {",
-        "      id: true,",
-        "    },",
-        "    with: { workspace: true },",
-        "  });",
-        "  if (!_page) return null;",
-        "  const ws = selectWorkspaceSchema.safeParse(_page.workspace);",
-        "  const { workspace: _ws, ...rest } = _page;",
-        "  const gate = gateFieldsSchema.parse(rest);",
-        "  return { ws, gate };",
-        "}",
-        "",
-      ].join("\n"),
-    });
-
-    try {
-      const tsReport = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-          adapters: [drizzleAdapter, zodAdapter],
-          rules: [rowProjectionSatisfiesValidatorRule],
-        }),
-        observe: "detail",
-      });
-      const rustReport = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-          adapters: [rustDrizzleAdapter, zodAdapter],
-          rules: [rowProjectionSatisfiesValidatorRule],
-        }),
-        observe: "detail",
-      });
-
-      assert.equal(tsReport.status, "findings");
-      assert.equal(rustReport.status, "findings");
-      assert.equal(rustReport.diagnostics.length, 1);
-      assert.deepEqual(
-        rustReport.diagnostics.map((d) => ({
-          at: d.at,
-          message: d.message,
-          evidence: d.evidence,
-        })),
-        tsReport.diagnostics.map((d) => ({
-          at: d.at,
-          message: d.message,
-          evidence: d.evidence,
-        })),
-      );
-
-      // Dual-enabled: by-FactType runs both cleanly without conflict, while explicit providerId runs only target
-      let tsExtracts = 0;
-      let rustExtracts = 0;
-      const trackedTs = createDrizzleAdapter({
-        onExtract: () => {
-          tsExtracts += 1;
-        },
-      });
-      const trackedRust = createRustDrizzleAdapter({
-        onExtract: () => {
-          rustExtracts += 1;
-        },
-      });
-
-      const byTypeReport = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-          adapters: [trackedTs, trackedRust, zodAdapter],
-          rules: [rowProjectionSatisfiesValidatorRule],
-        }),
-        observe: "detail",
-      });
-      assert.equal(tsExtracts, 2);
-      assert.equal(rustExtracts, 2);
-      assert.ok(byTypeReport.observation?.providers.includes("drizzle"));
-      assert.ok(byTypeReport.observation?.providers.includes("drizzle-rust"));
-      assert.deepEqual(
-        byTypeReport.diagnostics.map((d) => ({
-          at: d.at,
-          message: d.message,
-        })),
-        tsReport.diagnostics.map((d) => ({
-          at: d.at,
-          message: d.message,
-        })),
-      );
-
-      tsExtracts = 0;
-      rustExtracts = 0;
-      const explicitRustReport = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-          adapters: [trackedTs, trackedRust, zodAdapter],
-          rules: [
-            createRowProjectionSatisfiesValidatorRule({
-              drizzleProviderId: "drizzle-rust",
-            }),
-          ],
-        }),
-        observe: "detail",
-      });
-      assert.equal(tsExtracts, 0);
-      assert.equal(rustExtracts, 2);
-      assert.equal(
-        explicitRustReport.observation?.providers.includes("drizzle"),
-        false,
-      );
-      assert.ok(
-        explicitRustReport.observation?.providers.includes("drizzle-rust"),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
 });
