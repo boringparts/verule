@@ -106,16 +106,32 @@ void describe("independent native adapter package", () => {
       ]);
 
       writeFileSync(join(root, "fixture.inputs.json"), "second-input", "utf8");
-      await session.update();
+      writeFileSync(
+        join(root, "src/app.ts"),
+        "export function run() { return target(43); }\n",
+        "utf8",
+      );
+      await session.update({ changed: ["src/app.ts"] });
       facts = [];
       const refreshedReport = await session.check();
       assert.equal(refreshedReport.status, "clean");
       assert.equal(facts.length, 1);
       assert.deepEqual(facts[0]?.value, {
-        text: "target(42)",
+        text: "target(43)",
         input: "second-input",
         invocation: 2,
       });
+      assert.equal(facts[0]?.evidence[0]?.at?.file, "src/app.ts");
+      assert.equal(facts[0]?.evidence[0]?.at?.line, 1);
+      assert.equal(facts[0]?.evidence[0]?.at?.column, 32);
+      assert.equal(refreshedReport.additionalInputs.length, 1);
+      assert.equal(
+        refreshedReport.additionalInputs[0]?.file,
+        "fixture.inputs.json",
+      );
+      assert.deepEqual(refreshedReport.additionalInputs[0]?.sources, [
+        { kind: "adapter", id: "third-party-fixture" },
+      ]);
     } finally {
       await session?.close();
       rmSync(root, { recursive: true, force: true });

@@ -10,5 +10,10 @@
     "rewriteRelativeImportExtensions": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "verule.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "verule.config.ts",
+    "verule.native.config.ts",
+    "verule.missing-adapter.config.ts"
+  ]
 }
