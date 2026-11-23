@@ -56,6 +56,7 @@ export type TypePropertyInfo = {
 
 export type DeclarationProjectionSelection = {
   readonly name?: true;
+  readonly containerName?: true;
   readonly kind?: true;
   readonly location?: true;
   readonly syntax?: true;
@@ -65,6 +66,7 @@ export type DeclarationProjectionSelection = {
 
 export type FullDeclarationProjectionFields = {
   readonly name: string | null;
+  readonly containerName: string | null;
   readonly kind: SyntaxKind | null;
   readonly location: DiagnosticLocation | null;
   readonly syntax: SyntaxRef | null;
@@ -259,6 +261,7 @@ type RawDeclarationRow = {
   readonly declaration: string | null;
   readonly gaps: readonly Gap[];
   readonly name?: string | null;
+  readonly containerName?: string | null;
   readonly kind?: SyntaxKind | null;
   readonly location?: DiagnosticLocation | null;
   readonly syntax?: string | null;
@@ -564,6 +567,9 @@ export function createProjectionQueries(deps: {
           gaps: raw.gaps,
         };
         if (select?.name === true) row.name = raw.name ?? null;
+        if (select?.containerName === true) {
+          row.containerName = raw.containerName ?? null;
+        }
         if (select?.kind === true) row.kind = raw.kind ?? null;
         if (select?.location === true) row.location = raw.location ?? null;
         if (select?.syntax === true) {
