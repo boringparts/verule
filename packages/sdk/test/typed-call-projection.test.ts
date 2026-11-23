@@ -206,6 +206,62 @@ void describe("@verule/sdk typed call projection", () => {
     }
   });
 
+  void it("filters call syntax by static callee names", async () => {
+    const root = createMultiFileTempProject({
+      "src/entry.ts": [
+        "function createMenu() {}",
+        "const view = { createMenu() {} };",
+        'const methodName = "createMenu";',
+        "createMenu();",
+        "view.createMenu();",
+        'view["createMenu"]();',
+        "view[methodName]();",
+        "",
+      ].join("\n"),
+    });
+
+    let callLines: number[] = [];
+    let textMatchedCallLines: number[] = [];
+    let emptyCalleeMatches = -1;
+    const rule = defineRule({
+      id: "static-callee-filter",
+      run: async (ctx) => {
+        callLines = (
+          await ctx.findSyntax({
+            kinds: ["CallExpression"],
+            calleeNames: ["createMenu"],
+          })
+        ).map((call) => call.location.line);
+        textMatchedCallLines = (
+          await ctx.findSyntax({
+            kinds: ["CallExpression"],
+            textIncludes: ["methodName"],
+          })
+        ).map((call) => call.location.line);
+        emptyCalleeMatches = (
+          await ctx.findSyntax({
+            kinds: ["CallExpression"],
+            calleeNames: [],
+          })
+        ).length;
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(callLines, [4, 5, 6]);
+      assert.deepEqual(textMatchedCallLines, [7]);
+      assert.equal(emptyCalleeMatches, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   void it("evaluates overloads, generic instantiation, narrowing, and assignability in a single snapshot", async () => {
     const source = [
       "export function parseInput(value: string): { kind: 'text'; value: string };",

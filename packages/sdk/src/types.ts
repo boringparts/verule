@@ -506,6 +506,10 @@ export type FindSyntaxOptions = {
   readonly kinds?: readonly SyntaxKind[];
   readonly files?: readonly string[];
   readonly range?: SourceRange;
+  /** Optional substring needles; only AST nodes whose source text contains at least one needle are returned. */
+  readonly textIncludes?: readonly string[];
+  /** Optional exact name filter for identifier, property, or static string-index callees. */
+  readonly calleeNames?: readonly string[];
 };
 
 export type SyntaxNodeResult = {
