@@ -45,15 +45,24 @@ function resolveExportedPackageRoot(packageName: string): string {
   return dirname(realpathSync(manifestPath));
 }
 
-function copyExportedPackage(packageName: string, destination: string): void {
+function copyExportedPackage(
+  packageName: string,
+  destination: string,
+  excludedParts: readonly string[] = [],
+): void {
   const source = resolveExportedPackageRoot(packageName);
+  const excluded = new Set([
+    "dist",
+    "host-root",
+    "node_modules",
+    "test",
+    ...excludedParts,
+  ]);
   cpSync(source, destination, {
     recursive: true,
     filter: (sourcePath) => {
       const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) =>
-        ["dist", "host-root", "node_modules", "test"].includes(part),
-      );
+      return !parts.some((part) => excluded.has(part));
     },
   });
 }
@@ -63,9 +72,9 @@ function findInstalledPackageRoot(entryPath: string): string {
   while (true) {
     try {
       const manifestPath = join(current, "package.json");
-      const manifest = JSON.parse(
-        readFileSync(manifestPath, "utf8"),
-      ) as { readonly name?: unknown };
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        readonly name?: unknown;
+      };
       if (manifest.name === adapterPackageName) return current;
     } catch {
       // Keep walking until the adapter package manifest is found.
@@ -98,6 +107,45 @@ void test("installs the native Zod adapter and queries real schemas from a stati
   copyExportedPackage(
     "@verule/acceptance-host-app",
     join(hostDir, "packages/app"),
+    ["zod-overlay"],
+  );
+
+  const appDir = join(hostDir, "packages/app");
+  const overlayDir = join(
+    resolveExportedPackageRoot("@verule/acceptance-host-app"),
+    "zod-overlay",
+  );
+  const appOverlayDir = join(overlayDir, "app");
+  const dataOverlayDir = join(overlayDir, "data");
+  cpSync(join(appOverlayDir, "package.json"), join(appDir, "package.json"));
+  cpSync(join(appOverlayDir, "tsconfig.json"), join(appDir, "tsconfig.json"));
+  cpSync(
+    join(appOverlayDir, "src/zod-fields.ts"),
+    join(appDir, "src/zod-fields.ts"),
+  );
+  cpSync(
+    join(appOverlayDir, "verule.zod.native.config.ts"),
+    join(appDir, "verule.zod.native.config.ts"),
+  );
+  cpSync(
+    join(dataOverlayDir, "package.json"),
+    join(hostDir, "packages/data/package.json"),
+  );
+  cpSync(
+    join(dataOverlayDir, "tsconfig.json"),
+    join(hostDir, "packages/data/tsconfig.json"),
+  );
+  cpSync(
+    join(dataOverlayDir, "src/user-table.ts"),
+    join(hostDir, "packages/data/src/user-table.ts"),
+  );
+  cpSync(
+    join(dataOverlayDir, "src/index.ts"),
+    join(hostDir, "packages/data/src/index.ts"),
+  );
+  cpSync(
+    join(overlayDir, "host-root/tsconfig.json"),
+    join(hostDir, "tsconfig.json"),
   );
 
   const env = process.env;
@@ -120,7 +168,10 @@ void test("installs the native Zod adapter and queries real schemas from a stati
     assert.equal(exports?.["."]?.default, "./dist/index.js");
     assert.equal(exports?.["."]?.types, "./dist/index.d.ts");
     assert.equal(exports?.["."]?.source, undefined);
-    assert.equal(exports?.["./verule-adapter"]?.default, "./dist/verule-adapter.js");
+    assert.equal(
+      exports?.["./verule-adapter"]?.default,
+      "./dist/verule-adapter.js",
+    );
 
     const installation = await installArtifactPackages({
       checkoutDir: hostDir,
@@ -201,13 +252,19 @@ void test("installs the native Zod adapter and queries real schemas from a stati
     assert.ok(user, JSON.stringify(parseFacts));
 
     assert.equal(account.facts.input.validatorMethod, "safeParse");
-    assert.deepEqual(account.facts.input.requiredFields, ["id", "nullableName"]);
+    assert.deepEqual(account.facts.input.requiredFields, [
+      "id",
+      "nullableName",
+    ]);
     assert.deepEqual(account.facts.input.optionalFields, [
       "fallback",
       "nickname",
       "state",
     ]);
-    assert.deepEqual(account.facts.input.defaultedFields, ["fallback", "state"]);
+    assert.deepEqual(account.facts.input.defaultedFields, [
+      "fallback",
+      "state",
+    ]);
     assert.equal(account.facts.input.fields.nullableName?.nullable, true);
     assert.equal(account.facts.input.hasDynamicFields, true);
     assert.deepEqual(account.facts.output.presentFields, [
@@ -217,10 +274,17 @@ void test("installs the native Zod adapter and queries real schemas from a stati
       "state",
     ]);
     assert.deepEqual(account.facts.output.optionalFields, ["nickname"]);
-    assert.deepEqual(account.facts.output.defaultedFields, ["fallback", "state"]);
+    assert.deepEqual(account.facts.output.defaultedFields, [
+      "fallback",
+      "state",
+    ]);
 
     assert.equal(user.facts.input.validatorMethod, "parse");
-    assert.deepEqual(user.facts.input.requiredFields, ["id", "name", "nickname"]);
+    assert.deepEqual(user.facts.input.requiredFields, [
+      "id",
+      "name",
+      "nickname",
+    ]);
     assert.deepEqual(user.facts.input.defaultedFields, ["age"]);
     assert.deepEqual(user.facts.output.presentFields, [
       "age",
@@ -272,7 +336,9 @@ void test("installs the native Zod adapter and queries real schemas from a stati
     const configModule = (await import(pathToFileURL(configPath).href)) as {
       readonly default: NormalizedVeruleConfig;
     };
-    assert.deepEqual(configModule.default.adapterPackages, [adapterPackageName]);
+    assert.deepEqual(configModule.default.adapterPackages, [
+      adapterPackageName,
+    ]);
     assert.deepEqual(
       await sdk.runCheck({
         cwd: hostDir,

@@ -20,9 +20,8 @@ packages:
 catalog:
   "@changesets/cli": 3.0.3
   "@types/node": ^26.0.0
-  "@verule/adapter-zod": "workspace:*"
   "@verule/sdk": "workspace:*"
-  drizzle-orm: rc
+  drizzle-orm: 0.45.3
   "@ykdz/cli-contract": 0.5.0
   oxfmt: ^0.79.0
   oxlint: 1.94.0

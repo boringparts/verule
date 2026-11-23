@@ -56,7 +56,7 @@
       "tags": ["quality:light"]
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
+      "dependsOn": ["@verule/sdk#typecheck"],
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]

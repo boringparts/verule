@@ -16,9 +16,6 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
-  "dependencies": {
-    "drizzle-orm": "catalog:"
-  },
   "engines": {
     "node": "^26.13.1"
   }

@@ -1,7 +1,6 @@
+import { userTable } from "@verule/acceptance-host-data";
 import { createSelectSchema } from "drizzle-orm/zod";
 import { z } from "zod";
-
-import { userTable } from "@verule/acceptance-host-data";
 
 declare function generatedAccountFields(): Record<string, z.ZodType>;
 

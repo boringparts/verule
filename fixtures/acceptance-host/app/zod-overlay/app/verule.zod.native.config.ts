@@ -1,4 +1,7 @@
-import { ValidatorInputFieldsFact, ValidatorOutputFieldsFact } from "@verule/adapter-zod";
+import {
+  ValidatorInputFieldsFact,
+  ValidatorOutputFieldsFact,
+} from "@verule/adapter-zod";
 import { defineConfig, defineRule } from "@verule/sdk";
 
 import { neutralProductReviewRule } from "./src/rule.ts";
