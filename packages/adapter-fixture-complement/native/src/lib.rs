@@ -31,13 +31,16 @@ impl Adapter for ComplementFixtureAdapter {
         let supplemental_input = context.read_additional_input("fixture.inputs.json")?;
         let annotation_input = serde_json::from_str::<String>(&supplemental_input)
             .unwrap_or_else(|_| supplemental_input.clone());
-        let conflict = request
+        let mode = request
             .condition
             .as_ref()
             .and_then(|condition| condition.get("mode"))
-            .and_then(serde_json::Value::as_str)
-            == Some("conflict");
-        let input = if conflict {
+            .and_then(serde_json::Value::as_str);
+        let conflict = mode == Some("conflict");
+        let targeted_conflict = mode == Some("targeted-conflict")
+            && request.targets.is_some()
+            && annotation_input == "host-installed-input";
+        let input = if conflict || targeted_conflict {
             "complement-conflict-input"
         } else {
             supplemental_input.as_str()

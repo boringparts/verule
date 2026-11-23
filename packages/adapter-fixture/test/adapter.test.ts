@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   VeruleExecutionError,
   defineConfig,
+  defineFactType,
   defineRule,
   openSession,
   type FactResult,
@@ -174,6 +175,33 @@ void describe("independent native adapter package", () => {
         `export default { id: "abi-mismatch", provides: [{ factType: { id: "fixture.call-source" }, extract() { return []; } }] };`,
         badAbiLibrary,
       );
+      const unsupportedPackageName = "fixture-native-capability-mismatch";
+      installTestPackage(
+        root,
+        unsupportedPackageName,
+        "third-party-fixture",
+        `
+const nativeProvider = (factTypeId) => ({
+  factType: { id: factTypeId, subjectKind: "call" },
+  extract(ctx, request) {
+    return ctx.extractEngineFacts({
+      factTypeId,
+      providerId: "third-party-fixture",
+      ...(request.targets !== undefined ? { targets: request.targets } : {}),
+      ...(request.condition !== undefined ? { condition: request.condition } : {}),
+    });
+  },
+});
+export default {
+  id: "third-party-fixture",
+  provides: [
+    nativeProvider("fixture.native-capability-missing"),
+    nativeProvider("fixture.call-source"),
+  ],
+};
+`,
+        goodLibrary,
+      );
 
       const configFor = (packageName: string) =>
         defineConfig({ tsconfig: "tsconfig.json", adapters: [packageName] });
@@ -204,6 +232,41 @@ void describe("independent native adapter package", () => {
             resolve(abiPackagePath, "dist/native/adapter.so"),
           ),
       );
+
+      const unsupportedFact = defineFactType<
+        "call",
+        undefined,
+        { readonly unavailable: true }
+      >({
+        id: "fixture.native-capability-missing",
+        subjectKind: "call",
+      });
+      const packageCapabilityRule = defineRule({
+        id: "fixture-native-capability-mismatch",
+        run: async (context) => {
+          await assert.rejects(
+            context.facts(unsupportedFact),
+            (error: unknown) =>
+              error instanceof VeruleExecutionError &&
+              error.code === "NATIVE_ADAPTER_EXTRACT" &&
+              error.message.includes(unsupportedPackageName) &&
+              error.message.includes(unsupportedFact.id) &&
+              error.message.includes("does not provide fact type"),
+          );
+          assert.equal((await context.facts(FixtureCallSourceFact)).length, 1);
+        },
+      });
+      const session = await openSession({
+        cwd: root,
+        adapterResolutionRoot: root,
+        config: configFor(unsupportedPackageName),
+      });
+      try {
+        const report = await session.check([packageCapabilityRule]);
+        assert.equal(report.status, "clean");
+      } finally {
+        await session.close();
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

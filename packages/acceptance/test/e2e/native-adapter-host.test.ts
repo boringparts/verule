@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -179,14 +178,8 @@ void test("loads an installed native adapter from a nested app config", async (t
     ]);
     assert.deepEqual(await runInstalledSdk(hostDir), envelope.data);
 
-    const zodLibrary = execFileSync(
-      "tar",
-      [
-        "-xOf",
-        zodArtifact.filename,
-        "package/dist/native/libverule_adapter_zod.so",
-      ],
-      { encoding: "buffer" },
+    const zodLibrary = readFileSync(
+      appRequire.resolve("@verule/adapter-zod/native/linux-x64"),
     );
     const originalLibrary = readFileSync(libraryPath);
     writeFileSync(libraryPath, zodLibrary);

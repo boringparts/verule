@@ -8,8 +8,8 @@ use tsrs_checker::TypeFormatFlags;
 use tsrs_compiler::{CheckerHandle, Program};
 use tsrs_core::{P, tspath};
 use verule_adapter_api::{
-    DeclarationInfo, HostAccess, HostValue, NativeAdapterOutput, NativeFactRequest, NativeLibrary,
-    NodeKind, NodeOperation, SourceLocation,
+    AdapterError, DeclarationInfo, HostAccess, HostValue, NativeAdapterOutput, NativeFactRequest,
+    NativeLibrary, NodeKind, NodeOperation, SourceLocation,
 };
 
 use crate::calls_values::{
@@ -161,7 +161,7 @@ pub fn extract(
     };
     let mut output = adapter
         .extract(&request, &mut host)
-        .map_err(|error| RpcErr::new("NATIVE_ADAPTER_EXTRACT", error.to_string()))?;
+        .map_err(|error| native_extract_error(&adapter, error))?;
     let mut contributions = Vec::with_capacity(output.contributions.len());
     for contribution in output.contributions {
         if let Some(handles) = aliases_by_primary_handle.get(&contribution.subject) {
@@ -209,6 +209,19 @@ pub fn extract(
         details,
     );
     Ok(output)
+}
+
+fn native_extract_error(adapter: &NativeLibrary, error: AdapterError) -> RpcErr {
+    let message = match error {
+        AdapterError::UnsupportedFactType { fact_type_id, .. } => format!(
+            "Configured native adapter package \"{}\" (adapter id \"{}\") does not provide fact type \"{}\".",
+            adapter.package_name(),
+            adapter.manifest().id,
+            fact_type_id
+        ),
+        error => error.to_string(),
+    };
+    RpcErr::new("NATIVE_ADAPTER_EXTRACT", message)
 }
 
 fn target_aliases(targets: Option<&[ResolvedNativeTarget]>) -> FxHashMap<String, Vec<String>> {

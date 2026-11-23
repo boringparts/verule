@@ -21,6 +21,7 @@ import {
 } from "@verule/acceptance";
 import type {
   CheckReport,
+  FactType,
   NativeAdapterObservation,
   NormalizedVeruleConfig,
   ObservationDetailEntry,
@@ -42,6 +43,18 @@ type CliEnvelope = {
   readonly kind: string;
   readonly data: CheckReport;
 };
+
+type ProviderSessionFact = FactType<
+  "call",
+  { readonly mode: "normal" | "conflict" | "targeted-conflict" },
+  {
+    readonly text?: string;
+    readonly input?: string;
+    readonly invocation?: number;
+    readonly annotation?: string;
+    readonly secondaryInvocation?: number;
+  }
+>;
 
 async function runCliCheck(
   hostDir: string,
@@ -315,7 +328,102 @@ void test("loads independent native providers together and updates facts across 
           "provider-session-overlay/app/src/provider-session-rules.ts",
         ),
       ).href
-    )) as { readonly lastComplementInvocation: number | undefined };
+    )) as {
+      readonly lastComplementInvocation: number | undefined;
+      readonly providerSessionFact: ProviderSessionFact;
+    };
+
+    const targetConflictProbe = sdk.defineRule({
+      id: "provider-session-target-conflict-cache",
+      run: async (ctx) => {
+        const syntax = (
+          await ctx.findSyntax({
+            files: [
+              "packages/app/provider-session-overlay/app/src/provider-session.ts",
+            ],
+            kinds: ["CallExpression"],
+            textIncludes: ["getProduct(id)"],
+          })
+        )[0];
+        assert.ok(syntax);
+        const [resolved] = await ctx.resolveCalls([syntax.ref]);
+        assert.ok(resolved?.call);
+
+        const condition = { mode: "targeted-conflict" as const };
+        const full = await ctx.facts(providerSessionRules.providerSessionFact, {
+          condition,
+        });
+        const fullProduct = full.find(
+          (fact) => fact.value.text === "getProduct(id)",
+        );
+        assert.ok(fullProduct, JSON.stringify(full));
+        const expectedInput = readFileSync(
+          join(hostDir, "fixture.inputs.json"),
+          "utf8",
+        );
+        assert.equal(fullProduct.value.input, expectedInput);
+        assert.notEqual(fullProduct.subject.handleId, resolved.call.handleId);
+
+        const query = {
+          condition,
+          targets: [resolved.call],
+        };
+        await assert.rejects(
+          ctx.facts(providerSessionRules.providerSessionFact, query),
+          (error: unknown) => {
+            assert.ok(error instanceof Error);
+            const conflictError = error as VeruleExecutionError;
+            assert.equal(conflictError.code, "FACT_CONFLICT");
+            assert.deepEqual(
+              conflictError.conflict?.parties.map((party) => party.providerId),
+              ["third-party-fixture", "third-party-fixture-complement"],
+            );
+            assert.ok(
+              conflictError.conflict?.parties.some((party) =>
+                party.evidence.some((item) =>
+                  item.message.includes("Fixture adapter read this call"),
+                ),
+              ),
+            );
+            assert.ok(
+              conflictError.conflict?.parties.some((party) =>
+                party.evidence.some((item) =>
+                  item.message.includes(
+                    "Complement fixture adapter read this call",
+                  ),
+                ),
+              ),
+            );
+            return true;
+          },
+        );
+
+        writeFileSync(rootInput, JSON.stringify("target-retry-input"), "utf8");
+        const recovered = await ctx.facts(
+          providerSessionRules.providerSessionFact,
+          query,
+        );
+        assert.equal(recovered.length, 1);
+        const retryInput = readFileSync(rootInput, "utf8");
+        assert.notEqual(retryInput, expectedInput);
+        assert.equal(recovered[0]?.value.input, retryInput);
+        assert.ok(
+          recovered[0]!.value.secondaryInvocation! >
+            fullProduct.value.secondaryInvocation!,
+        );
+      },
+    });
+    const conflictCacheSession = await sdk.openSession({
+      cwd: hostDir,
+      config: { ...configModule.default, rules: [targetConflictProbe] },
+      adapterResolutionRoot: dirname(configPath),
+    });
+    try {
+      await conflictCacheSession.check();
+    } finally {
+      writeFileSync(rootInput, initialInput, "utf8");
+      await conflictCacheSession.close();
+    }
 
     const sharedAbort = new AbortController();
     const shared = await sdk.startSharedSession({

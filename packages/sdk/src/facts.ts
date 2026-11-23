@@ -897,6 +897,7 @@ export async function executeFactQuery<
     missingTargets: readonly ProgramRef<SubjectKind>[],
   ): Promise<void> => {
     const batchPromise = runExtraction(missingTargets);
+    const itemPromises = [];
     for (const target of missingTargets) {
       const itemPromise = batchPromise.then(
         (computed) => ({
@@ -912,8 +913,9 @@ export async function executeFactQuery<
         },
       );
       factCache.setTarget(baseKey, target.handleId, itemPromise);
+      itemPromises.push(itemPromise);
     }
-    await batchPromise;
+    await Promise.all(itemPromises);
   };
 
   if (targets === undefined) {
