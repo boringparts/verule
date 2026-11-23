@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,9 +11,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -23,7 +22,14 @@ import {
   verifyHostArtifactResolution,
 } from "@verule/acceptance";
 import type { PackedArtifact } from "@verule/acceptance";
-import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
+import type {
+  AnalysisSession,
+  CheckReport,
+  NormalizedVeruleConfig,
+  WatchReportEvent,
+} from "@verule/sdk";
+
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
 
 const adapterPackageNames = [
   "@verule/adapter-drizzle",
@@ -48,67 +54,16 @@ type HostConfigModule = {
   readonly default: NormalizedVeruleConfig;
 };
 
-function resolveExportedPackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(packageName + "/package.json"),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(
-  packageName: string,
-  destination: string,
-  excludedParts: readonly string[] = [],
-): void {
-  const source = resolveExportedPackageRoot(packageName);
-  const excluded = new Set([
-    "dist",
-    "host-root",
-    "node_modules",
-    "test",
-    "drizzle-overlay",
-    "zod-overlay",
-    "drizzle-zod-overlay",
-    "provider-session-overlay",
-    ...excludedParts,
-  ]);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) => excluded.has(part));
-    },
-  });
-}
-
 function createArtifactHost(environmentDir: string): {
   readonly hostDir: string;
   readonly appDir: string;
   readonly storeDir: string;
 } {
   const hostDir = join(environmentDir, "host");
-  const appRoot = resolveExportedPackageRoot("@verule/acceptance-host-app");
-  const overlayDir = join(appRoot, "drizzle-zod-overlay");
-  const appDir = join(hostDir, "packages/app");
-  const dataDir = join(hostDir, "packages/data");
   const storeDir = join(environmentDir, "pnpm-store");
 
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-  cpSync(join(appRoot, "host-root"), hostDir, { recursive: true });
-  copyExportedPackage("@verule/acceptance-host-app", appDir);
-  copyExportedPackage("@verule/acceptance-host-data", dataDir);
-
-  cpSync(
-    join(overlayDir, "host-root/pnpm-workspace.yaml"),
-    join(hostDir, "pnpm-workspace.yaml"),
-  );
-  cpSync(
-    join(overlayDir, "host-root/tsconfig.json"),
-    join(hostDir, "tsconfig.json"),
-  );
-  cpSync(join(overlayDir, "app"), appDir, { recursive: true });
-  cpSync(join(overlayDir, "data"), dataDir, { recursive: true });
+  const { appDir } = copyAcceptanceHost(hostDir, "drizzle-zod");
 
   return { hostDir, appDir, storeDir };
 }
@@ -155,10 +110,18 @@ async function runCliCheck(
   hostDir: string,
   storeDir: string,
   configPath: string,
+  observe = false,
 ): Promise<{ readonly report: CheckReport; readonly status: number }> {
   const result = await runBareVeruleInHost({
     checkoutDir: hostDir,
-    args: ["check", "--config", configPath, "--output", "json"],
+    args: [
+      "check",
+      "--config",
+      configPath,
+      "--output",
+      "json",
+      ...(observe ? ["--observe", "summary"] : []),
+    ],
     isolated: true,
     pnpmStoreDir: storeDir,
   });
@@ -169,9 +132,9 @@ async function runCliCheck(
   return { report: envelope.data, status: result.status };
 }
 
-async function readWatchReport(
+async function readWatchEvent(
   iterator: AsyncIterator<unknown>,
-): Promise<CheckReport> {
+): Promise<WatchReportEvent> {
   let timer: NodeJS.Timeout | undefined;
   const result = await Promise.race([
     iterator.next(),
@@ -191,7 +154,13 @@ async function readWatchReport(
   };
   assert.equal(event.kind, "report");
   assert.ok(event.report);
-  return event.report;
+  return event as WatchReportEvent;
+}
+
+async function readWatchReport(
+  iterator: AsyncIterator<unknown>,
+): Promise<CheckReport> {
+  return (await readWatchEvent(iterator)).report;
 }
 
 async function loadConfig(configPath: string): Promise<NormalizedVeruleConfig> {
@@ -258,6 +227,7 @@ void test("loads both installed native adapters from the neutral static host and
   });
   let watchAbort: AbortController | undefined;
   let watchIterator: AsyncIterator<unknown> | undefined;
+  let explicitSession: AnalysisSession | undefined;
   let sharedSession:
     | { readonly endpoint: string; close(): Promise<void> }
     | undefined;
@@ -319,13 +289,34 @@ void test("loads both installed native adapters from the neutral static host and
     const mainConfig = await loadConfig(mainConfigAbsPath);
     assert.deepEqual(mainConfig.adapterPackages, adapterPackageNames);
 
-    const coldInitial = await runCliCheck(hostDir, storeDir, mainConfigPath);
+    const coldInitial = await runCliCheck(
+      hostDir,
+      storeDir,
+      mainConfigPath,
+      true,
+    );
     assert.equal(
       coldInitial.status,
       0,
       JSON.stringify(coldInitial.report, null, 2),
     );
     assert.equal(coldInitial.report.diagnostics.length, 0);
+    const appProject = coldInitial.report.projects.find(
+      (project) => project.configFile === "packages/app/tsconfig.json",
+    );
+    assert.ok(appProject);
+    assert.ok(
+      !appProject.sourceFiles.includes(
+        "packages/data/src/drizzle-projections.ts",
+      ),
+    );
+    for (const providerId of ["drizzle", "zod"] as const) {
+      assert.ok(
+        (coldInitial.report.observation?.engineExtractions[providerId]
+          ?.extractions ?? 0) > 0,
+        `Expected an observed extraction from the ${providerId} provider.`,
+      );
+    }
     const sdkInitial = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
@@ -373,6 +364,15 @@ void test("loads both installed native adapters from the neutral static host and
       semanticReport(sharedInitial),
       semanticReport(coldInitial.report),
     );
+    explicitSession = await sdk.openSession({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    assert.deepEqual(
+      semanticReport(await explicitSession.check()),
+      semanticReport(coldInitial.report),
+    );
 
     const projectionsPath = join(
       hostDir,
@@ -386,18 +386,71 @@ void test("loads both installed native adapters from the neutral static host and
     assert.notEqual(missingRequiredColumn, originalProjections);
     writeFileSync(projectionsPath, missingRequiredColumn, "utf8");
 
+    const sharedImmediate = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    const explicitMissingUpdate = await explicitSession.update({
+      changed: ["packages/data/src/drizzle-projections.ts"],
+    });
+    assert.ok(
+      explicitMissingUpdate.recomputation.invalidatedBy.includes(
+        "changed:packages/data/src/drizzle-projections.ts",
+      ),
+    );
+    const explicitMissing = await explicitSession.check();
+
     const coldMissing = await runCliCheck(hostDir, storeDir, mainConfigPath);
     assert.equal(coldMissing.status, 1);
+    assert.deepEqual(
+      coldMissing.report.projects.find(
+        (project) => project.configFile === "packages/app/tsconfig.json",
+      )?.sourceFiles,
+      appProject.sourceFiles,
+    );
+    assert.notEqual(
+      coldMissing.report.identity.snapshotDigest,
+      coldInitial.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      explicitMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
+    assert.deepEqual(
+      semanticReport(sharedImmediate),
+      semanticReport(coldMissing.report),
+      "shared immediate",
+    );
+    assert.deepEqual(
+      semanticReport(explicitMissing),
+      semanticReport(coldMissing.report),
+      "explicit update",
+    );
     const sdkMissing = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
       config: mainConfig,
     });
-    const watchMissing = await readWatchReport(watchIterator);
+    const watchMissingEvent = await readWatchEvent(watchIterator);
+    assert.ok(
+      watchMissingEvent.recomputation.invalidatedBy.includes(
+        "changed:packages/data/src/drizzle-projections.ts",
+      ),
+      JSON.stringify(watchMissingEvent.recomputation),
+    );
+    const watchMissing = watchMissingEvent.report;
     const sharedMissing = await sdk.requestSharedReport({
       cwd: hostDir,
       endpoint: sharedSession.endpoint,
     });
+    assert.equal(
+      watchMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      sharedMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
     for (const [label, report] of [
       ["SDK", sdkMissing],
       ["watch", watchMissing],
@@ -438,8 +491,25 @@ void test("loads both installed native adapters from the neutral static host and
     );
 
     writeFileSync(projectionsPath, originalProjections, "utf8");
+    await explicitSession.update({
+      changed: ["packages/data/src/drizzle-projections.ts"],
+    });
+    const explicitRestored = await explicitSession.check();
     const coldRestored = await runCliCheck(hostDir, storeDir, mainConfigPath);
     assert.equal(coldRestored.status, 0);
+    assert.equal(
+      coldRestored.report.identity.snapshotDigest,
+      coldInitial.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      explicitRestored.identity.snapshotDigest,
+      coldRestored.report.identity.snapshotDigest,
+    );
+    assert.deepEqual(
+      semanticReport(explicitRestored),
+      semanticReport(coldRestored.report),
+      "explicit update after restore",
+    );
     const sdkRestored = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
@@ -595,6 +665,7 @@ void test("loads both installed native adapters from the neutral static host and
   } finally {
     watchAbort?.abort();
     await watchIterator?.return?.();
+    await explicitSession?.close();
     await sharedSession?.close();
     bundle.dispose();
     rmSync(environmentDir, { recursive: true, force: true });

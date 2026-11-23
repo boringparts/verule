@@ -132,6 +132,7 @@ struct SnapshotOpenResult {
     snapshot_id: u64,
     snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    workspace_source_files: Vec<String>,
     native_adapters: Vec<NativeAdapterObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     engine_rss_bytes: Option<u64>,
@@ -143,6 +144,7 @@ struct SnapshotUpdateResult {
     snapshot_id: u64,
     snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    workspace_source_files: Vec<String>,
     native_adapters: Vec<NativeAdapterObservation>,
     recomputed_projects: Vec<String>,
     reused_projects: Vec<String>,
@@ -678,6 +680,7 @@ impl EngineServer {
             snapshot_id,
             snapshot_digest: opened.snapshot_digest,
             projects: opened.summaries,
+            workspace_source_files: opened.workspace_source_files,
             native_adapters: native_adapter_observations,
             engine_rss_bytes: read_process_rss_bytes(),
         })
@@ -781,6 +784,7 @@ impl EngineServer {
             snapshot_id,
             snapshot_digest: opened.snapshot_digest,
             projects: opened.summaries,
+            workspace_source_files: opened.workspace_source_files,
             native_adapters: native_adapter_observations,
             recomputed_projects: updated.recomputed_projects,
             reused_projects: updated.reused_projects,

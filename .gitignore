@@ -15,6 +15,11 @@ data/
 /fixtures/acceptance-host/data/.turbo/
 /fixtures/acceptance-host/data/node_modules/
 /fixtures/acceptance-host/data/dist/
+!/fixtures/acceptance-host/overlays/*/data/
+!/fixtures/acceptance-host/overlays/*/data/**
+/fixtures/acceptance-host/overlays/*/data/.turbo/
+/fixtures/acceptance-host/overlays/*/data/node_modules/
+/fixtures/acceptance-host/overlays/*/data/dist/
 playwright-report/
 test-results/
 .changeset/packed/

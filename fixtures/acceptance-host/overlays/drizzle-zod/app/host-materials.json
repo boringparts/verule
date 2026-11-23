@@ -1,0 +1,16 @@
+{
+  "type": "verule-acceptance-host-materials",
+  "version": 1,
+  "files": [
+    "host-package.json",
+    "host-root/pnpm-workspace.yaml",
+    "host-root/tsconfig.json",
+    "package.json",
+    "scenarios/multiple-sources.ts",
+    "src/row-projection.ts",
+    "tsconfig.json",
+    "tsconfig.multiple-sources.json",
+    "verule.drizzle-zod.native.config.ts",
+    "verule.multiple-sources.config.ts"
+  ]
+}

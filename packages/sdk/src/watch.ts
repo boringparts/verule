@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
-import { defineConfig, openSession } from "./session.ts";
+import {
+  defineConfig,
+  getSessionWorkspaceFiles,
+  openSession,
+} from "./session.ts";
 import {
   VeruleExecutionError,
   type AnalysisSession,
@@ -117,9 +121,13 @@ function recordSessionFiles(
   session: AnalysisSession,
   knownFileHashes: Map<string, string>,
   knownWorkspaceFiles: Set<string>,
+  loadedWorkspaceFiles: Set<string>,
+  preservedFiles: ReadonlySet<string>,
 ): void {
+  const projectFiles = new Set<string>();
   for (const project of session.projects) {
     const configAbs = normalizeAbsPath(resolve(absCwd, project.configFile));
+    projectFiles.add(configAbs);
     const configHash = hashFileContent(configAbs);
     if (configHash !== undefined) {
       knownFileHashes.set(configAbs, configHash);
@@ -127,6 +135,7 @@ function recordSessionFiles(
     }
     for (const relFile of project.sourceFiles) {
       const fileAbs = normalizeAbsPath(resolve(absCwd, relFile));
+      projectFiles.add(fileAbs);
       const fileHash = hashFileContent(fileAbs);
       if (fileHash !== undefined) {
         knownFileHashes.set(fileAbs, fileHash);
@@ -134,6 +143,29 @@ function recordSessionFiles(
       }
     }
   }
+
+  const nextWorkspaceFiles = new Set<string>();
+  for (const relFile of getSessionWorkspaceFiles(session)) {
+    const fileAbs = normalizeAbsPath(resolve(absCwd, relFile));
+    nextWorkspaceFiles.add(fileAbs);
+    const fileHash = hashFileContent(fileAbs);
+    if (fileHash !== undefined) {
+      knownFileHashes.set(fileAbs, fileHash);
+      knownWorkspaceFiles.add(fileAbs);
+    }
+  }
+
+  for (const oldFile of loadedWorkspaceFiles) {
+    if (
+      !nextWorkspaceFiles.has(oldFile) &&
+      !projectFiles.has(oldFile) &&
+      !preservedFiles.has(oldFile)
+    ) {
+      knownFileHashes.delete(oldFile);
+    }
+  }
+  loadedWorkspaceFiles.clear();
+  for (const file of nextWorkspaceFiles) loadedWorkspaceFiles.add(file);
 }
 
 function collectWorkspaceFiles(
@@ -220,6 +252,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
     ),
   );
   const additionalInputFiles = new Set<string>();
+  const loadedWorkspaceFiles = new Set<string>();
   const knownFileHashes = new Map<string, string>();
   const knownWorkspaceFiles = new Set<string>();
   for (const file of configWatchFiles) {
@@ -276,7 +309,9 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
     const normalized = normalizeAbsPath(absPath);
     const rel = normalizeRelPath(absCwd, normalized);
     const isExplicitWatchFile =
-      configWatchFiles.has(normalized) || additionalInputFiles.has(normalized);
+      configWatchFiles.has(normalized) ||
+      additionalInputFiles.has(normalized) ||
+      loadedWorkspaceFiles.has(normalized);
     if (!isExplicitWatchFile && isIgnoredRelativePath(rel)) {
       return;
     }
@@ -330,8 +365,15 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
 
     const absCwdNorm = normalizeAbsPath(absCwd);
     const neededDirs = new Set<string>();
-    for (const filePath of [...configWatchFiles, ...additionalInputFiles]) {
-      if (filePath !== absCwdNorm && !filePath.startsWith(`${absCwdNorm}/`)) {
+    for (const filePath of [
+      ...configWatchFiles,
+      ...additionalInputFiles,
+      ...loadedWorkspaceFiles,
+    ]) {
+      const rel = normalizeRelPath(absCwd, filePath);
+      const isRootWatchedFile =
+        filePath.startsWith(`${absCwdNorm}/`) && !isIgnoredRelativePath(rel);
+      if (filePath !== absCwdNorm && !isRootWatchedFile) {
         neededDirs.add(normalizeAbsPath(dirname(filePath)));
       }
     }
@@ -350,7 +392,8 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
             const candidate = normalizeAbsPath(resolve(dir, filename));
             if (
               configWatchFiles.has(candidate) ||
-              additionalInputFiles.has(candidate)
+              additionalInputFiles.has(candidate) ||
+              loadedWorkspaceFiles.has(candidate)
             ) {
               schedulePath(candidate);
             }
@@ -358,6 +401,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
             for (const filePath of [
               ...configWatchFiles,
               ...additionalInputFiles,
+              ...loadedWorkspaceFiles,
             ]) {
               if (normalizeAbsPath(dirname(filePath)) === dir) {
                 schedulePath(filePath);
@@ -559,6 +603,8 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           session,
           knownFileHashes,
           knownWorkspaceFiles,
+          loadedWorkspaceFiles,
+          new Set([...configWatchFiles, ...additionalInputFiles]),
         );
         syncSessionAdditionalInputs();
         clearFailureState();
@@ -602,7 +648,14 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
       );
     }
 
-    recordSessionFiles(absCwd, session, knownFileHashes, knownWorkspaceFiles);
+    recordSessionFiles(
+      absCwd,
+      session,
+      knownFileHashes,
+      knownWorkspaceFiles,
+      loadedWorkspaceFiles,
+      new Set([...configWatchFiles, ...additionalInputFiles]),
+    );
     syncSessionAdditionalInputs();
     clearFailureState();
     cachedDefaultReport = undefined;
@@ -672,6 +725,8 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
             session,
             knownFileHashes,
             knownWorkspaceFiles,
+            loadedWorkspaceFiles,
+            new Set([...configWatchFiles, ...additionalInputFiles]),
           );
           syncSessionAdditionalInputs();
           clearFailureState();

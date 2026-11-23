@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,9 +10,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -28,6 +27,8 @@ import type {
   NormalizedVeruleConfig,
 } from "@verule/sdk";
 
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
+
 const adapterPackageName = "@verule/adapter-drizzle";
 const configRelativePath = "packages/app/verule.drizzle.native.config.ts";
 type DrizzleProjectionResult = FactResult<
@@ -40,37 +41,6 @@ type CliEnvelope = {
   readonly variant: string;
   readonly data: CheckReport;
 };
-
-function resolveExportedPackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(`${packageName}/package.json`),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(
-  packageName: string,
-  destination: string,
-  excludedParts: readonly string[] = [],
-): void {
-  const source = resolveExportedPackageRoot(packageName);
-  const excluded = new Set([
-    "dist",
-    "host-root",
-    "node_modules",
-    "test",
-    "drizzle-zod-overlay",
-    "provider-session-overlay",
-    ...excludedParts,
-  ]);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) => excluded.has(part));
-    },
-  });
-}
 
 function findInstalledPackageRoot(entryPath: string): string {
   let current = dirname(entryPath);
@@ -126,70 +96,8 @@ void test("extracts Drizzle projections from the installed native package throug
   const environmentDir = mkdtempSync(join(tmpdir(), "verule-drizzle-host-"));
   const hostDir = join(environmentDir, "host");
   const storeDir = join(environmentDir, "pnpm-store");
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-
-  const hostRootTemplate = dirname(
-    fileURLToPath(
-      import.meta.resolve("@verule/acceptance-host-app/host-root/package.json"),
-    ),
-  );
-  cpSync(hostRootTemplate, hostDir, { recursive: true });
-  copyExportedPackage(
-    "@verule/acceptance-host-data",
-    join(hostDir, "packages/data"),
-  );
-  copyExportedPackage(
-    "@verule/acceptance-host-app",
-    join(hostDir, "packages/app"),
-    ["drizzle-overlay"],
-  );
-
-  const hostAppDir = join(hostDir, "packages/app");
-  const hostDataDir = join(hostDir, "packages/data");
-  const overlayDir = join(
-    resolveExportedPackageRoot("@verule/acceptance-host-app"),
-    "drizzle-overlay",
-  );
-  const appOverlayDir = join(overlayDir, "app");
-  const dataOverlayDir = join(overlayDir, "data");
-  cpSync(
-    join(overlayDir, "host-root/pnpm-workspace.yaml"),
-    join(hostDir, "pnpm-workspace.yaml"),
-  );
-  cpSync(
-    join(overlayDir, "host-root/tsconfig.json"),
-    join(hostDir, "tsconfig.json"),
-  );
-  cpSync(join(appOverlayDir, "package.json"), join(hostAppDir, "package.json"));
-  cpSync(
-    join(appOverlayDir, "tsconfig.json"),
-    join(hostAppDir, "tsconfig.json"),
-  );
-  cpSync(
-    join(appOverlayDir, "src/drizzle-projection-rule.ts"),
-    join(hostAppDir, "src/drizzle-projection-rule.ts"),
-  );
-  cpSync(
-    join(appOverlayDir, "verule.drizzle.native.config.ts"),
-    join(hostAppDir, "verule.drizzle.native.config.ts"),
-  );
-  cpSync(
-    join(dataOverlayDir, "package.json"),
-    join(hostDataDir, "package.json"),
-  );
-  cpSync(
-    join(dataOverlayDir, "tsconfig.json"),
-    join(hostDataDir, "tsconfig.json"),
-  );
-  cpSync(
-    join(dataOverlayDir, "src/drizzle-schema.ts"),
-    join(hostDataDir, "src/drizzle-schema.ts"),
-  );
-  cpSync(
-    join(dataOverlayDir, "src/drizzle-projections.ts"),
-    join(hostDataDir, "src/drizzle-projections.ts"),
-  );
+  copyAcceptanceHost(hostDir, "drizzle");
 
   const env = process.env;
   const bundle = await packWorkspaceArtifacts({
@@ -335,7 +243,7 @@ void test("extracts Drizzle projections from the installed native package throug
     assert.equal(envelope.kind, "data");
     assert.equal(envelope.variant, "findings");
     assert.deepEqual(envelope.data, sdkResult.report);
-    assert.equal(envelope.data.diagnostics.length, 4);
+    assert.equal(envelope.data.diagnostics.length, 3);
     assert.equal(
       envelope.data.diagnostics.filter(
         (diagnostic) => diagnostic.ruleId === "drizzle-projection",

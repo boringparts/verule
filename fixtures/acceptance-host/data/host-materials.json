@@ -1,0 +1,5 @@
+{
+  "type": "verule-acceptance-host-materials",
+  "version": 1,
+  "files": ["package.json", "src/index.ts", "src/product.ts", "tsconfig.json"]
+}

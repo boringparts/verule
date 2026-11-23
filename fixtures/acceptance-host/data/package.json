@@ -9,6 +9,8 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./host-materials": "./host-materials.json",
+    "./host-materials/*": "./*",
     "./package.json": "./package.json"
   },
   "scripts": {

@@ -1,0 +1,11 @@
+{
+  "type": "verule-acceptance-host-materials",
+  "version": 1,
+  "files": [
+    "host-package.json",
+    "package.json",
+    "src/provider-session-query.ts",
+    "src/provider-session-schema.ts",
+    "tsconfig.json"
+  ]
+}

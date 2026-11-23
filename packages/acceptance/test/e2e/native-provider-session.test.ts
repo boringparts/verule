@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,9 +9,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -29,6 +28,8 @@ import type {
   VeruleExecutionError,
 } from "@verule/sdk";
 
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
+
 const packageNames = [
   "@verule/adapter-fixture",
   "@verule/adapter-fixture-complement",
@@ -41,32 +42,6 @@ type CliEnvelope = {
   readonly kind: string;
   readonly data: CheckReport;
 };
-
-function resolvePackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(`${packageName}/package.json`),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(packageName: string, destination: string): void {
-  const source = resolvePackageRoot(packageName);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) =>
-        [
-          "dist",
-          "host-root",
-          "node_modules",
-          "provider-session-overlay",
-          "test",
-        ].includes(part),
-      );
-    },
-  });
-}
 
 async function runCliCheck(
   hostDir: string,
@@ -189,58 +164,11 @@ void test("loads independent native providers together and updates facts across 
   );
   const hostDir = join(environmentDir, "host");
   const storeDir = join(environmentDir, "pnpm-store");
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-
-  const appPackageRoot = resolvePackageRoot("@verule/acceptance-host-app");
-  const overlayDir = join(appPackageRoot, "provider-session-overlay");
-  const appOverlayDir = join(overlayDir, "app");
-  const dataOverlayDir = join(overlayDir, "data");
-  const overlayHostRootDir = join(overlayDir, "host-root");
-  const hostRootTemplate = join(appPackageRoot, "host-root");
-  cpSync(hostRootTemplate, hostDir, { recursive: true });
-  copyExportedPackage(
-    "@verule/acceptance-host-data",
-    join(hostDir, "packages/data"),
+  const { appDir: hostAppDir } = copyAcceptanceHost(
+    hostDir,
+    "provider-session",
   );
-  copyExportedPackage(
-    "@verule/acceptance-host-app",
-    join(hostDir, "packages/app"),
-  );
-
-  const hostAppDir = join(hostDir, "packages/app");
-  const hostAppOverlayDir = join(hostAppDir, "provider-session-overlay/app");
-  const hostDataDir = join(hostDir, "packages/data");
-  for (const file of ["package.json", "tsconfig.json"]) {
-    cpSync(join(appOverlayDir, file), join(hostAppDir, file));
-    cpSync(join(dataOverlayDir, file), join(hostDataDir, file));
-  }
-  for (const file of [
-    "provider-session-query.ts",
-    "provider-session-schema.ts",
-  ]) {
-    cpSync(join(dataOverlayDir, "src", file), join(hostDataDir, "src", file));
-  }
-  mkdirSync(join(hostAppOverlayDir, "src"), { recursive: true });
-  for (const file of ["provider-session-rules.ts", "provider-session.ts"]) {
-    cpSync(
-      join(appOverlayDir, "src", file),
-      join(hostAppOverlayDir, "src", file),
-    );
-  }
-  for (const file of [
-    "verule.provider-session.conflict-forward.config.ts",
-    "verule.provider-session.conflict-reverse.config.ts",
-    "verule.provider-session.filtered.config.ts",
-    "verule.provider-session.native.config.ts",
-    "verule.provider-session.replacement.config.ts",
-    "verule.provider-session.unqueried.config.ts",
-  ]) {
-    cpSync(join(appOverlayDir, file), join(hostAppOverlayDir, file));
-  }
-  for (const file of ["pnpm-workspace.yaml", "tsconfig.json"]) {
-    cpSync(join(overlayHostRootDir, file), join(hostDir, file));
-  }
 
   const bundle = await packWorkspaceArtifacts({
     additionalPackages: [...packageNames],
@@ -381,8 +309,12 @@ void test("loads independent native providers together and updates facts across 
       readonly default: NormalizedVeruleConfig;
     };
     const providerSessionRules = (await import(
-      pathToFileURL(join(hostAppOverlayDir, "src/provider-session-rules.ts"))
-        .href
+      pathToFileURL(
+        join(
+          hostAppDir,
+          "provider-session-overlay/app/src/provider-session-rules.ts",
+        ),
+      ).href
     )) as { readonly lastComplementInvocation: number | undefined };
 
     const sharedAbort = new AbortController();
