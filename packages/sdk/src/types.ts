@@ -357,6 +357,16 @@ export type EngineProviderExtractionStats = {
   readonly candidates: number;
 };
 
+/** Native adapter state returned by the active engine snapshot registry. */
+export type NativeAdapterObservation = {
+  /** The package name configured by the project. */
+  readonly packageName: string;
+  /** Provider ID declared by the loaded adapter manifest. */
+  readonly providerId: string;
+  /** `reused` means the snapshot update retained the existing loaded library. */
+  readonly status: "loaded" | "reused";
+};
+
 export type ObservationDetailEntry = {
   readonly kind: "query" | "checkpoint" | "engineStep";
   readonly ruleId?: string;
@@ -383,10 +393,11 @@ export type ObservationReport = {
   readonly candidateCount: number;
   readonly checkpointCount: number;
   readonly providers: readonly string[];
+  readonly nativeAdapters: readonly NativeAdapterObservation[];
   readonly limit?: ObserveLimit;
   readonly truncated: boolean;
   readonly droppedCount: number;
-  readonly engineExtractions?: Readonly<
+  readonly engineExtractions: Readonly<
     Record<string, EngineProviderExtractionStats>
   >;
   readonly details?: readonly ObservationDetailEntry[];

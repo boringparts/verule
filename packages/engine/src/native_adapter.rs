@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tsrs_ast::{Kind, Node, SourceFile, Symbol, SymbolFlags, get_source_file_of_node};
 use tsrs_checker::TypeFormatFlags;
@@ -22,11 +22,46 @@ use crate::serve::{HandlePayload, RpcErr, SnapshotState};
 
 pub type NativeAdapterRegistry = BTreeMap<String, Rc<NativeLibrary>>;
 
+/// Whether this snapshot loaded adapter libraries or retained the prior registry.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeAdapterStatus {
+    Loaded,
+    Reused,
+}
+
+/// User-facing identity and load state for one native adapter in the registry.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAdapterObservation {
+    /// Package name supplied by project configuration.
+    pub package_name: String,
+    /// Provider ID declared by the validated adapter manifest.
+    pub provider_id: String,
+    /// Whether the active snapshot loaded or retained this library.
+    pub status: NativeAdapterStatus,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeAdapterPackageInput {
     package_name: String,
     library_path: String,
+}
+
+/// Summarizes the active registry without exposing resolved library paths.
+pub fn observe_registry(
+    registry: &NativeAdapterRegistry,
+    status: NativeAdapterStatus,
+) -> Vec<NativeAdapterObservation> {
+    registry
+        .iter()
+        .map(|(provider_id, library)| NativeAdapterObservation {
+            package_name: library.package_name().to_string(),
+            provider_id: provider_id.clone(),
+            status,
+        })
+        .collect()
 }
 
 pub fn load_configured_adapters(

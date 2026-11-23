@@ -22,6 +22,7 @@ import {
 } from "@verule/acceptance";
 import type {
   CheckReport,
+  NativeAdapterObservation,
   NormalizedVeruleConfig,
   ObservationDetailEntry,
   SyntaxRef,
@@ -146,6 +147,14 @@ function nativeExtractionProviders(report: CheckReport): readonly string[] {
   ].toSorted();
 }
 
+function nativeAdapterObservations(
+  report: CheckReport,
+): readonly NativeAdapterObservation[] {
+  return (report.observation?.nativeAdapters ?? []).toSorted((left, right) =>
+    left.packageName.localeCompare(right.packageName),
+  );
+}
+
 function assertReportsAlign(
   actual: CheckReport,
   expected: CheckReport,
@@ -252,10 +261,10 @@ void test("loads independent native providers together and updates facts across 
       "packages/app/verule.config.ts",
     );
     assert.equal(noAdapters.status, 1, noAdapters.stderr + noAdapters.stdout);
-    assert.deepEqual(
-      nativeExtractionProviders(parseCliReport(noAdapters.stdout)),
-      [],
-    );
+    const baselineReport = parseCliReport(noAdapters.stdout);
+    assert.deepEqual(nativeExtractionProviders(baselineReport), []);
+    assert.deepEqual(nativeAdapterObservations(baselineReport), []);
+    assert.deepEqual(baselineReport.observation?.engineExtractions, {});
 
     const unqueried = await runCliCheck(
       hostDir,
@@ -263,22 +272,27 @@ void test("loads independent native providers together and updates facts across 
       "packages/app/provider-session-overlay/app/verule.provider-session.unqueried.config.ts",
     );
     assert.equal(unqueried.status, 1, unqueried.stderr + unqueried.stdout);
-    assert.deepEqual(
-      nativeExtractionProviders(parseCliReport(unqueried.stdout)),
-      [],
-    );
-    const hostRequire = createRequire(join(hostDir, "package.json"));
-    const unqueriedConfig = (await import(
-      pathToFileURL(
-        join(
-          hostDir,
-          "packages/app/provider-session-overlay/app/verule.provider-session.unqueried.config.ts",
-        ),
-      ).href
-    )) as { readonly default: NormalizedVeruleConfig };
-    assert.deepEqual(unqueriedConfig.default.adapterPackages, [
-      ...packageNames,
+    const unqueriedReport = parseCliReport(unqueried.stdout);
+    assert.deepEqual(nativeExtractionProviders(unqueriedReport), []);
+    assert.deepEqual(nativeAdapterObservations(unqueriedReport), [
+      {
+        packageName: "@verule/adapter-drizzle",
+        providerId: "drizzle",
+        status: "loaded",
+      },
+      {
+        packageName: "@verule/adapter-fixture",
+        providerId: "third-party-fixture",
+        status: "loaded",
+      },
+      {
+        packageName: "@verule/adapter-fixture-complement",
+        providerId: "third-party-fixture-complement",
+        status: "loaded",
+      },
     ]);
+    assert.deepEqual(unqueriedReport.observation?.engineExtractions, {});
+    const hostRequire = createRequire(join(hostDir, "package.json"));
 
     const queried = await runCliCheck(hostDir, storeDir, nativeConfig);
     assert.equal(queried.status, 1, queried.stderr + queried.stdout);
@@ -316,6 +330,34 @@ void test("loads independent native providers together and updates facts across 
       "third-party-fixture",
       "third-party-fixture-complement",
     ]);
+    assert.deepEqual(nativeAdapterObservations(report), [
+      {
+        packageName: "@verule/adapter-drizzle",
+        providerId: "drizzle",
+        status: "loaded",
+      },
+      {
+        packageName: "@verule/adapter-fixture",
+        providerId: "third-party-fixture",
+        status: "loaded",
+      },
+      {
+        packageName: "@verule/adapter-fixture-complement",
+        providerId: "third-party-fixture-complement",
+        status: "loaded",
+      },
+    ]);
+    for (const providerId of [
+      "drizzle",
+      "third-party-fixture",
+      "third-party-fixture-complement",
+    ]) {
+      assert.ok(
+        (report.observation?.engineExtractions[providerId]?.extractions ?? 0) >
+          0,
+        `expected extraction count for ${providerId}`,
+      );
+    }
     assert.equal(
       report.projects[0]?.sourceFiles.includes(
         "packages/data/src/provider-session-query.ts",
@@ -342,8 +384,6 @@ void test("loads independent native providers together and updates facts across 
       pathToFileURL(join(hostAppOverlayDir, "src/provider-session-rules.ts"))
         .href
     )) as { readonly lastComplementInvocation: number | undefined };
-    const adapterPackages = configModule.default.adapterPackages;
-    assert.deepEqual(adapterPackages, [...packageNames]);
 
     const sharedAbort = new AbortController();
     const shared = await sdk.startSharedSession({
@@ -377,6 +417,23 @@ void test("loads independent native providers together and updates facts across 
       });
       const coldEditedInput = await runInstalledSdk(hostDir, nativeConfig);
       assertReportsAlign(editedInput, coldEditedInput, "shared-input-edited");
+      assert.deepEqual(nativeAdapterObservations(editedInput), [
+        {
+          packageName: "@verule/adapter-drizzle",
+          providerId: "drizzle",
+          status: "reused",
+        },
+        {
+          packageName: "@verule/adapter-fixture",
+          providerId: "third-party-fixture",
+          status: "reused",
+        },
+        {
+          packageName: "@verule/adapter-fixture-complement",
+          providerId: "third-party-fixture-complement",
+          status: "reused",
+        },
+      ]);
       assert.deepEqual(editedInput.projects[0]?.sourceFiles, sourceFiles);
       assert.equal(editedInput.additionalInputs.length, 1);
       assert.deepEqual(editedInput.additionalInputs[0]?.sources, [
@@ -407,6 +464,12 @@ void test("loads independent native providers together and updates facts across 
         editedSource,
         await runInstalledSdk(hostDir, nativeConfig),
         "shared-source-edited",
+      );
+      assert.deepEqual(
+        nativeAdapterObservations(editedSource).map(
+          (adapter) => adapter.status,
+        ),
+        ["reused", "reused", "reused"],
       );
       assert.deepEqual(editedSource.projects[0]?.sourceFiles, sourceFiles);
       assert.match(

@@ -123,6 +123,20 @@ function appendObservationLines(lines: string[], obs: WireObservation): void {
   if (obs.providers.length > 0) {
     lines.push(`  providers: ${obs.providers.join(", ")}`);
   }
+  const nativeAdapters = obs.nativeAdapters.map(
+    (adapter) =>
+      `${adapter.packageName} (provider=${adapter.providerId}, status=${adapter.status})`,
+  );
+  lines.push(
+    `  native adapters: ${nativeAdapters.length > 0 ? nativeAdapters.join(", ") : "none"}`,
+  );
+  const nativeExtractions = Object.entries(obs.engineExtractions).map(
+    ([providerId, stats]) =>
+      `${providerId} (extractions=${stats.extractions}, candidates=${stats.candidates})`,
+  );
+  lines.push(
+    `  native extractions: ${nativeExtractions.length > 0 ? nativeExtractions.join(", ") : "none"}`,
+  );
   if (obs.truncated) {
     lines.push(`  truncated: true (dropped=${obs.droppedCount})`);
   }
