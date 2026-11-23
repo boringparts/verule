@@ -1,0 +1,9 @@
+packages:
+  - packages/data
+  - packages/app
+catalog:
+  "@verule/adapter-drizzle": "*"
+  "@verule/adapter-fixture": "*"
+  "@verule/adapter-fixture-complement": "*"
+  "@verule/sdk": "*"
+  drizzle-orm: 0.45.3

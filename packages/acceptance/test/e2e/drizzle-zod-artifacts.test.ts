@@ -69,6 +69,7 @@ function copyExportedPackage(
     "drizzle-overlay",
     "zod-overlay",
     "drizzle-zod-overlay",
+    "provider-session-overlay",
     ...excludedParts,
   ]);
   cpSync(source, destination, {

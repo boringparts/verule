@@ -1,0 +1,173 @@
+import { defineFactType, defineRule } from "@verule/sdk";
+
+type ProviderSessionCondition = {
+  readonly mode: "normal" | "conflict";
+};
+
+type ProviderSessionValue = {
+  readonly text?: string;
+  readonly input?: string;
+  readonly invocation?: number;
+  readonly annotation?: string;
+  readonly secondaryInvocation?: number;
+};
+
+export let lastComplementInvocation: number | undefined;
+
+export const providerSessionFact = defineFactType<
+  "call",
+  ProviderSessionCondition,
+  ProviderSessionValue
+>({
+  id: "fixture.call-source",
+  subjectKind: "call",
+  merge: (existing, incoming) => {
+    if (
+      existing.value.input !== undefined &&
+      incoming.value.input !== undefined &&
+      existing.value.input !== incoming.value.input
+    ) {
+      return {
+        ok: false,
+        conflict: {
+          message: "Native fixture providers disagree about the input value.",
+          existingConclusion: `input=${existing.value.input}`,
+          incomingConclusion: `input=${incoming.value.input}`,
+          existingEvidence: existing.evidence,
+          incomingEvidence: incoming.evidence,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      value: { ...existing.value, ...incoming.value },
+    };
+  },
+});
+
+type DrizzleProjectionValue = {
+  readonly queryKind: string;
+  readonly tableName?: string;
+  readonly projectedColumns: readonly string[];
+  readonly hasDynamicColumns: boolean;
+};
+
+const drizzleProjectionFact = defineFactType<
+  "syntax" | "call" | "declaration",
+  { readonly library: "drizzle" },
+  DrizzleProjectionValue
+>({
+  id: "verule.query.row-projection",
+  subjectKind: ["syntax", "call", "declaration"],
+});
+
+export const providerSessionFactRule = defineRule({
+  id: "provider-session-facts",
+  run: async (ctx) => {
+    const policy = ctx.readAdditionalInput("fixture.inputs.json");
+    const facts = await ctx.facts(providerSessionFact, {
+      condition: { mode: "normal" },
+    });
+    const fact = facts.find((candidate) =>
+      candidate.value.text?.startsWith("getProduct("),
+    );
+    if (fact === undefined || fact.value.input !== policy) {
+      throw new Error(
+        "The fixture providers did not return the current input.",
+      );
+    }
+    lastComplementInvocation = fact.value.secondaryInvocation;
+    const input = JSON.parse(fact.value.input) as unknown;
+    if (typeof input !== "string") {
+      throw new Error("The fixture providers returned a non-string input.");
+    }
+
+    const at = fact.evidence.find((item) => item.at !== undefined)?.at;
+    if (at === undefined) {
+      throw new Error("The fixture providers returned no source evidence.");
+    }
+    ctx.report({
+      at,
+      findingKey: "provider-session-fact",
+      message: JSON.stringify({
+        text: fact.value.text,
+        input,
+        annotation: fact.value.annotation,
+      }),
+      evidence: fact.evidence,
+    });
+  },
+});
+
+export const providerSessionCacheRule = defineRule({
+  id: "provider-session-cache",
+  run: async (ctx) => {
+    ctx.registerAdditionalInput("./fixture.inputs.json");
+    await ctx.facts(providerSessionFact, { condition: { mode: "normal" } });
+  },
+});
+
+export const providerSessionFilteredRule = defineRule({
+  id: "provider-session-filtered",
+  run: async (ctx) => {
+    const facts = await ctx.facts(providerSessionFact, {
+      condition: { mode: "normal" },
+      providerId: "third-party-fixture-complement",
+    });
+    const fact = facts.find((candidate) =>
+      candidate.value.text?.startsWith("getProduct("),
+    );
+    if (fact === undefined) {
+      throw new Error("The selected native provider returned no fixture fact.");
+    }
+    const at = fact.evidence.find((item) => item.at !== undefined)?.at;
+    if (at === undefined) {
+      throw new Error("The selected native provider returned no evidence.");
+    }
+    ctx.report({
+      at,
+      findingKey: "provider-session-filtered-fact",
+      message: JSON.stringify({
+        text: fact.value.text,
+        input: fact.value.input,
+        annotation: fact.value.annotation,
+      }),
+      evidence: fact.evidence,
+    });
+  },
+});
+
+export const providerSessionConflictRule = defineRule({
+  id: "provider-session-conflict",
+  run: async (ctx) => {
+    await ctx.facts(providerSessionFact, { condition: { mode: "conflict" } });
+  },
+});
+
+export const drizzleProviderRule = defineRule({
+  id: "provider-session-drizzle",
+  run: async (ctx) => {
+    const facts = await ctx.facts(drizzleProjectionFact, {
+      condition: { library: "drizzle" },
+    });
+    const fact = facts.find((candidate) =>
+      candidate.value.projectedColumns.includes("title"),
+    );
+    if (fact === undefined) {
+      throw new Error(
+        "The Drizzle provider returned no projected title column.",
+      );
+    }
+    const at = fact.evidence.find((item) => item.at !== undefined)?.at;
+    if (at === undefined) {
+      throw new Error("The Drizzle provider returned no source evidence.");
+    }
+    ctx.report({
+      at,
+      findingKey: "provider-session-drizzle-fact",
+      message: JSON.stringify(fact.value),
+      evidence: fact.evidence,
+    });
+  },
+});

@@ -51,6 +51,7 @@ function copyExportedPackage(
           "dist",
           "host-root",
           "node_modules",
+          "provider-session-overlay",
           "test",
           ...excludedFiles,
         ].includes(part),
