@@ -7,7 +7,6 @@ export {
   createReentrantQueueFlagRule,
   defineReentrantQueueModel,
   reentrantQueueFlagRule,
-  vueSchedulerQueueModel,
   type ReentrantQueueContract,
   type ReentrantQueueFlagRuleOptions,
   type ReentrantQueueModelOptions,

@@ -792,27 +792,6 @@ export function defineReentrantQueueModel(
 }
 
 /**
- * Project model for Vue's main scheduler queue (`queueJob` / `queue` / `SchedulerJobFlags.QUEUED` / `ALLOW_RECURSE`).
- */
-export const vueSchedulerQueueModel: Model = defineReentrantQueueModel({
-  id: "vue-main-scheduler-queue",
-  version: "1.0.0",
-  description:
-    "Vue main scheduler queue model: queueJob marks QUEUED on queue items; post-callback clears must preserve ALLOW_RECURSE re-enqueued flags.",
-  contracts: [
-    {
-      id: "main-scheduler-queue",
-      queueName: "main-scheduler-queue",
-      enqueueFunctionName: "queueJob",
-      queueIdentifier: "queue",
-      flagProperty: "flags",
-      queuedFlagName: "QUEUED",
-      reentrantFlagName: "ALLOW_RECURSE",
-    },
-  ],
-});
-
-/**
  * Creates a rule verifying that post-callback bitflag clears on reentrant queue
  * items are guarded so re-enqueued items do not lose their `QUEUED` state.
  */

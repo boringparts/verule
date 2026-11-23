@@ -51,7 +51,7 @@ function createProject(files: Record<string, string>): string {
   return root;
 }
 
-void test("verule check and --at explain verify close-A-clean-B, cross-file helpers, dynamic Gaps, validation vs raw, and Vue-style callback field effects", async () => {
+void test("verule check and --at explain verify close-A-clean-B, cross-file helpers, dynamic Gaps, validation vs raw, and reentrant scheduler callback field effects", async () => {
   const root = createProject({
     "node_modules/@acme/lifecycle/index.d.ts": [
       "export interface IDisposable { dispose(): void; }",
