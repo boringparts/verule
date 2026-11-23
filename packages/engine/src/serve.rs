@@ -22,7 +22,9 @@ use crate::cfg::{
 };
 use crate::directives::{ScannedDirective, scan_snapshot_directives};
 use crate::instance_identity::{FieldWriteIndex, InstanceHandleData};
-use crate::native_adapter::{NativeAdapterPackageInput, NativeAdapterRegistry};
+use crate::native_adapter::{
+    NativeAdapterObservation, NativeAdapterPackageInput, NativeAdapterRegistry, NativeAdapterStatus,
+};
 use crate::observe::{EngineRpcMetrics, ObserveCollector, ObserveRequestConfig, elapsed_ms};
 use crate::package_impl::PackageImplCache;
 use crate::projection::{QueryStep, execute_query_batch};
@@ -130,6 +132,7 @@ struct SnapshotOpenResult {
     snapshot_id: u64,
     snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    native_adapters: Vec<NativeAdapterObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     engine_rss_bytes: Option<u64>,
 }
@@ -140,6 +143,7 @@ struct SnapshotUpdateResult {
     snapshot_id: u64,
     snapshot_digest: String,
     projects: Vec<ProjectSummary>,
+    native_adapters: Vec<NativeAdapterObservation>,
     recomputed_projects: Vec<String>,
     reused_projects: Vec<String>,
     recomputed_files: Vec<String>,
@@ -638,6 +642,8 @@ impl EngineServer {
     fn open_snapshot(&mut self, params: &SnapshotOpenParams) -> Result<SnapshotOpenResult, RpcErr> {
         let native_adapters =
             crate::native_adapter::load_configured_adapters(&params.native_adapters)?;
+        let native_adapter_observations =
+            crate::native_adapter::observe_registry(&native_adapters, NativeAdapterStatus::Loaded);
         let cwd = normalize_path(&params.cwd);
         let session = self.ensure_session(&cwd);
         let opened = open_projects_snapshot(&session, &cwd, &params.entries)
@@ -672,6 +678,7 @@ impl EngineServer {
             snapshot_id,
             snapshot_digest: opened.snapshot_digest,
             projects: opened.summaries,
+            native_adapters: native_adapter_observations,
             engine_rss_bytes: read_process_rss_bytes(),
         })
     }
@@ -713,10 +720,15 @@ impl EngineServer {
             )
         };
 
-        let native_adapters = match params.native_adapters.as_deref() {
-            Some(inputs) => crate::native_adapter::load_configured_adapters(inputs)?,
-            None => old_native_adapters,
+        let (native_adapters, native_adapter_status) = match params.native_adapters.as_deref() {
+            Some(inputs) => (
+                crate::native_adapter::load_configured_adapters(inputs)?,
+                NativeAdapterStatus::Loaded,
+            ),
+            None => (old_native_adapters, NativeAdapterStatus::Reused),
         };
+        let native_adapter_observations =
+            crate::native_adapter::observe_registry(&native_adapters, native_adapter_status);
 
         let updated = update_projects_snapshot(
             &session,
@@ -769,6 +781,7 @@ impl EngineServer {
             snapshot_id,
             snapshot_digest: opened.snapshot_digest,
             projects: opened.summaries,
+            native_adapters: native_adapter_observations,
             recomputed_projects: updated.recomputed_projects,
             reused_projects: updated.reused_projects,
             recomputed_files: updated.recomputed_files,

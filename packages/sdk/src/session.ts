@@ -90,6 +90,7 @@ import {
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
+  type NativeAdapterObservation,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ProgramObjectKind,
@@ -115,6 +116,7 @@ type EngineOpenResult = {
   readonly snapshotId: number;
   readonly snapshotDigest: string;
   readonly projects: readonly ProjectSummary[];
+  readonly nativeAdapters: readonly NativeAdapterObservation[];
   readonly engineRssBytes?: number;
 };
 
@@ -857,6 +859,7 @@ export async function openSession(
   let currentSnapshotId = openResult.snapshotId;
   let currentSnapshotDigest = openResult.snapshotDigest;
   let currentProjects = openResult.projects;
+  let currentNativeAdapters = openResult.nativeAdapters;
   let currentFileOrigins = initialFileOrigins;
   let lastEngineRssBytes = openResult.engineRssBytes;
   let closed = false;
@@ -1955,6 +1958,7 @@ export async function openSession(
       ...(effectiveObserve.limit !== undefined
         ? { limit: effectiveObserve.limit }
         : {}),
+      nativeAdapters: currentNativeAdapters,
       ...(explainTarget !== undefined ? { explainTarget } : {}),
       configAndOpenMs: configLoadMs + openMs,
     });
@@ -2188,6 +2192,7 @@ export async function openSession(
       currentSnapshotId = updated.snapshotId;
       currentSnapshotDigest = updated.snapshotDigest;
       currentProjects = updated.projects;
+      currentNativeAdapters = updated.nativeAdapters;
       currentFileOrigins = updatedFileOrigins;
       lastEngineRssBytes = updated.engineRssBytes;
       syntaxCache.clear();

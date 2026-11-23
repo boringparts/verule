@@ -148,6 +148,13 @@ export const observationSchema = z.object({
   candidateCount: z.number().int().nonnegative(),
   checkpointCount: z.number().int().nonnegative(),
   providers: z.array(z.string()),
+  nativeAdapters: z.array(
+    z.object({
+      packageName: z.string(),
+      providerId: z.string(),
+      status: z.enum(["loaded", "reused"]),
+    }),
+  ),
   limit: z
     .object({
       maxItems: z.number().int().nonnegative().optional(),
@@ -156,15 +163,13 @@ export const observationSchema = z.object({
     .optional(),
   truncated: z.boolean(),
   droppedCount: z.number().int().nonnegative(),
-  engineExtractions: z
-    .record(
-      z.string(),
-      z.object({
-        extractions: z.number().int().nonnegative(),
-        candidates: z.number().int().nonnegative(),
-      }),
-    )
-    .optional(),
+  engineExtractions: z.record(
+    z.string(),
+    z.object({
+      extractions: z.number().int().nonnegative(),
+      candidates: z.number().int().nonnegative(),
+    }),
+  ),
   details: z.array(observationDetailEntrySchema).optional(),
 });
 
@@ -393,6 +398,13 @@ function toWireObservation(obs: ObservationReport): WireObservation {
     candidateCount: obs.candidateCount,
     checkpointCount: obs.checkpointCount,
     providers: [...obs.providers],
+    nativeAdapters: obs.nativeAdapters.map((adapter) => ({ ...adapter })),
+    engineExtractions: Object.fromEntries(
+      Object.entries(obs.engineExtractions).map(([providerId, stats]) => [
+        providerId,
+        { ...stats },
+      ]),
+    ),
     ...(obs.limit !== undefined
       ? {
           limit: {

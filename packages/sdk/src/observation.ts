@@ -14,6 +14,7 @@ import {
   type ExplainStatus,
   type ObservationDetailEntry,
   type ObservationReport,
+  type NativeAdapterObservation,
   type ObserveLimit,
   type ObserveLimitInput,
   type ObserveMode,
@@ -375,6 +376,7 @@ export class ObservationCollector {
   readonly mode: ObserveMode;
   readonly limit: ObserveLimit | undefined;
   readonly explainTarget: SourceTarget | undefined;
+  readonly #nativeAdapters: readonly NativeAdapterObservation[];
   readonly #startedAt: number;
   #configAndOpenMs: number;
   #engineQueryMs = 0;
@@ -416,11 +418,13 @@ export class ObservationCollector {
     readonly limit?: ObserveLimit;
     readonly explainTarget?: SourceTarget;
     readonly configAndOpenMs?: number;
+    readonly nativeAdapters?: readonly NativeAdapterObservation[];
   }) {
     this.mode = options.mode;
     this.limit = options.limit;
     this.explainTarget = options.explainTarget;
     this.#configAndOpenMs = options.configAndOpenMs ?? 0;
+    this.#nativeAdapters = options.nativeAdapters ?? [];
     this.#startedAt = this.isObserveEnabled() ? performance.now() : 0;
   }
 
@@ -754,18 +758,15 @@ export class ObservationCollector {
       candidateCount: this.#candidateCount,
       checkpointCount: this.#checkpointCount,
       providers: [...this.#providers].toSorted(),
-      ...(this.#engineExtractions.size > 0
-        ? {
-            engineExtractions: Object.fromEntries(
-              [...this.#engineExtractions.entries()]
-                .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-                .map(([k, v]) => [
-                  k,
-                  { extractions: v.extractions, candidates: v.candidates },
-                ]),
-            ),
-          }
-        : {}),
+      nativeAdapters: [...this.#nativeAdapters],
+      engineExtractions: Object.fromEntries(
+        [...this.#engineExtractions.entries()]
+          .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, v]) => [
+            k,
+            { extractions: v.extractions, candidates: v.candidates },
+          ]),
+      ),
       ...(this.limit !== undefined ? { limit: this.limit } : {}),
       truncated: this.#truncated,
       droppedCount: this.#droppedCount,

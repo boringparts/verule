@@ -163,6 +163,7 @@ export {
   type MemoryStats,
   type Model,
   type ModelIdentitySummary,
+  type NativeAdapterObservation,
   type NormalizedVeruleConfig,
   type ObservationDetailEntry,
   type ObservationOverhead,
