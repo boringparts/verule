@@ -1,0 +1,21 @@
+{
+  "name": "@verule/acceptance-host-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@verule/acceptance-host-data": "workspace:*",
+    "@verule/adapter-drizzle": "catalog:",
+    "@verule/adapter-zod": "catalog:",
+    "@verule/rules-reference": "catalog:",
+    "@verule/sdk": "catalog:",
+    "drizzle-orm": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  },
+  "engines": {
+    "node": "^26.13.1"
+  }
+}

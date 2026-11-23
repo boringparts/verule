@@ -529,6 +529,21 @@ export function createRowProjectionSatisfiesValidatorRule(
         return;
       }
 
+      const queryRows = await ctx.syntaxOf(
+        queryFacts.map((fact) => fact.subject),
+        { select: { location: true } },
+      );
+      const queryLocationByHandle = new Map<string, DiagnosticLocation>();
+      for (const [index, row] of queryRows.entries()) {
+        const location = row?.location;
+        if (location) {
+          queryLocationByHandle.set(
+            queryFacts[index]!.subject.handleId,
+            location,
+          );
+        }
+      }
+
       const callRows = await ctx.syntaxOf(
         validatorFacts.map((f) => f.subject),
         { select: { location: true, arguments: true } },
@@ -709,10 +724,17 @@ export function createRowProjectionSatisfiesValidatorRule(
           const sourceLabel = source.relationName
             ? `${source.queryFact.value.tableName ?? "query"}.${source.relationName}`
             : (source.queryFact.value.tableName ?? "query");
+          const queryLocation = queryLocationByHandle.get(
+            source.queryFact.subject.handleId,
+          );
+          // Fact handles change across sessions; the source span remains stable and distinguishes query origins.
+          const queryPosition = queryLocation
+            ? `${queryLocation.file}:${queryLocation.start}:${queryLocation.end}`
+            : "unknown-query-position";
 
           ctx.report({
             at: call.location,
-            findingKey: `${schemaLabel}.${methodLabel}:${source.queryFact.subject.handleId}:${source.relationName ?? ""}:${definiteMissing.join(",")}`,
+            findingKey: `${schemaLabel}.${methodLabel}:${queryPosition}:${source.queryFact.value.tableName ?? ""}:${source.relationName ?? ""}:${definiteMissing.join(",")}`,
             message: `Query row from "${sourceLabel}" passed to ${schemaLabel}.${methodLabel}() is missing ${fieldClause}.`,
             evidence,
           });
