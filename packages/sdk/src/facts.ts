@@ -893,6 +893,29 @@ export async function executeFactQuery<
     };
   };
 
+  const extractMissingTargets = async (
+    missingTargets: readonly ProgramRef<SubjectKind>[],
+  ): Promise<void> => {
+    const batchPromise = runExtraction(missingTargets);
+    for (const target of missingTargets) {
+      const itemPromise = batchPromise.then(
+        (computed) => ({
+          item:
+            computed.results.find(
+              (item) => item.subject.handleId === target.handleId,
+            ) ?? null,
+          additionalInputs: computed.additionalInputs,
+        }),
+        (err: unknown) => {
+          factCache.deleteTarget(baseKey, target.handleId);
+          throw err;
+        },
+      );
+      factCache.setTarget(baseKey, target.handleId, itemPromise);
+    }
+    await batchPromise;
+  };
+
   if (targets === undefined) {
     const cachedFull = factCache.getFull(baseKey);
     if (cachedFull) {
@@ -927,9 +950,7 @@ export async function executeFactQuery<
       results = computed.results;
     }
   } else if (factCache.isFullLoaded(baseKey)) {
-    cacheStatus = "reused";
     const loaded = await factCache.getFull(baseKey)!;
-    replayInputs(loaded.additionalInputs);
     const allResults = loaded.results as readonly FactResult<
       SubjectKind,
       Value
@@ -937,14 +958,31 @@ export async function executeFactQuery<
     const byHandle = new Map(
       allResults.map((item) => [item.subject.handleId, item]),
     );
-    const matched: FactResult<SubjectKind, Value>[] = [];
-    for (const target of targets) {
-      const found = byHandle.get(target.handleId);
-      if (found) {
-        matched.push(found);
-      }
+    const missingTargets = targets.filter(
+      (target) =>
+        !byHandle.has(target.handleId) &&
+        !factCache.getTarget(baseKey, target.handleId),
+    );
+    cacheStatus = missingTargets.length === 0 ? "reused" : "computed";
+    if (missingTargets.length > 0) {
+      await extractMissingTargets(missingTargets);
     }
-    results = matched;
+    const resolved = await Promise.all(
+      targets.map(async (target) => {
+        const found = byHandle.get(target.handleId);
+        if (found !== undefined) {
+          return {
+            item: found,
+            additionalInputs: loaded.additionalInputs,
+          };
+        }
+        return factCache.getTarget(baseKey, target.handleId)!;
+      }),
+    );
+    replayInputs(resolved.flatMap((entry) => entry.additionalInputs));
+    results = resolved
+      .map((entry) => entry.item)
+      .filter((item): item is FactResult<SubjectKind, Value> => item !== null);
   } else {
     const missingTargets: ProgramRef<SubjectKind>[] = [];
     const seenMissing = new Set<string>();
@@ -962,24 +1000,7 @@ export async function executeFactQuery<
       cacheStatus = "reused";
     } else {
       cacheStatus = "computed";
-      const batchPromise = runExtraction(missingTargets);
-      for (const target of missingTargets) {
-        const itemPromise = batchPromise.then(
-          (computed) => ({
-            item:
-              computed.results.find(
-                (item) => item.subject.handleId === target.handleId,
-              ) ?? null,
-            additionalInputs: computed.additionalInputs,
-          }),
-          (err: unknown) => {
-            factCache.deleteTarget(baseKey, target.handleId);
-            throw err;
-          },
-        );
-        factCache.setTarget(baseKey, target.handleId, itemPromise);
-      }
-      await batchPromise;
+      await extractMissingTargets(missingTargets);
     }
 
     const resolved = await Promise.all(

@@ -22,9 +22,11 @@ export const userSchema = createSelectSchema(userTable).extend({
   age: z.number().default(18),
 });
 
-export function parseZodFields(input: unknown) {
+export function parseZodFields(row: unknown) {
   return {
-    account: accountSchema.safeParse(input),
-    user: userSchema.parse(input),
+    account: accountSchema.safeParse(row),
+    user: userSchema.parse(row),
   };
 }
+
+z.object({ standaloneOnly: z.string() });

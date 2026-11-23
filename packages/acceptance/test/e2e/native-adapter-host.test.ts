@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -29,26 +31,6 @@ type CliEnvelope = {
   readonly variant: string;
   readonly data: CheckReport;
 };
-
-function findInstalledPackageRoot(entryPath: string): string {
-  let current = dirname(entryPath);
-  while (true) {
-    const manifestPath = join(current, "package.json");
-    try {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        readonly name?: unknown;
-      };
-      if (manifest.name === adapterPackageName) return current;
-    } catch {
-      // Keep walking to the package's installed root.
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error(`Could not find installed package above ${entryPath}`);
-    }
-    current = parent;
-  }
-}
 
 async function runInstalledSdk(hostDir: string): Promise<CheckReport> {
   const hostRequire = createRequire(join(hostDir, "package.json"));
@@ -78,7 +60,7 @@ void test("loads an installed native adapter from a nested app config", async (t
 
   const env = process.env;
   const bundle = await packWorkspaceArtifacts({
-    additionalPackages: [adapterPackageName],
+    additionalPackages: [adapterPackageName, "@verule/adapter-zod"],
   });
   try {
     const adapterArtifact = bundle.artifacts.find(
@@ -87,14 +69,36 @@ void test("loads an installed native adapter from a nested app config", async (t
     const engineArtifact = bundle.artifacts.find(
       (artifact) => artifact.name === "@verule/engine",
     );
+    const zodArtifact = bundle.artifacts.find(
+      (artifact) => artifact.name === "@verule/adapter-zod",
+    );
     assert.ok(adapterArtifact);
     assert.ok(engineArtifact?.binarySha256);
+    assert.ok(zodArtifact);
 
+    const adapterExports = adapterArtifact.manifest.exports as
+      | Record<string, unknown>
+      | undefined;
+    assert.equal(
+      adapterExports?.["./verule-native"],
+      "./dist/verule-native.json",
+    );
+    assert.equal(
+      adapterExports?.["./native/linux-x64"],
+      "./dist/native/libverule_test_adapter.so",
+    );
+
+    const directPackages = [
+      "@verule/sdk",
+      "@verule/cli",
+      adapterPackageName,
+      "@verule/adapter-zod",
+    ];
     const installation = await installArtifactPackages({
       checkoutDir: hostDir,
       packageManager: "pnpm",
       artifacts: bundle.artifacts,
-      directPackages: ["@verule/sdk", "@verule/cli", adapterPackageName],
+      directPackages,
       storeDir,
       env,
     });
@@ -103,11 +107,13 @@ void test("loads an installed native adapter from a nested app config", async (t
       "@verule/sdk",
       "@verule/cli",
       adapterPackageName,
+      "@verule/adapter-zod",
     ]);
 
     const audit = await verifyHostArtifactResolution({
       checkoutDir: hostDir,
       artifacts: bundle.artifacts,
+      directPackages,
       allowedStorePaths: [storeDir],
     });
     assert.equal(audit.engineBinarySha256, engineArtifact.binarySha256);
@@ -115,26 +121,18 @@ void test("loads an installed native adapter from a nested app config", async (t
     const appRequire = createRequire(
       join(hostDir, "packages/app/package.json"),
     );
-    const entryPath = realpathSync(
-      appRequire.resolve(`${adapterPackageName}/verule-adapter`),
+    const nativeDescriptorPath = appRequire.resolve(
+      `${adapterPackageName}/verule-native`,
     );
-    const packageRoot = findInstalledPackageRoot(entryPath);
-    const packageManifest = JSON.parse(
-      readFileSync(join(packageRoot, "package.json"), "utf8"),
-    ) as {
-      readonly name: string;
-      readonly version: string;
-      readonly verule: {
-        readonly native: { readonly "linux-x64": string };
-      };
-    };
-    assert.equal(packageManifest.name, adapterPackageName);
-    assert.equal(packageManifest.version, adapterArtifact.version);
+    const nativeDescriptor = JSON.parse(
+      readFileSync(nativeDescriptorPath, "utf8"),
+    ) as { readonly id: string; readonly "linux-x64": string };
+    assert.equal(nativeDescriptor.id, "third-party-fixture");
+    assert.equal(nativeDescriptor["linux-x64"], "./native/linux-x64");
     const libraryPath = realpathSync(
-      resolve(packageRoot, packageManifest.verule.native["linux-x64"]),
+      appRequire.resolve(`${adapterPackageName}/native/linux-x64`),
     );
-    assert.ok(packageRoot.startsWith(hostDir));
-    assert.ok(libraryPath.startsWith(hostDir));
+    assert.ok(libraryPath.startsWith(realpathSync(hostDir)));
     assert.ok(libraryPath.endsWith("libverule_test_adapter.so"));
 
     const result = await runBareVeruleInHost({
@@ -180,6 +178,46 @@ void test("loads an installed native adapter from a nested app config", async (t
       { kind: "adapter", id: "third-party-fixture" },
     ]);
     assert.deepEqual(await runInstalledSdk(hostDir), envelope.data);
+
+    const zodLibrary = execFileSync(
+      "tar",
+      [
+        "-xOf",
+        zodArtifact.filename,
+        "package/dist/native/libverule_adapter_zod.so",
+      ],
+      { encoding: "buffer" },
+    );
+    const originalLibrary = readFileSync(libraryPath);
+    writeFileSync(libraryPath, zodLibrary);
+    try {
+      const mismatchedNativeAdapter = await runBareVeruleInHost({
+        checkoutDir: hostDir,
+        args: [
+          "check",
+          "--config",
+          "packages/app/verule.native.config.ts",
+          "--output",
+          "json",
+        ],
+        pnpmStoreDir: storeDir,
+        env,
+      });
+      assert.notEqual(mismatchedNativeAdapter.status, 0);
+      const mismatchEnvelope = JSON.parse(
+        mismatchedNativeAdapter.stdout + mismatchedNativeAdapter.stderr,
+      ) as {
+        readonly data: { readonly message: string };
+      };
+      assert.match(mismatchEnvelope.data.message, /@verule\/adapter-fixture/);
+      assert.match(mismatchEnvelope.data.message, /third-party-fixture/);
+      assert.match(
+        mismatchEnvelope.data.message,
+        /manifest declares adapter id "zod"/,
+      );
+    } finally {
+      writeFileSync(libraryPath, originalLibrary);
+    }
 
     const missingAdapter = await runBareVeruleInHost({
       checkoutDir: hostDir,

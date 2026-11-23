@@ -628,10 +628,11 @@ impl NodeRef<'_> {
         }
     }
 
-    /// Follows a local identifier or call to its declaration as an opaque snapshot node.
+    /// Follows a local identifier or call to its workspace source declaration.
     ///
-    /// References that resolve outside the analyzed project, or cannot be resolved, return
-    /// `None`; adapters never receive compiler-specific declaration types.
+    /// The declaration may be in another workspace package outside the analyzed project.
+    /// Unresolved or external declarations return `None`; adapters never receive
+    /// compiler-specific declaration types.
     pub fn declaration_node(self) -> Result<Option<Self>, AdapterError> {
         self.node_operation(NodeOperation::DeclarationNode)
     }
@@ -652,6 +653,9 @@ impl NodeRef<'_> {
     }
 
     /// Returns a snapshot-bound program handle suitable for a fact contribution.
+    ///
+    /// When this node was requested as a fact target, the host preserves that target's
+    /// reference identity and kind.
     pub fn program_ref(self) -> Result<String, AdapterError> {
         match self.read(NodeOperation::ProgramReference)? {
             HostValue::Text(Some(handle)) => Ok(handle),

@@ -8,6 +8,27 @@ use verule_adapter_api::{
 const INPUT_FACT: &str = "verule.validator.input-fields";
 const OUTPUT_FACT: &str = "verule.validator.output-fields";
 const VALIDATOR_METHODS: [&str; 4] = ["parse", "safeParse", "parseAsync", "safeParseAsync"];
+const SCHEMA_FACTORY_METHODS: [&str; 19] = [
+    "object",
+    "strictObject",
+    "looseObject",
+    "record",
+    "union",
+    "discriminatedUnion",
+    "intersection",
+    "extend",
+    "merge",
+    "pick",
+    "omit",
+    "partial",
+    "required",
+    "transform",
+    "refine",
+    "superRefine",
+    "pipe",
+    "openapi",
+    "createSelectSchema",
+];
 const TABLE_BUILDERS: [&str; 8] = [
     "sqliteTable",
     "pgTable",
@@ -153,42 +174,7 @@ pub fn extract<'a>(request: &FactRequest<'a>) -> Result<Vec<FactContribution<'a>
     }
 
     if scope != "calls" {
-        for &variable in &request.variables {
-            if !is_target(request, variable) {
-                continue;
-            }
-            if let Some(site) = ZodEvaluator::schema_variable(variable)? {
-                sites.push(site);
-            }
-        }
-
-        if let Some(targets) = &request.targets {
-            for &target in targets {
-                if sites.iter().any(|site| site.subject == target) {
-                    continue;
-                }
-                if matches!(
-                    target.kind()?,
-                    NodeKind::CallExpression | NodeKind::VariableDeclaration
-                ) {
-                    continue;
-                }
-                let schema = ZodEvaluator::evaluate_schema(target, &mut Vec::new())?;
-                if schema.recognized {
-                    sites.push(Site {
-                        subject: target,
-                        kind: "schema",
-                        validator_method: None,
-                        schema_name: if target.kind()? == NodeKind::Identifier {
-                            Some(text(target)?)
-                        } else {
-                            None
-                        },
-                        schema,
-                    });
-                }
-            }
-        }
+        sites.extend(schema_sites(request)?);
     }
 
     let mut contributions = Vec::with_capacity(sites.len());
@@ -211,11 +197,150 @@ pub fn extract<'a>(request: &FactRequest<'a>) -> Result<Vec<FactContribution<'a>
     Ok(contributions)
 }
 
+fn schema_sites<'a>(request: &FactRequest<'a>) -> Result<Vec<Site<'a>>, AdapterError> {
+    let mut sites = Vec::new();
+    let mut variable_initializer_locations = Vec::new();
+    for &variable in &request.variables {
+        if !is_target(request, variable) {
+            continue;
+        }
+        if let Some(site) = ZodEvaluator::schema_variable(variable)? {
+            if request.targets.is_none()
+                && let Some(initializer) = variable.safe_initializer()?
+                && let Some(location) = initializer.location()?
+            {
+                variable_initializer_locations.push(location);
+            }
+            sites.push(site);
+        }
+    }
+
+    sites.extend(schema_call_sites(request, &variable_initializer_locations)?);
+    let target_sites = target_schema_sites(request, &sites)?;
+    sites.extend(target_sites);
+    Ok(sites)
+}
+
+fn schema_call_sites<'a>(
+    request: &FactRequest<'a>,
+    variable_initializer_locations: &[SourceLocation],
+) -> Result<Vec<Site<'a>>, AdapterError> {
+    let mut schema_calls = Vec::new();
+    for &call in &request.calls {
+        if !is_target(request, call) || !is_schema_call_candidate(request, call)? {
+            continue;
+        }
+        if let Some(location) = call.location()? {
+            schema_calls.push((call, location));
+        }
+    }
+    schema_calls.sort_by(|(_, left), (_, right)| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.start.cmp(&right.start))
+            .then_with(|| right.end.cmp(&left.end))
+    });
+    let mut emitted_schema_locations = Vec::new();
+    let mut sites = Vec::new();
+    for (call, location) in schema_calls {
+        if request.targets.is_none()
+            && variable_initializer_locations
+                .iter()
+                .any(|parent| location_is_within(&location, parent))
+        {
+            continue;
+        }
+        if emitted_schema_locations
+            .iter()
+            .any(|parent| location_is_within(&location, parent))
+        {
+            continue;
+        }
+        let method = call_parts(call)?.map(|(method, _)| method);
+        if method
+            .as_deref()
+            .is_some_and(|method| VALIDATOR_METHODS.contains(&method))
+        {
+            continue;
+        }
+        let schema = ZodEvaluator::evaluate_schema(call, &mut Vec::new())?;
+        if schema.recognized {
+            emitted_schema_locations.push(location);
+            sites.push(Site {
+                subject: call,
+                kind: "schema",
+                validator_method: None,
+                schema_name: None,
+                schema,
+            });
+        }
+    }
+    Ok(sites)
+}
+
+fn target_schema_sites<'a>(
+    request: &FactRequest<'a>,
+    existing: &[Site<'a>],
+) -> Result<Vec<Site<'a>>, AdapterError> {
+    let mut sites = Vec::new();
+    if let Some(targets) = &request.targets {
+        for &target in targets {
+            if existing.iter().any(|site| site.subject == target) {
+                continue;
+            }
+            if target.kind()? == NodeKind::VariableDeclaration {
+                continue;
+            }
+            if target.kind()? == NodeKind::CallExpression
+                && call_parts(target)?
+                    .is_some_and(|(method, _)| VALIDATOR_METHODS.contains(&method.as_str()))
+            {
+                continue;
+            }
+            let schema = ZodEvaluator::evaluate_schema(target, &mut Vec::new())?;
+            if schema.recognized {
+                sites.push(Site {
+                    subject: target,
+                    kind: "schema",
+                    validator_method: None,
+                    schema_name: if target.kind()? == NodeKind::Identifier {
+                        Some(text(target)?)
+                    } else {
+                        None
+                    },
+                    schema,
+                });
+            }
+        }
+    }
+    Ok(sites)
+}
+
 fn is_target(request: &FactRequest<'_>, node: NodeRef<'_>) -> bool {
     request
         .targets
         .as_ref()
         .is_none_or(|targets| targets.contains(&node))
+}
+
+fn is_schema_call_candidate(
+    request: &FactRequest<'_>,
+    call: NodeRef<'_>,
+) -> Result<bool, AdapterError> {
+    if call.kind()? != NodeKind::CallExpression {
+        return Ok(false);
+    }
+    if request.targets.is_some() {
+        return Ok(true);
+    }
+    let Some((method, _)) = call_parts(call)? else {
+        return Ok(false);
+    };
+    Ok(SCHEMA_FACTORY_METHODS.contains(&method.as_str()))
+}
+
+fn location_is_within(inner: &SourceLocation, outer: &SourceLocation) -> bool {
+    inner.file == outer.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
 fn input_value(site: &Site) -> Value {

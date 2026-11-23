@@ -46,6 +46,7 @@ pub struct NativeAdapterObservation {
 #[serde(rename_all = "camelCase")]
 pub struct NativeAdapterPackageInput {
     package_name: String,
+    adapter_id: String,
     library_path: String,
 }
 
@@ -72,6 +73,15 @@ pub fn load_configured_adapters(
         let library = NativeLibrary::load(&input.package_name, &input.library_path)
             .map_err(|error| RpcErr::new("NATIVE_ADAPTER_LOAD", error.to_string()))?;
         let id = library.manifest().id.clone();
+        if id != input.adapter_id {
+            return Err(RpcErr::new(
+                "NATIVE_ADAPTER_LOAD",
+                format!(
+                    "Failed to load configured adapter package \"{}\": its JavaScript bridge declares adapter id \"{}\", but its native library manifest declares adapter id \"{}\".",
+                    input.package_name, input.adapter_id, id
+                ),
+            ));
+        }
         if let Some(existing) = adapters.get(&id) {
             let existing: &Rc<NativeLibrary> = existing;
             return Err(RpcErr::new(
@@ -118,6 +128,7 @@ pub fn extract(
             )
         })?;
     let targets = resolve_targets(snapshot, project_id, target_handles, has_targets)?;
+    let aliases_by_primary_handle = target_aliases(targets.as_deref());
     let candidates = collect_native_adapter_nodes(&snapshot.cwd, program, checker);
     let candidate_nodes = candidates;
     let calls = candidate_nodes.calls;
@@ -125,9 +136,12 @@ pub fn extract(
     let mut table = NodeTable::default();
     let call_ids = table.list(calls.iter().copied());
     let variable_ids = table.list(variables.iter().copied());
-    let target_ids = targets
-        .as_ref()
-        .map(|nodes| table.list(nodes.iter().copied()));
+    let target_ids = targets.as_ref().map(|nodes| {
+        nodes
+            .iter()
+            .map(|target| table.handle_with_program_ref(target.node, target.handle_id.clone()))
+            .collect::<Vec<_>>()
+    });
     let mut host = SnapshotAdapterHost {
         cwd: snapshot.cwd.clone(),
         project_id,
@@ -145,9 +159,22 @@ pub fn extract(
         variables: &variable_ids,
         targets: target_ids.as_deref(),
     };
-    let output = adapter
+    let mut output = adapter
         .extract(&request, &mut host)
         .map_err(|error| RpcErr::new("NATIVE_ADAPTER_EXTRACT", error.to_string()))?;
+    let mut contributions = Vec::with_capacity(output.contributions.len());
+    for contribution in output.contributions {
+        if let Some(handles) = aliases_by_primary_handle.get(&contribution.subject) {
+            for handle_id in handles {
+                let mut alias = contribution.clone();
+                alias.subject.clone_from(handle_id);
+                contributions.push(alias);
+            }
+        } else {
+            contributions.push(contribution);
+        }
+    }
+    output.contributions = contributions;
     drop(host);
     let details = if observer.is_detail() {
         output
@@ -182,6 +209,21 @@ pub fn extract(
         details,
     );
     Ok(output)
+}
+
+fn target_aliases(targets: Option<&[ResolvedNativeTarget]>) -> FxHashMap<String, Vec<String>> {
+    let mut handles_by_node: FxHashMap<P<Node>, Vec<String>> = FxHashMap::default();
+    for target in targets.into_iter().flatten() {
+        let handles = handles_by_node.entry(target.node).or_default();
+        if !handles.contains(&target.handle_id) {
+            handles.push(target.handle_id.clone());
+        }
+    }
+    handles_by_node
+        .into_values()
+        .filter(|handles| handles.len() > 1)
+        .map(|handles| (handles[0].clone(), handles))
+        .collect()
 }
 
 struct NativeAdapterCandidates {
@@ -385,12 +427,17 @@ fn unwrap_alias(checker: &mut CheckerHandle, mut symbol: P<Symbol>) -> P<Symbol>
     symbol
 }
 
+struct ResolvedNativeTarget {
+    node: P<Node>,
+    handle_id: String,
+}
+
 fn resolve_targets(
     snapshot: &SnapshotState,
     project_id: &str,
     target_handles: &[String],
     has_targets: bool,
-) -> Result<Option<Vec<P<Node>>>, RpcErr> {
+) -> Result<Option<Vec<ResolvedNativeTarget>>, RpcErr> {
     if !has_targets {
         return Ok(None);
     }
@@ -408,7 +455,10 @@ fn resolve_targets(
                 ),
             ));
         };
-        nodes.push(node);
+        nodes.push(ResolvedNativeTarget {
+            node,
+            handle_id: handle_id.clone(),
+        });
     }
     Ok(Some(nodes))
 }
@@ -417,6 +467,7 @@ fn resolve_targets(
 struct NodeTable {
     nodes: Vec<P<Node>>,
     ids: FxHashMap<P<Node>, u64>,
+    program_refs: FxHashMap<P<Node>, String>,
 }
 
 impl NodeTable {
@@ -427,6 +478,12 @@ impl NodeTable {
         self.nodes.push(node);
         let id = self.nodes.len() as u64;
         self.ids.insert(node, id);
+        id
+    }
+
+    fn handle_with_program_ref(&mut self, node: P<Node>, handle_id: String) -> u64 {
+        let id = self.handle(node);
+        self.program_refs.entry(node).or_insert(handle_id);
         id
     }
 
@@ -449,6 +506,18 @@ struct SnapshotAdapterHost<'a> {
     checker: &'a mut CheckerHandle,
     snapshot: &'a mut SnapshotState,
     table: NodeTable,
+}
+
+impl SnapshotAdapterHost<'_> {
+    fn program_reference(&mut self, node: P<Node>) -> HostValue {
+        let handle = self
+            .table
+            .program_refs
+            .get(&node)
+            .cloned()
+            .unwrap_or_else(|| self.snapshot.alloc_syntax(self.project_id, node));
+        HostValue::Text(Some(handle))
+    }
 }
 
 impl HostAccess for SnapshotAdapterHost<'_> {
@@ -548,9 +617,7 @@ impl HostAccess for SnapshotAdapterHost<'_> {
                 });
                 HostValue::Nodes(children)
             }
-            NodeOperation::ProgramReference => {
-                HostValue::Text(Some(self.snapshot.alloc_syntax(self.project_id, node)))
-            }
+            NodeOperation::ProgramReference => self.program_reference(node),
         };
         Ok(value)
     }

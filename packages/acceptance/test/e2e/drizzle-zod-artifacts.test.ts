@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -66,30 +66,6 @@ function createArtifactHost(environmentDir: string): {
   const { appDir } = copyAcceptanceHost(hostDir, "drizzle-zod");
 
   return { hostDir, appDir, storeDir };
-}
-
-function findInstalledPackageRoot(
-  entryPath: string,
-  packageName: string,
-): string {
-  let current = dirname(entryPath);
-  while (true) {
-    try {
-      const manifest = JSON.parse(
-        readFileSync(join(current, "package.json"), "utf8"),
-      ) as { readonly name?: unknown };
-      if (manifest.name === packageName) return current;
-    } catch {
-      // Keep walking until the installed package manifest is found.
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error(
-        "Could not locate " + packageName + " above " + entryPath,
-      );
-    }
-    current = parent;
-  }
 }
 
 function semanticReport(report: CheckReport) {
@@ -186,24 +162,31 @@ function getInstalledNativeLibrary(
   artifact: PackedArtifact,
 ): { readonly path: string; readonly sha256: string } {
   const hostRequire = createRequire(join(hostDir, "package.json"));
-  const entryPath = realpathSync(
-    hostRequire.resolve(packageName + "/verule-adapter"),
-  );
-  const packagePath = findInstalledPackageRoot(entryPath, packageName);
-  const manifest = JSON.parse(
-    readFileSync(join(packagePath, "package.json"), "utf8"),
-  ) as {
-    readonly verule?: {
-      readonly native?: Readonly<Record<string, string>>;
-    };
+  const descriptorPath = hostRequire.resolve(packageName + "/verule-native");
+  const manifest = JSON.parse(readFileSync(descriptorPath, "utf8")) as {
+    readonly id: string;
+    readonly "linux-x64": string;
   };
-  const relativeLibraryPath = manifest.verule?.native?.["linux-x64"];
-  assert.ok(relativeLibraryPath);
-  const libraryPath = realpathSync(join(packagePath, relativeLibraryPath));
-  const archiveLibraryPath = relativeLibraryPath.replace(/^\.\//u, "");
+  const expectedId = packageName.endsWith("adapter-drizzle")
+    ? "drizzle"
+    : "zod";
+  assert.equal(manifest.id, expectedId);
+  assert.equal(manifest["linux-x64"], "./native/linux-x64");
+  const libraryPath = realpathSync(
+    hostRequire.resolve(packageName + "/native/linux-x64"),
+  );
+  const artifactExports = artifact.manifest.exports as
+    | Record<string, unknown>
+    | undefined;
+  const archiveLibraryPath = artifactExports?.["./native/linux-x64"];
+  assert.equal(typeof archiveLibraryPath, "string");
   const packedBytes = execFileSync(
     "tar",
-    ["-xOf", artifact.filename, "package/" + archiveLibraryPath],
+    [
+      "-xOf",
+      artifact.filename,
+      "package/" + String(archiveLibraryPath).replace(/^\.\//u, ""),
+    ],
     { encoding: "buffer" },
   );
   const installedSha256 = createHash("sha256")

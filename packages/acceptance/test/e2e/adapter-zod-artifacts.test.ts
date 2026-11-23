@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -18,11 +18,13 @@ import {
   runBareVeruleInHost,
   verifyHostArtifactResolution,
 } from "@verule/acceptance";
-import type {
-  ValidatorInputFieldsFactValue,
-  ValidatorOutputFieldsFactValue,
+import {
+  ValidatorInputFieldsFact,
+  ValidatorOutputFieldsFact,
+  type ValidatorInputFieldsFactValue,
+  type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
-import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
+import type { CallRef, CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
 
 import { copyAcceptanceHost } from "./support/host-fixtures.ts";
 
@@ -38,26 +40,6 @@ type ZodFactMessage = {
   readonly input: ValidatorInputFieldsFactValue;
   readonly output: ValidatorOutputFieldsFactValue;
 };
-
-function findInstalledPackageRoot(entryPath: string): string {
-  let current = dirname(entryPath);
-  while (true) {
-    try {
-      const manifestPath = join(current, "package.json");
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        readonly name?: unknown;
-      };
-      if (manifest.name === adapterPackageName) return current;
-    } catch {
-      // Keep walking until the adapter package manifest is found.
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error(`Could not find installed package above ${entryPath}`);
-    }
-    current = parent;
-  }
-}
 
 void test("installs the native Zod adapter and queries real schemas from a static host", async () => {
   const environmentDir = mkdtempSync(join(tmpdir(), "verule-zod-native-host-"));
@@ -81,14 +63,20 @@ void test("installs the native Zod adapter and queries real schemas from a stati
     assert.ok(engineArtifact?.binarySha256);
 
     const exports = adapterArtifact.manifest.exports as
-      | Record<string, Record<string, string>>
+      | Record<string, unknown>
       | undefined;
-    assert.equal(exports?.["."]?.default, "./dist/index.js");
-    assert.equal(exports?.["."]?.types, "./dist/index.d.ts");
-    assert.equal(exports?.["."]?.source, undefined);
+    assert.deepEqual(exports?.["."], {
+      types: "./dist/index.d.ts",
+      default: "./dist/index.js",
+    });
+    assert.deepEqual(exports?.["./verule-adapter"], {
+      types: "./dist/verule-adapter.d.ts",
+      default: "./dist/verule-adapter.js",
+    });
+    assert.equal(exports?.["./verule-native"], "./dist/verule-native.json");
     assert.equal(
-      exports?.["./verule-adapter"]?.default,
-      "./dist/verule-adapter.js",
+      exports?.["./native/linux-x64"],
+      "./dist/native/libverule_adapter_zod.so",
     );
 
     const installation = await installArtifactPackages({
@@ -111,23 +99,18 @@ void test("installs the native Zod adapter and queries real schemas from a stati
     const appRequire = createRequire(
       join(hostDir, "packages/app/package.json"),
     );
-    const entryPath = realpathSync(
-      appRequire.resolve(`${adapterPackageName}/verule-adapter`),
+    const nativeDescriptorPath = appRequire.resolve(
+      `${adapterPackageName}/verule-native`,
     );
-    const packageRoot = findInstalledPackageRoot(entryPath);
-    const packageManifest = JSON.parse(
-      readFileSync(join(packageRoot, "package.json"), "utf8"),
-    ) as {
-      readonly name: string;
-      readonly verule: {
-        readonly native: { readonly "linux-x64": string };
-      };
-    };
-    assert.equal(packageManifest.name, adapterPackageName);
+    const nativeDescriptor = JSON.parse(
+      readFileSync(nativeDescriptorPath, "utf8"),
+    ) as { readonly id: string; readonly "linux-x64": string };
+    assert.equal(nativeDescriptor.id, "zod");
+    assert.equal(nativeDescriptor["linux-x64"], "./native/linux-x64");
     const libraryPath = realpathSync(
-      resolve(packageRoot, packageManifest.verule.native["linux-x64"]),
+      appRequire.resolve(`${adapterPackageName}/native/linux-x64`),
     );
-    assert.ok(packageRoot.startsWith(hostDir));
+    assert.ok(libraryPath.startsWith(realpathSync(hostDir)));
     assert.ok(libraryPath.startsWith(hostDir));
     assert.ok(libraryPath.endsWith("libverule_adapter_zod.so"));
 
@@ -265,6 +248,169 @@ void test("installs the native Zod adapter and queries real schemas from a stati
       }),
       envelope.data,
     );
+
+    let targetCallHandle: string | undefined;
+    let targetCallSyntaxHandle: string | undefined;
+    let targetCallRef: CallRef | undefined;
+    let targetDeclarationHandle: string | undefined;
+    let targetSchemaHandle: string | undefined;
+    let firstCallFacts: readonly {
+      readonly subject: { readonly handleId: string };
+      readonly value: ValidatorInputFieldsFactValue;
+    }[] = [];
+    let fullCallFacts = firstCallFacts;
+    let repeatedCallFacts = firstCallFacts;
+    let callAliasFacts: readonly {
+      readonly subject: { readonly handleId: string };
+    }[] = [];
+    let declarationFacts = firstCallFacts;
+    let explicitSchemaFacts = firstCallFacts;
+    let cachedSchemaFacts = firstCallFacts;
+    let allSchemaFacts = firstCallFacts;
+    const factProbe = sdk.defineRule({
+      id: "zod-native-reference-probe",
+      run: async (ctx) => {
+        const callSyntax = (
+          await ctx.findSyntax({
+            files: ["packages/app/src/zod-fields.ts"],
+            kinds: ["CallExpression"],
+            textIncludes: ["userSchema.parse(row)"],
+          })
+        )[0];
+        assert.ok(callSyntax);
+        const [resolvedCall] = await ctx.resolveCalls([callSyntax.ref]);
+        assert.ok(resolvedCall?.call);
+        targetCallRef = resolvedCall.call;
+        targetCallHandle = resolvedCall.call.handleId;
+        targetCallSyntaxHandle = callSyntax.ref.handleId;
+        fullCallFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+        firstCallFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+          targets: [resolvedCall.call],
+        });
+        repeatedCallFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+          targets: [resolvedCall.call],
+        });
+        callAliasFacts = await ctx.facts(ValidatorOutputFieldsFact, {
+          condition: { scope: "calls" },
+          targets: [resolvedCall.call, callSyntax.ref],
+        });
+
+        const schemaVariable = (
+          await ctx.findSyntax({
+            files: ["packages/app/src/zod-fields.ts"],
+            kinds: ["VariableDeclaration"],
+            textIncludes: ["accountSchema ="],
+          })
+        )[0];
+        assert.ok(schemaVariable);
+        const [resolvedDeclaration] = await ctx.resolveDeclarations([
+          schemaVariable.ref,
+        ]);
+        assert.ok(resolvedDeclaration?.declaration);
+        targetDeclarationHandle = resolvedDeclaration.declaration.handleId;
+        declarationFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "schemas" },
+          targets: [resolvedDeclaration.declaration],
+        });
+
+        const directSchema = (
+          await ctx.findSyntax({
+            files: ["packages/app/src/zod-fields.ts"],
+            kinds: ["CallExpression"],
+            textIncludes: ["standaloneOnly"],
+          })
+        )[0];
+        assert.ok(directSchema);
+        targetSchemaHandle = directSchema.ref.handleId;
+        explicitSchemaFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "schemas" },
+          targets: [directSchema.ref],
+        });
+        allSchemaFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "schemas" },
+        });
+        cachedSchemaFacts = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "schemas" },
+          targets: [directSchema.ref],
+        });
+      },
+    });
+    const referenceSession = await sdk.openSession({
+      cwd: hostDir,
+      adapterResolutionRoot: dirname(configPath),
+      config: configModule.default,
+    });
+    try {
+      await referenceSession.check([factProbe]);
+      assert.ok(
+        fullCallFacts.some((fact) => fact.value.validatorMethod === "parse"),
+      );
+      assert.ok(targetCallHandle);
+      assert.ok(targetCallSyntaxHandle);
+      assert.equal(firstCallFacts.length, 1);
+      assert.equal(firstCallFacts[0]!.subject.handleId, targetCallHandle);
+      assert.deepEqual(firstCallFacts[0]!.value.requiredFields, [
+        "id",
+        "name",
+        "nickname",
+      ]);
+      assert.deepEqual(repeatedCallFacts, firstCallFacts);
+      assert.deepEqual(
+        callAliasFacts.map((fact) => fact.subject.handleId).toSorted(),
+        [targetCallHandle, targetCallSyntaxHandle].toSorted(),
+      );
+      assert.equal(declarationFacts.length, 1);
+      assert.equal(
+        declarationFacts[0]!.subject.handleId,
+        targetDeclarationHandle,
+      );
+      assert.equal(explicitSchemaFacts.length, 1);
+      assert.equal(
+        explicitSchemaFacts[0]!.subject.handleId,
+        targetSchemaHandle,
+      );
+      assert.deepEqual(explicitSchemaFacts[0]!.value.requiredFields, [
+        "standaloneOnly",
+      ]);
+      assert.equal(
+        allSchemaFacts.filter((fact) =>
+          fact.value.requiredFields.includes("standaloneOnly"),
+        ).length,
+        1,
+      );
+      assert.deepEqual(cachedSchemaFacts, explicitSchemaFacts);
+
+      const staleCallRef = targetCallRef;
+      assert.ok(staleCallRef);
+      const oldSnapshotId = referenceSession.snapshotId;
+      await referenceSession.update({
+        changed: ["packages/app/src/zod-fields.ts"],
+      });
+      assert.notEqual(referenceSession.snapshotId, oldSnapshotId);
+      const staleTargetRule = sdk.defineRule({
+        id: "zod-native-stale-reference-probe",
+        run: async (ctx) => {
+          await ctx.facts(ValidatorInputFieldsFact, {
+            condition: { scope: "calls" },
+            targets: [staleCallRef],
+          });
+        },
+      });
+      await assert.rejects(
+        referenceSession.check([staleTargetRule]),
+        (error: unknown) =>
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "STALE_REFERENCE",
+      );
+    } finally {
+      await referenceSession.close();
+    }
   } finally {
     bundle.dispose();
     rmSync(environmentDir, { recursive: true, force: true });

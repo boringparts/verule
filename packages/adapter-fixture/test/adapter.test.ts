@@ -48,6 +48,7 @@ function createProject(): string {
 function installTestPackage(
   root: string,
   packageName: string,
+  adapterId: string,
   moduleSource: string,
   nativeFile: string,
 ): string {
@@ -60,9 +61,17 @@ function installTestPackage(
     JSON.stringify({
       name: packageName,
       type: "module",
-      exports: { "./verule-adapter": "./dist/bridge.js" },
-      verule: { native: { "linux-x64": "./dist/native/adapter.so" } },
+      exports: {
+        "./verule-adapter": "./dist/bridge.js",
+        "./verule-native": "./dist/verule-native.json",
+        "./native/linux-x64": "./dist/native/adapter.so",
+      },
     }),
+    "utf8",
+  );
+  writeFileSync(
+    join(packageRoot, "dist/verule-native.json"),
+    JSON.stringify({ id: adapterId, "linux-x64": "./native/linux-x64" }),
     "utf8",
   );
   return packageRoot;
@@ -154,12 +163,14 @@ void describe("independent native adapter package", () => {
       installTestPackage(
         root,
         invalidBridgeName,
+        "invalid-bridge",
         `export default { id: "invalid-bridge", provides: [{ factType: {}, extract() {} }] };`,
         goodLibrary,
       );
       const abiPackagePath = installTestPackage(
         root,
         abiMismatchName,
+        "abi-mismatch",
         `export default { id: "abi-mismatch", provides: [{ factType: { id: "fixture.call-source" }, extract() { return []; } }] };`,
         badAbiLibrary,
       );
