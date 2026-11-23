@@ -1,4 +1,12 @@
-use verule_adapter_api::{ADAPTER_ABI_VERSION, AdapterError, AdapterManifest};
+use verule_adapter_api::{ADAPTER_ABI_VERSION, AdapterError, AdapterManifest, NodeOperation};
+
+#[test]
+fn resolves_the_appended_declaration_node_operation() {
+    assert_eq!(
+        NodeOperation::try_from(17),
+        Ok(NodeOperation::DeclarationNode)
+    );
+}
 
 #[test]
 fn accepts_a_valid_native_adapter_manifest() {

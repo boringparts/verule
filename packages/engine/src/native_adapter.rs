@@ -273,6 +273,11 @@ impl HostAccess for SnapshotAdapterHost<'_> {
                 );
                 HostValue::Declaration(declaration)
             }
+            NodeOperation::DeclarationNode => {
+                let declaration = resolve_decl_for_ref(&self.cwd, self.checker, node)
+                    .map(|(_, declaration)| declaration);
+                HostValue::Node(declaration.map(|declaration| self.table.handle(declaration)))
+            }
             NodeOperation::Arguments => {
                 let children = if matches!(node.kind(), Kind::CallExpression | Kind::NewExpression)
                 {
