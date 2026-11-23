@@ -199,6 +199,9 @@ export type LibraryAdapter = {
   readonly provides: readonly FactProvider[];
 };
 
+/** Library adapter object or installed package name accepted by project configuration. */
+export type ConfiguredAdapter = LibraryAdapter | string;
+
 /** Defines a typed `FactType` contract that multiple adapters can implement. */
 export function defineFactType<
   SubjectKind extends ProgramObjectKind,

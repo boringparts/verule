@@ -17,6 +17,7 @@ export {
   defineFactProvider,
   defineFactType,
   type AdapterContext,
+  type ConfiguredAdapter,
   type EngineFactExtractionOptions,
   type FactContribution,
   type FactExtractionRequest,

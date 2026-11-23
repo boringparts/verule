@@ -57,6 +57,8 @@ function mapEngineErrorCode(code: string): VeruleErrorCode {
     case "STALE_REFERENCE":
     case "CROSS_PROJECT_REFERENCE":
     case "STALE_SNAPSHOT":
+    case "NATIVE_ADAPTER_LOAD":
+    case "NATIVE_ADAPTER_EXTRACT":
       return code;
     default:
       return "ENGINE_ERROR";

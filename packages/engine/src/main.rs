@@ -4,6 +4,7 @@ mod cfg;
 mod directives;
 mod drizzle_facts;
 mod instance_identity;
+mod native_adapter;
 mod observe;
 mod package_impl;
 mod projection;

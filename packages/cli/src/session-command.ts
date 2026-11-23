@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   REPORT_SCHEMA_VERSION,
@@ -71,6 +71,7 @@ export async function* streamSharedSession<
       cwd: workingDirectory,
       endpoint: socketOption,
       config: initial.config,
+      adapterResolutionRoot: dirname(initial.configPath),
       watchFiles: [...watchFiles],
       ...(signal !== undefined ? { signal } : {}),
       loadConfig: async () => {
@@ -81,6 +82,7 @@ export async function* streamSharedSession<
         return {
           config: loaded.config,
           watchFiles: loaded.watchFiles,
+          adapterResolutionRoot: dirname(loaded.configPath),
         };
       },
     });

@@ -40,6 +40,7 @@ export type WorkspaceFailureInfo = {
 export type WorkspaceControllerOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig;
+  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;
@@ -208,6 +209,7 @@ export type WorkspaceApplyResult =
  */
 export function createWorkspaceController(options: WorkspaceControllerOptions) {
   const absCwd = resolve(options.cwd);
+  let adapterResolutionRoot = resolve(options.adapterResolutionRoot ?? absCwd);
   const debounceMs = options.debounceMs ?? 50;
 
   let session: AnalysisSession | undefined;
@@ -395,6 +397,10 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
   async function resolveCurrentConfig(): Promise<NormalizedVeruleConfig> {
     if (options.loadConfig) {
       const loaded = await options.loadConfig();
+      adapterResolutionRoot = resolve(
+        absCwd,
+        loaded.adapterResolutionRoot ?? adapterResolutionRoot,
+      );
       if (loaded.watchFiles) {
         configWatchFiles.clear();
         for (const file of loaded.watchFiles) {
@@ -540,6 +546,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         session = await openSession({
           cwd: absCwd,
           config: lastConfig!,
+          adapterResolutionRoot,
           ...(options.observe !== undefined
             ? { observe: options.observe }
             : {}),
@@ -581,6 +588,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         changed: mergedChanged,
         created: mergedCreated,
         deleted: mergedDeleted,
+        adapterResolutionRoot,
         ...(reloadedConfig !== undefined ? { config: reloadedConfig } : {}),
       });
     } catch (err) {
@@ -651,6 +659,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           session = await openSession({
             cwd: absCwd,
             config: lastConfig,
+            adapterResolutionRoot,
             ...(options.observe !== undefined
               ? { observe: options.observe }
               : {}),
@@ -797,6 +806,9 @@ export async function* watchProject(
   const controller = createWorkspaceController({
     cwd: options.cwd,
     ...(options.config !== undefined ? { config: options.config } : {}),
+    ...(options.adapterResolutionRoot !== undefined
+      ? { adapterResolutionRoot: options.adapterResolutionRoot }
+      : {}),
     ...(options.loadConfig !== undefined
       ? { loadConfig: options.loadConfig }
       : {}),
