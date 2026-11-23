@@ -1,7 +1,7 @@
 import { defineFactType } from "@verule/sdk";
 
 export type FixtureComplementCondition = {
-  readonly mode: "normal" | "conflict";
+  readonly mode: "normal" | "conflict" | "targeted-conflict";
 };
 
 export type FixtureComplementValue = {

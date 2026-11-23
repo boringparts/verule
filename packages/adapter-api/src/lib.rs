@@ -654,8 +654,9 @@ impl NodeRef<'_> {
 
     /// Returns a snapshot-bound program handle suitable for a fact contribution.
     ///
-    /// When this node was requested as a fact target, the host preserves that target's
-    /// reference identity and kind.
+    /// When multiple references target the same AST node, the host supplies one primary
+    /// requested handle here and distributes each contribution across the other requested
+    /// references to that node.
     pub fn program_ref(self) -> Result<String, AdapterError> {
         match self.read(NodeOperation::ProgramReference)? {
             HostValue::Text(Some(handle)) => Ok(handle),
