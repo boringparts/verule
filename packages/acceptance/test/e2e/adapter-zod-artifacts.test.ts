@@ -57,6 +57,7 @@ function copyExportedPackage(
     "node_modules",
     "test",
     "drizzle-zod-overlay",
+    "provider-session-overlay",
     ...excludedParts,
   ]);
   cpSync(source, destination, {

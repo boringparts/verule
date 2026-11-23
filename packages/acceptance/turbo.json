@@ -6,6 +6,7 @@
       "dependsOn": [
         "@verule/adapter-drizzle#build",
         "@verule/adapter-fixture#build",
+        "@verule/adapter-fixture-complement#build",
         "@verule/adapter-zod#build",
         "@verule/cli#build",
         "@verule/engine#build",

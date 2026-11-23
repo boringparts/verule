@@ -43,7 +43,13 @@ function copyExportedPackage(packageName: string, destination: string): void {
     filter: (sourcePath) => {
       const parts = relative(source, sourcePath).split(sep);
       return !parts.some((part) =>
-        ["dist", "host-root", "node_modules", "test"].includes(part),
+        [
+          "dist",
+          "host-root",
+          "node_modules",
+          "provider-session-overlay",
+          "test",
+        ].includes(part),
       );
     },
   });
