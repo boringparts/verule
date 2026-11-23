@@ -14,9 +14,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  installArtifactsInHost,
+  installArtifactPackages,
   type PackedArtifact,
-  restoreHostDependencies,
   runBareVeruleInHost,
   verifyHostArtifactResolution,
 } from "../../src/index.ts";
@@ -122,30 +121,6 @@ function createFakeVeruleTarballs(dir: string): {
   return { artifacts: [engine, sdk, cli], binarySha256 };
 }
 
-void test("records a separate preparation failure when host dependency restoration fails", async () => {
-  using fixture = mkdtempDisposableSync(join(tmpdir(), "verule-restore-fail-"));
-  const checkoutDir = join(fixture.path, "host");
-  mkdirSync(checkoutDir, { recursive: true });
-  writeFileSync(
-    join(checkoutDir, "package.json"),
-    '{"name":"broken-npm-host","private":true}\n',
-  );
-
-  const result = await restoreHostDependencies({
-    status: "ready",
-    hostId: "vscode",
-    sha: "deadbeef",
-    checkoutDir,
-    cleanup: () => {},
-  });
-
-  assert.equal(result.status, "preparation-failed");
-  assert.equal(result.stage, "restore-dependencies");
-  assert.equal(result.hostId, "vscode");
-  assert.equal(result.sha, "deadbeef");
-  assert.ok(result.exitCode !== 0);
-});
-
 void test("installs direct dependencies in a fake host, allows workspace symlinks, blocks dev-repo reads, and runs bare verule", async () => {
   using fixture = mkdtempDisposableSync(join(tmpdir(), "verule-host-install-"));
   const devRepoDir = join(fixture.path, "dev-repo");
@@ -177,10 +152,9 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
   );
   writeFileSync(join(hostDir, ".npmrc"), "auto-install-peers=true\n");
 
-  const installOutcome = await installArtifactsInHost({
-    hostId: "openstatus",
-    sha: "fake-sha",
+  const installOutcome = await installArtifactPackages({
     checkoutDir: hostDir,
+    packageManager: "pnpm",
     artifacts,
   });
   assert.equal(installOutcome.status, "ready");

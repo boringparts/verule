@@ -831,7 +831,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
     }
   });
 
-  void it("traces field reads/writes across cross-file callback helpers (callWithErrorHandling) and checks branch guards on Vue-style scheduler flags", async () => {
+  void it("traces field reads/writes across cross-file callback helpers and checks branch guards on reentrant scheduler flags", async () => {
     const root = createTempProject({
       "src/errorHandling.ts": [
         "export function callWithErrorHandling(",
@@ -902,7 +902,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
     const postCallGuardStatus: Record<string, string> = {};
 
     const schedulerRule = defineRule({
-      id: "vue-requeue-flag-guard",
+      id: "reentrant-queue-flag-guard",
       run: async (ctx) => {
         const fns = await ctx.findSyntax({
           files: ["src/scheduler.ts"],

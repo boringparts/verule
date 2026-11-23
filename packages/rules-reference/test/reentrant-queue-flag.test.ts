@@ -7,9 +7,24 @@ import { describe, it } from "node:test";
 import {
   defineReentrantQueueModel,
   reentrantQueueFlagRule,
-  vueSchedulerQueueModel,
 } from "@verule/rules-reference";
 import { defineConfig, runCheck } from "@verule/sdk";
+
+const schedulerQueueModel = defineReentrantQueueModel({
+  id: "test-scheduler-queue",
+  description: "Model for the scheduler queue behavior exercised in this test.",
+  contracts: [
+    {
+      id: "scheduler-queue",
+      queueName: "scheduler-queue",
+      enqueueFunctionName: "queueJob",
+      queueIdentifier: "queue",
+      flagProperty: "flags",
+      queuedFlagName: "QUEUED",
+      reentrantFlagName: "ALLOW_RECURSE",
+    },
+  ],
+});
 
 function createTempProject(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "verule-reentrant-queue-test-"));
@@ -141,7 +156,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
         cwd: buggyRoot,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          models: [vueSchedulerQueueModel],
+          models: [schedulerQueueModel],
           rules: [reentrantQueueFlagRule],
         }),
       });
@@ -246,7 +261,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
         cwd: fixedRoot,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          models: [vueSchedulerQueueModel],
+          models: [schedulerQueueModel],
           rules: [reentrantQueueFlagRule],
         }),
       });
