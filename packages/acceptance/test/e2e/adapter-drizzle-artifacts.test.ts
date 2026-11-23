@@ -92,9 +92,7 @@ function findInstalledPackageRoot(entryPath: string): string {
   }
 }
 
-async function runInstalledSdk(
-  hostDir: string,
-): Promise<{
+async function runInstalledSdk(hostDir: string): Promise<{
   readonly report: CheckReport;
   readonly facts: readonly DrizzleProjectionResult[];
 }> {

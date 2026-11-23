@@ -238,6 +238,8 @@ pub struct DeclarationSelect {
     #[serde(default)]
     name: bool,
     #[serde(default)]
+    container_name: bool,
+    #[serde(default)]
     kind: bool,
     #[serde(default)]
     location: bool,
@@ -556,6 +558,8 @@ struct DeclarationRow {
     gaps: Vec<GapItem>,
     #[serde(skip_serializing_if = "ProjectedField::is_omitted")]
     name: ProjectedField<String>,
+    #[serde(skip_serializing_if = "ProjectedField::is_omitted")]
+    container_name: ProjectedField<String>,
     #[serde(skip_serializing_if = "ProjectedField::is_omitted")]
     kind: ProjectedField<String>,
     #[serde(skip_serializing_if = "ProjectedField::is_omitted")]
@@ -2090,6 +2094,32 @@ fn resolve_target_input(
     }
 }
 
+fn resolve_declaration_container_name(decl: P<Node>) -> Option<String> {
+    let mut current = decl.parent();
+    while let Some(parent) = current {
+        if matches!(
+            parent.kind(),
+            Kind::ClassDeclaration
+                | Kind::ClassExpression
+                | Kind::InterfaceDeclaration
+                | Kind::ModuleDeclaration
+                | Kind::TypeAliasDeclaration
+                | Kind::EnumDeclaration
+                | Kind::VariableDeclaration
+        ) && let Some(name_node) = parent.name()
+            && let Some(source_file) = get_source_file_of_node(name_node)
+        {
+            let location = node_location(source_file, "", name_node);
+            let name = slice_source_text(source_file, location.start, location.end);
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        current = parent.parent();
+    }
+    None
+}
+
 fn evaluate_declaration_row(
     snapshot: &mut SnapshotState,
     project_id: &str,
@@ -2124,6 +2154,12 @@ fn evaluate_declaration_row(
                 })
             })
         })
+    });
+
+    let container_name = ProjectedField::from_selected(select.container_name, || {
+        resolved
+            .primary_decl
+            .and_then(resolve_declaration_container_name)
     });
 
     let kind = ProjectedField::from_selected(select.kind, || {
@@ -2163,6 +2199,7 @@ fn evaluate_declaration_row(
         declaration,
         gaps,
         name,
+        container_name,
         kind,
         location,
         syntax,

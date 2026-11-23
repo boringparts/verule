@@ -18,8 +18,6 @@ import { fileURLToPath } from "node:url";
 import {
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
-  createZodAdapter,
-  zodAdapter,
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
@@ -38,6 +36,12 @@ const tscBin = join(packageRoot, "node_modules", ".bin", "tsc");
 
 function createTempProject(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "verule-zod-facts-"));
+  mkdirSync(join(root, "node_modules", "@verule"), { recursive: true });
+  symlinkSync(
+    packageRoot,
+    join(root, "node_modules", "@verule", "adapter-zod"),
+    "dir",
+  );
   writeFileSync(
     join(root, "tsconfig.json"),
     JSON.stringify(
@@ -157,7 +161,7 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [inspectRule],
         }),
       });
@@ -272,7 +276,7 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [rule],
         }),
       });
@@ -437,7 +441,7 @@ void describe("@verule/adapter-zod", () => {
       cwd: root,
       config: defineConfig({
         tsconfig: "tsconfig.json",
-        adapters: [zodAdapter],
+        adapters: ["@verule/adapter-zod"],
         rules: [rule],
       }),
     });
@@ -567,7 +571,7 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [rule],
         }),
       });
@@ -617,7 +621,7 @@ void describe("@verule/adapter-zod", () => {
     }
   });
 
-  void it("performs zero extraction when unqueried and shares cached facts across two rules with observation & explain", async () => {
+  void it("loads the native package only when queried and shares cached facts across rules", async () => {
     const root = createTempProject({
       "src/zod-stub.ts": ZOD_POLYFILL_STUB,
       "src/app.ts": [
@@ -630,13 +634,6 @@ void describe("@verule/adapter-zod", () => {
       ].join("\n"),
     });
 
-    let extractCount = 0;
-    const trackedAdapter = createZodAdapter({
-      onExtract: () => {
-        extractCount += 1;
-      },
-    });
-
     const unqueriedRule = defineRule({
       id: "rule-no-facts",
       run: async (ctx) => {
@@ -645,17 +642,16 @@ void describe("@verule/adapter-zod", () => {
     });
 
     try {
-      // 1. Enabled but unqueried -> extractCount === 0 & provider absent from observation
+      // An installed package remains unobserved when no rule queries its facts.
       const unqueriedReport = await runCheck({
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [trackedAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [unqueriedRule],
         }),
         observe: "detail",
       });
-      assert.equal(extractCount, 0);
       assert.equal(
         unqueriedReport.observation?.providers.includes("zod"),
         false,
@@ -687,13 +683,12 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [trackedAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [ruleA, ruleB],
         }),
         observe: "detail",
         at: "src/app.ts:4:10",
       });
-      assert.equal(extractCount, 1);
       assert.equal(ruleACount, 1);
       assert.equal(ruleBCount, 1);
 
@@ -885,7 +880,7 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [genericValidatorRule],
         }),
       });
@@ -1069,7 +1064,7 @@ void describe("@verule/adapter-zod", () => {
         cwd: root,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [rule],
         }),
       });

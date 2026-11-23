@@ -17,9 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { drizzleAdapter } from "@verule/adapter-drizzle";
 import { zodAdapter } from "@verule/adapter-zod";
-import {
-  rowProjectionSatisfiesValidatorRule,
-} from "@verule/rules-reference";
+import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";
 import { defineConfig, openSession, runCheck } from "@verule/sdk";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -560,5 +558,4 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
       rmSync(root, { recursive: true, force: true });
     }
   });
-
 });

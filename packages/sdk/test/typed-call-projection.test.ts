@@ -262,6 +262,65 @@ void describe("@verule/sdk typed call projection", () => {
     }
   });
 
+  void it("projects the semantic owner of a resolved declaration", async () => {
+    const root = createMultiFileTempProject({
+      "src/contracts.ts": [
+        "export interface IMenuService { createMenu(id: string): void }",
+        "export namespace Event { export function once(): void {} }",
+        "export abstract class Disposable { protected _register(): void {} }",
+        "",
+      ].join("\n"),
+      "src/widget.ts": [
+        "import { Disposable, Event, type IMenuService } from './contracts.js';",
+        "export class Widget extends Disposable {",
+        "  run(menu: IMenuService): void {",
+        "    menu.createMenu('main');",
+        "    Event.once();",
+        "    this._register();",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    const declarationOwners = new Map<string, string | null>();
+    const rule = defineRule({
+      id: "declaration-owner-projection",
+      run: async (ctx) => {
+        const calls = await ctx.findSyntax({
+          kinds: ["CallExpression"],
+          calleeNames: ["createMenu", "once", "_register"],
+        });
+        const rows = await ctx.resolveDeclarations(
+          calls.map((call) => call.ref),
+          {
+            select: { name: true, containerName: true },
+          },
+        );
+        for (const [index, row] of rows.entries()) {
+          declarationOwners.set(calls[index]!.text, row.containerName);
+        }
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.equal(
+        declarationOwners.get("menu.createMenu('main')"),
+        "IMenuService",
+      );
+      assert.equal(declarationOwners.get("Event.once()"), "Event");
+      assert.equal(declarationOwners.get("this._register()"), "Disposable");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   void it("evaluates overloads, generic instantiation, narrowing, and assignability in a single snapshot", async () => {
     const source = [
       "export function parseInput(value: string): { kind: 'text'; value: string };",

@@ -9,19 +9,19 @@ COPY --from=ghcr.io/pnpm/pnpm:12.21.0 /opt/pnpm /opt/pnpm
 # @end-template-mirror
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bubblewrap \
-        ca-certificates \
-        curl \
-        file \
-        git \
-        iproute2 \
-        jq \
-        openssh-client \
-        procps \
-        python-is-python3 \
-        python3 \
-        ripgrep \
-        unzip \
+    bubblewrap \
+    ca-certificates \
+    curl \
+    file \
+    git \
+    iproute2 \
+    jq \
+    openssh-client \
+    procps \
+    python-is-python3 \
+    python3 \
+    ripgrep \
+    unzip \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system init.defaultBranch main \
     && for bin in pnpm pn pnpx pnx; do ln -s "/opt/pnpm/pnpm" "/usr/local/bin/$bin"; done \
@@ -30,8 +30,7 @@ RUN apt-get update \
     && pnpm config set store-dir /pnpm/store/root --global \
     && su -s /bin/sh node -c 'pnpm config set store-dir /pnpm/store/node --global'
 
-# Pin the standalone Turborepo version so container builds download release assets directly without hitting unauthenticated GitHub API rate limits.
-RUN curl -fsSL https://turborepo.dev/install | sh -s -- --version 2.11.13 --install-dir /usr/local/bin --no-modify-path
+RUN curl -fsSL https://turborepo.dev/install | sh -s -- --install-dir /usr/local/bin --no-modify-path
 
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \

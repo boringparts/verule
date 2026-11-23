@@ -4,3 +4,4 @@ packages:
 catalog:
   "@verule/sdk": "*"
   drizzle-orm: 0.45.3
+  zod: ^4.6.7

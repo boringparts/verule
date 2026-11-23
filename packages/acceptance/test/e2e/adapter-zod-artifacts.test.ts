@@ -1,313 +1,354 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import {
-  existsSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
-import { promisify } from "node:util";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  installArtifactPackages,
   packWorkspaceArtifacts,
-  startArtifactRegistry,
+  runBareVeruleInHost,
+  verifyHostArtifactResolution,
 } from "@verule/acceptance";
+import type {
+  ValidatorInputFieldsFactValue,
+  ValidatorOutputFieldsFactValue,
+} from "@verule/adapter-zod";
+import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
 
-const execFileAsync = promisify(execFile);
-const maxOutputBytes = 16 * 1024 * 1024;
+const adapterPackageName = "@verule/adapter-zod";
 
-void test("packs @verule/adapter-zod with @verule/cli/@verule/sdk/@verule/engine, installs in an isolated project, and runs verule check via public exports", async () => {
-  const bundle = await packWorkspaceArtifacts({
-    additionalPackages: ["@verule/adapter-zod"],
+type CliEnvelope = {
+  readonly kind: string;
+  readonly variant: string;
+  readonly data: CheckReport;
+};
+
+type ZodFactMessage = {
+  readonly input: ValidatorInputFieldsFactValue;
+  readonly output: ValidatorOutputFieldsFactValue;
+};
+
+function resolveExportedPackageRoot(packageName: string): string {
+  const manifestPath = fileURLToPath(
+    import.meta.resolve(`${packageName}/package.json`),
+  );
+  return dirname(realpathSync(manifestPath));
+}
+
+function copyExportedPackage(
+  packageName: string,
+  destination: string,
+  excludedParts: readonly string[] = [],
+): void {
+  const source = resolveExportedPackageRoot(packageName);
+  const excluded = new Set([
+    "dist",
+    "host-root",
+    "node_modules",
+    "test",
+    ...excludedParts,
+  ]);
+  cpSync(source, destination, {
+    recursive: true,
+    filter: (sourcePath) => {
+      const parts = relative(source, sourcePath).split(sep);
+      return !parts.some((part) => excluded.has(part));
+    },
   });
-  const registry = await startArtifactRegistry(bundle.artifacts);
-  const hostDir = mkdtempSync(join(tmpdir(), "verule-zod-packed-host-"));
+}
 
+function findInstalledPackageRoot(entryPath: string): string {
+  let current = dirname(entryPath);
+  while (true) {
+    try {
+      const manifestPath = join(current, "package.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        readonly name?: unknown;
+      };
+      if (manifest.name === adapterPackageName) return current;
+    } catch {
+      // Keep walking until the adapter package manifest is found.
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      throw new Error(`Could not find installed package above ${entryPath}`);
+    }
+    current = parent;
+  }
+}
+
+void test("installs the native Zod adapter and queries real schemas from a static host", async () => {
+  const environmentDir = mkdtempSync(join(tmpdir(), "verule-zod-native-host-"));
+  const hostDir = join(environmentDir, "host");
+  const storeDir = join(environmentDir, "pnpm-store");
+  mkdirSync(join(hostDir, "packages"), { recursive: true });
+  mkdirSync(storeDir);
+
+  const hostRootTemplate = dirname(
+    fileURLToPath(
+      import.meta.resolve("@verule/acceptance-host-app/host-root/package.json"),
+    ),
+  );
+  cpSync(hostRootTemplate, hostDir, { recursive: true });
+  copyExportedPackage(
+    "@verule/acceptance-host-data",
+    join(hostDir, "packages/data"),
+  );
+  copyExportedPackage(
+    "@verule/acceptance-host-app",
+    join(hostDir, "packages/app"),
+    ["zod-overlay"],
+  );
+
+  const appDir = join(hostDir, "packages/app");
+  const overlayDir = join(
+    resolveExportedPackageRoot("@verule/acceptance-host-app"),
+    "zod-overlay",
+  );
+  const appOverlayDir = join(overlayDir, "app");
+  const dataOverlayDir = join(overlayDir, "data");
+  cpSync(join(appOverlayDir, "package.json"), join(appDir, "package.json"));
+  cpSync(join(appOverlayDir, "tsconfig.json"), join(appDir, "tsconfig.json"));
+  cpSync(
+    join(appOverlayDir, "src/zod-fields.ts"),
+    join(appDir, "src/zod-fields.ts"),
+  );
+  cpSync(
+    join(appOverlayDir, "verule.zod.native.config.ts"),
+    join(appDir, "verule.zod.native.config.ts"),
+  );
+  cpSync(
+    join(dataOverlayDir, "package.json"),
+    join(hostDir, "packages/data/package.json"),
+  );
+  cpSync(
+    join(dataOverlayDir, "tsconfig.json"),
+    join(hostDir, "packages/data/tsconfig.json"),
+  );
+  cpSync(
+    join(dataOverlayDir, "src/user-table.ts"),
+    join(hostDir, "packages/data/src/user-table.ts"),
+  );
+  cpSync(
+    join(dataOverlayDir, "src/index.ts"),
+    join(hostDir, "packages/data/src/index.ts"),
+  );
+  cpSync(
+    join(overlayDir, "host-root/tsconfig.json"),
+    join(hostDir, "tsconfig.json"),
+  );
+
+  const env = process.env;
+  const bundle = await packWorkspaceArtifacts({
+    additionalPackages: [adapterPackageName],
+  });
   try {
     const adapterArtifact = bundle.artifacts.find(
-      (artifact) => artifact.name === "@verule/adapter-zod",
+      (artifact) => artifact.name === adapterPackageName,
     );
-    assert.ok(adapterArtifact, "Expected packed @verule/adapter-zod artifact");
-    const manifestExports = adapterArtifact.manifest.exports as
+    const engineArtifact = bundle.artifacts.find(
+      (artifact) => artifact.name === "@verule/engine",
+    );
+    assert.ok(adapterArtifact);
+    assert.ok(engineArtifact?.binarySha256);
+
+    const exports = adapterArtifact.manifest.exports as
       | Record<string, Record<string, string>>
       | undefined;
-    assert.equal(manifestExports?.["."]?.default, "./dist/index.js");
-    assert.equal(manifestExports?.["."]?.types, "./dist/index.d.ts");
-    assert.equal(manifestExports?.["."]?.source, undefined);
-
-    const adapterDeps = adapterArtifact.manifest.dependencies as
-      | Record<string, string>
-      | undefined;
-    assert.equal(adapterDeps?.["@verule/sdk"], adapterArtifact.version);
-    assert.equal(adapterDeps?.["@verule/engine"], undefined);
-
-    writeFileSync(
-      join(hostDir, "package.json"),
-      JSON.stringify(
-        {
-          name: "isolated-zod-consumer",
-          private: true,
-          type: "module",
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, ".npmrc"),
-      `@verule:registry=${registry.url}/\n`,
-      "utf8",
+    assert.equal(exports?.["."]?.default, "./dist/index.js");
+    assert.equal(exports?.["."]?.types, "./dist/index.d.ts");
+    assert.equal(exports?.["."]?.source, undefined);
+    assert.equal(
+      exports?.["./verule-adapter"]?.default,
+      "./dist/verule-adapter.js",
     );
 
-    await execFileAsync(
-      "pnpm",
-      [
-        "add",
-        "--save-dev",
-        "--ignore-scripts",
-        "--prefer-offline",
-        `@verule/cli@${adapterArtifact.version}`,
-        `@verule/sdk@${adapterArtifact.version}`,
-        `@verule/adapter-zod@${adapterArtifact.version}`,
-        "zod",
-      ],
-      {
-        cwd: hostDir,
-        encoding: "utf8",
-        maxBuffer: maxOutputBytes,
-      },
-    );
+    const installation = await installArtifactPackages({
+      checkoutDir: hostDir,
+      packageManager: "pnpm",
+      artifacts: bundle.artifacts,
+      directPackages: ["@verule/sdk", "@verule/cli", adapterPackageName],
+      storeDir,
+      env,
+    });
+    assert.equal(installation.status, "ready", JSON.stringify(installation));
 
-    rmSync(join(hostDir, ".npmrc"), { force: true });
-    await registry.close();
+    const audit = await verifyHostArtifactResolution({
+      checkoutDir: hostDir,
+      artifacts: bundle.artifacts,
+      allowedStorePaths: [storeDir],
+    });
+    assert.equal(audit.engineBinarySha256, engineArtifact.binarySha256);
 
-    // Verify all resolved Verule packages come from the isolated hostDir node_modules
-    const hostRequire = createRequire(join(hostDir, "package.json"));
-    const hostReal = realpathSync(hostDir) + sep;
-    for (const pkgName of [
-      "@verule/cli/package.json",
-      "@verule/sdk",
-      "@verule/adapter-zod",
-    ]) {
-      const resolved = realpathSync(hostRequire.resolve(pkgName));
-      assert.ok(
-        resolved.startsWith(hostReal),
-        `Expected ${pkgName} to resolve inside ${hostReal}, got ${resolved}`,
-      );
-    }
-    const sdkRequire = createRequire(hostRequire.resolve("@verule/sdk"));
-    const resolvedEngine = realpathSync(
-      sdkRequire.resolve("@verule/engine/binary"),
+    const appRequire = createRequire(
+      join(hostDir, "packages/app/package.json"),
     );
-    assert.ok(
-      resolvedEngine.startsWith(hostReal),
-      `Expected @verule/engine/binary to resolve inside ${hostReal}, got ${resolvedEngine}`,
+    const entryPath = realpathSync(
+      appRequire.resolve(`${adapterPackageName}/verule-adapter`),
     );
-
-    mkdirSync(join(hostDir, "src"), { recursive: true });
-    writeFileSync(
-      join(hostDir, "tsconfig.json"),
-      JSON.stringify(
-        {
-          compilerOptions: {
-            strict: true,
-            target: "ES2022",
-            module: "NodeNext",
-            moduleResolution: "NodeNext",
-          },
-          include: ["src/**/*.ts"],
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "src", "schema.ts"),
-      [
-        'import { z } from "zod";',
-        "",
-        'const dynKey = "extra" as string;',
-        "",
-        "export const baseSchema = z.object({",
-        "  id: z.string(),",
-        "  nullableKey: z.string().nullable(),",
-        "});",
-        "",
-        "export const createUserSchema = baseSchema",
-        "  .extend({",
-        '    role: z.string().prefault("member"),',
-        "    bio: z.string().optional(),",
-        "    [dynKey]: z.string(),",
-        "  })",
-        "  .transform((v) => ({ ...v }));",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "src", "handler.ts"),
-      [
-        'import { createUserSchema } from "./schema.js";',
-        "",
-        "export function handleCreateUser(payload: unknown) {",
-        "  return createUserSchema.parse(payload);",
-        "}",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    writeFileSync(
-      join(hostDir, "verule.config.mjs"),
-      [
-        'import { defineConfig, defineRule } from "@verule/sdk";',
-        'import { ValidatorInputFieldsFact, ValidatorOutputFieldsFact, zodAdapter } from "@verule/adapter-zod";',
-        "",
-        "const rulePrimary = defineRule({",
-        '  id: "check-zod-fields",',
-        "  run: async (ctx) => {",
-        '    const inputs = await ctx.facts(ValidatorInputFieldsFact, { condition: { scope: "calls" } });',
-        '    const outputs = await ctx.facts(ValidatorOutputFieldsFact, { condition: { scope: "calls" } });',
-        "    for (const [idx, fact] of inputs.entries()) {",
-        "      const outFact = outputs[idx];",
-        '      if (fact.value.requiredFields.includes("nullableKey") && !fact.value.requiredFields.includes("role") && outFact?.value.presentFields.includes("role")) {',
-        "        const [syn] = await ctx.syntaxOf([fact.subject], { select: { location: true } });",
-        "        if (syn?.location) {",
-        "          ctx.report({",
-        "            at: syn.location,",
-        '            message: `Required=[${fact.value.requiredFields.join(",")}], Output=[${outFact.value.presentFields.join(",")}]`,',
-        "            evidence: fact.evidence,",
-        "          });",
-        "        }",
-        "      }",
-        "    }",
-        "  },",
-        "});",
-        "",
-        "const ruleSecondary = defineRule({",
-        '  id: "reuse-zod-fields",',
-        "  run: async (ctx) => {",
-        '    await ctx.facts(ValidatorInputFieldsFact, { condition: { scope: "calls" } });',
-        "  },",
-        "});",
-        "",
-        "export default defineConfig({",
-        '  tsconfig: "tsconfig.json",',
-        "  adapters: [zodAdapter],",
-        "  rules: [rulePrimary, ruleSecondary],",
-        "});",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-
-    const veruleBin = join(hostDir, "node_modules", ".bin", "verule");
-    assert.equal(existsSync(veruleBin), true, "Missing installed verule bin");
-
-    let stdout = "";
-    let stderr = "";
-    let exitCode = 0;
-    try {
-      const res = await execFileAsync(
-        veruleBin,
-        ["check", "--observe", "detail", "--output", "json"],
-        { cwd: hostDir, encoding: "utf8", maxBuffer: maxOutputBytes },
-      );
-      stdout = res.stdout;
-      stderr = res.stderr;
-    } catch (err: unknown) {
-      const execErr = err as {
-        readonly code?: number;
-        readonly stdout?: string;
-        readonly stderr?: string;
-      };
-      exitCode = execErr.code ?? 1;
-      stdout = execErr.stdout ?? "";
-      stderr = execErr.stderr ?? "";
-    }
-
-    assert.equal(exitCode, 1, `Expected exit 1 (findings), stderr: ${stderr}`);
-    const parsed = JSON.parse(stdout) as {
-      readonly kind: string;
-      readonly variant: string;
-      readonly data: {
-        readonly status: string;
-        readonly diagnostics: readonly {
-          readonly ruleId: string;
-          readonly message: string;
-          readonly evidence: readonly {
-            readonly at?: { readonly file: string };
-          }[];
-        }[];
-        readonly gaps: readonly {
-          readonly kind: string;
-          readonly at?: { readonly file: string };
-        }[];
-        readonly observation: {
-          readonly providers: readonly string[];
-          readonly details: readonly {
-            readonly kind: string;
-            readonly ruleId?: string;
-            readonly provider?: string;
-            readonly cacheStatus?: string;
-            readonly candidateCount?: number;
-          }[];
-        };
+    const packageRoot = findInstalledPackageRoot(entryPath);
+    const packageManifest = JSON.parse(
+      readFileSync(join(packageRoot, "package.json"), "utf8"),
+    ) as {
+      readonly name: string;
+      readonly verule: {
+        readonly native: { readonly "linux-x64": string };
       };
     };
-
-    assert.equal(parsed.kind, "data");
-    assert.equal(parsed.variant, "findings");
-    assert.equal(parsed.data.diagnostics.length, 1);
-    assert.equal(
-      parsed.data.diagnostics[0]!.message,
-      "Required=[id,nullableKey], Output=[id,nullableKey,role]",
+    assert.equal(packageManifest.name, adapterPackageName);
+    const libraryPath = realpathSync(
+      resolve(packageRoot, packageManifest.verule.native["linux-x64"]),
     );
+    assert.ok(packageRoot.startsWith(hostDir));
+    assert.ok(libraryPath.startsWith(hostDir));
+    assert.ok(libraryPath.endsWith("libverule_adapter_zod.so"));
+
+    const result = await runBareVeruleInHost({
+      checkoutDir: hostDir,
+      args: [
+        "check",
+        "--config",
+        "packages/app/verule.zod.native.config.ts",
+        "--output",
+        "json",
+      ],
+      isolated: true,
+      pnpmStoreDir: storeDir,
+      env,
+    });
+    assert.equal(result.status, 1, result.stderr + result.stdout);
+    assert.equal(result.isolation?.controlProbeBlocked, true);
+    assert.notEqual(result.stdout.trim(), "", result.stderr);
+
+    const envelope = JSON.parse(result.stdout) as CliEnvelope;
+    assert.equal(envelope.kind, "data");
+    assert.equal(envelope.variant, "findings");
+    const zodDiagnostics = envelope.data.diagnostics.filter(
+      (diagnostic) => diagnostic.ruleId === "zod-native-facts",
+    );
+    assert.equal(zodDiagnostics.length, 2, JSON.stringify(zodDiagnostics));
+
+    const parseFacts = zodDiagnostics.map((diagnostic) => ({
+      diagnostic,
+      facts: JSON.parse(diagnostic.message) as ZodFactMessage,
+    }));
+    const account = parseFacts.find(
+      ({ facts }) => facts.input.schemaName === "accountSchema",
+    );
+    const user = parseFacts.find(
+      ({ facts }) => facts.input.schemaName === "userSchema",
+    );
+    assert.ok(account, JSON.stringify(parseFacts));
+    assert.ok(user, JSON.stringify(parseFacts));
+
+    assert.equal(account.facts.input.validatorMethod, "safeParse");
+    assert.deepEqual(account.facts.input.requiredFields, [
+      "id",
+      "nullableName",
+    ]);
+    assert.deepEqual(account.facts.input.optionalFields, [
+      "fallback",
+      "nickname",
+      "state",
+    ]);
+    assert.deepEqual(account.facts.input.defaultedFields, [
+      "fallback",
+      "state",
+    ]);
+    assert.equal(account.facts.input.fields.nullableName?.nullable, true);
+    assert.equal(account.facts.input.hasDynamicFields, true);
+    assert.deepEqual(account.facts.output.presentFields, [
+      "fallback",
+      "id",
+      "nullableName",
+      "state",
+    ]);
+    assert.deepEqual(account.facts.output.optionalFields, ["nickname"]);
+    assert.deepEqual(account.facts.output.defaultedFields, [
+      "fallback",
+      "state",
+    ]);
+
+    assert.equal(user.facts.input.validatorMethod, "parse");
+    assert.deepEqual(user.facts.input.requiredFields, [
+      "id",
+      "name",
+      "nickname",
+    ]);
+    assert.deepEqual(user.facts.input.defaultedFields, ["age"]);
+    assert.deepEqual(user.facts.output.presentFields, [
+      "age",
+      "id",
+      "name",
+      "nickname",
+    ]);
+    assert.deepEqual(user.facts.output.defaultedFields, ["age"]);
     assert.ok(
-      parsed.data.diagnostics[0]!.evidence.some(
-        (ev) => ev.at?.file === "src/schema.ts",
+      user.diagnostic.evidence.some(
+        (item) => item.at?.file === "packages/app/src/zod-fields.ts",
       ),
     );
     assert.ok(
-      parsed.data.gaps.some(
-        (g) =>
-          g.kind === "dynamic-schema-field" && g.at?.file === "src/schema.ts",
+      user.facts.input.fields.id?.evidence?.some(
+        (item) => item.at?.file === "packages/data/src/user-table.ts",
       ),
     );
-    assert.ok(parsed.data.observation.providers.includes("zod"));
-    const primaryQuery = parsed.data.observation.details.find(
-      (d) =>
-        d.kind === "query" &&
-        d.ruleId === "check-zod-fields" &&
-        d.provider === "zod",
+    assert.ok(
+      user.facts.input.fields.id?.evidence?.some(
+        (item) => item.at?.file === "packages/app/src/zod-fields.ts",
+      ),
     );
-    const secondaryQuery = parsed.data.observation.details.find(
-      (d) =>
-        d.kind === "query" &&
-        d.ruleId === "reuse-zod-fields" &&
-        d.provider === "zod",
-    );
-    assert.equal(primaryQuery?.cacheStatus, "computed");
-    assert.equal(primaryQuery?.candidateCount, 1);
-    assert.equal(secondaryQuery?.cacheStatus, "reused");
-    assert.equal(secondaryQuery?.candidateCount, 1);
 
-    // Check package.json in isolated host did not list @verule/engine directly
-    const hostManifest = JSON.parse(
-      readFileSync(join(hostDir, "package.json"), "utf8"),
-    ) as { readonly devDependencies: Record<string, string> };
-    assert.equal("@verule/engine" in hostManifest.devDependencies, false);
+    assert.ok(
+      envelope.data.gaps.some(
+        (gap) =>
+          gap.kind === "dynamic-schema-spread" &&
+          gap.at?.file === "packages/app/src/zod-fields.ts",
+      ),
+    );
+    assert.ok(
+      envelope.data.gaps.some(
+        (gap) =>
+          gap.kind === "dynamic-schema-field" &&
+          gap.at?.file === "packages/app/src/zod-fields.ts",
+      ),
+    );
+
+    const hostRequire = createRequire(join(hostDir, "package.json"));
+    const sdkPath = realpathSync(hostRequire.resolve("@verule/sdk"));
+    const sdk: typeof import("@verule/sdk") = await import(
+      pathToFileURL(sdkPath).href
+    );
+    const configPath = join(
+      hostDir,
+      "packages/app/verule.zod.native.config.ts",
+    );
+    const configModule = (await import(pathToFileURL(configPath).href)) as {
+      readonly default: NormalizedVeruleConfig;
+    };
+    assert.deepEqual(configModule.default.adapterPackages, [
+      adapterPackageName,
+    ]);
+    assert.deepEqual(
+      await sdk.runCheck({
+        cwd: hostDir,
+        adapterResolutionRoot: dirname(configPath),
+        config: configModule.default,
+      }),
+      envelope.data,
+    );
   } finally {
-    await registry.close().catch(() => {});
     bundle.dispose();
-    rmSync(hostDir, { recursive: true, force: true });
+    rmSync(environmentDir, { recursive: true, force: true });
   }
 });
