@@ -55,10 +55,6 @@
         "http_proxy",
         "https_proxy",
         "no_proxy",
-        "VERULE_HOST_CACHE_DIR",
-        "VERULE_VSCODE_REPO",
-        "VERULE_VUE_REPO",
-        "VERULE_OPENSTATUS_REPO",
         "XDG_CACHE_HOME"
       ],
       "inputs": [],
