@@ -42,28 +42,6 @@ type CliEnvelope = {
   readonly data: CheckReport;
 };
 
-function findInstalledPackageRoot(entryPath: string): string {
-  let current = dirname(entryPath);
-  while (true) {
-    const manifestPath = join(current, "package.json");
-    try {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        readonly name?: unknown;
-      };
-      if (manifest.name === adapterPackageName) return current;
-    } catch {
-      // Continue walking until the owning package manifest is found.
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error(
-        `Could not find installed ${adapterPackageName} above ${entryPath}`,
-      );
-    }
-    current = parent;
-  }
-}
-
 async function runInstalledSdk(hostDir: string): Promise<{
   readonly report: CheckReport;
   readonly facts: readonly DrizzleProjectionResult[];
@@ -136,14 +114,19 @@ void test("extracts Drizzle projections from the installed native package throug
       hostRequire.resolve(`${adapterPackageName}/verule-adapter`),
     );
     assert.ok(adapterEntry.startsWith(hostReal));
-    const packageRoot = findInstalledPackageRoot(adapterEntry);
+    const nativeDescriptorPath = hostRequire.resolve(
+      `${adapterPackageName}/verule-native`,
+    );
     const packageManifest = JSON.parse(
-      readFileSync(join(packageRoot, "package.json"), "utf8"),
+      readFileSync(nativeDescriptorPath, "utf8"),
     ) as {
-      readonly verule: { readonly native: { readonly "linux-x64": string } };
+      readonly id: string;
+      readonly "linux-x64": string;
     };
+    assert.equal(packageManifest.id, "drizzle");
+    assert.equal(packageManifest["linux-x64"], "./native/linux-x64");
     const libraryPath = realpathSync(
-      join(packageRoot, packageManifest.verule.native["linux-x64"]),
+      hostRequire.resolve(`${adapterPackageName}/native/linux-x64`),
     );
     assert.ok(libraryPath.startsWith(hostReal));
     assert.ok(libraryPath.endsWith("libverule_adapter_drizzle.so"));

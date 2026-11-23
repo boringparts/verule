@@ -16,7 +16,9 @@
       "source": "./src/native-adapter.ts",
       "types": "./dist/native-adapter.d.ts",
       "default": "./dist/native-adapter.js"
-    }
+    },
+    "./verule-native": "./dist/verule-native.json",
+    "./native/linux-x64": "./dist/native/libverule_adapter_drizzle.so"
   },
   "publishConfig": {
     "exports": {
@@ -27,7 +29,9 @@
       "./verule-adapter": {
         "types": "./dist/native-adapter.d.ts",
         "default": "./dist/native-adapter.js"
-      }
+      },
+      "./verule-native": "./dist/verule-native.json",
+      "./native/linux-x64": "./dist/native/libverule_adapter_drizzle.so"
     }
   },
   "scripts": {
@@ -36,7 +40,7 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules . && cargo clippy --locked --manifest-path native/Cargo.toml --all-targets -- -D warnings",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false && cargo build --locked --release --manifest-path native/Cargo.toml && mkdir -p dist/native && cp native/target/release/libverule_adapter_drizzle.so dist/native/libverule_adapter_drizzle.so"
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false && cargo build --locked --release --manifest-path native/Cargo.toml && mkdir -p dist/native && cp native/target/release/libverule_adapter_drizzle.so dist/native/libverule_adapter_drizzle.so && cp native/verule-native.json dist/verule-native.json"
   },
   "dependencies": {
     "@verule/sdk": "workspace:*"
@@ -51,10 +55,5 @@
   },
   "engines": {
     "node": "^26.13.1"
-  },
-  "verule": {
-    "native": {
-      "linux-x64": "./dist/native/libverule_adapter_drizzle.so"
-    }
   }
 }

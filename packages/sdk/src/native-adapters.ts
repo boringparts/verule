@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { validateAdapters, type LibraryAdapter } from "./facts.ts";
@@ -8,6 +8,7 @@ import { VeruleExecutionError } from "./types.ts";
 
 export type NativeAdapterPackage = {
   readonly packageName: string;
+  readonly adapterId: string;
   readonly libraryPath: string;
 };
 
@@ -16,11 +17,9 @@ export type ResolvedNativeAdapterPackages = {
   readonly nativeAdapters: readonly NativeAdapterPackage[];
 };
 
-type PackageMetadata = {
-  readonly name?: unknown;
-  readonly verule?: {
-    readonly native?: Readonly<Record<string, unknown>>;
-  };
+type NativeAdapterDescriptor = {
+  readonly id?: unknown;
+  readonly "linux-x64"?: unknown;
 };
 
 function invalidPackage(
@@ -33,34 +32,57 @@ function invalidPackage(
   );
 }
 
-function findPackageRoot(
-  entryPath: string,
+function readNativeAdapterDescriptor(
   packageName: string,
-): { readonly root: string; readonly metadata: PackageMetadata } {
-  let current = dirname(entryPath);
-  while (true) {
-    try {
-      const metadata = JSON.parse(
-        readFileSync(resolve(current, "package.json"), "utf8"),
-      ) as PackageMetadata;
-      if (metadata.name === packageName) {
-        return {
-          root: realpathSync.native(current),
-          metadata,
-        };
-      }
-    } catch {
-      // Continue walking until the owning package manifest is found.
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      throw invalidPackage(
-        packageName,
-        `could not find its installed package.json above ${entryPath}`,
-      );
-    }
-    current = parent;
+  requireFromConfig: NodeJS.Require,
+): NativeAdapterDescriptor {
+  let descriptorPath: string;
+  try {
+    descriptorPath = requireFromConfig.resolve(`${packageName}/verule-native`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw invalidPackage(
+      packageName,
+      `could not resolve its public "./verule-native" export: ${detail}`,
+    );
   }
+
+  let descriptor: NativeAdapterDescriptor;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(descriptorPath, "utf8"));
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new TypeError("native adapter descriptor must be an object");
+    }
+    descriptor = parsed as NativeAdapterDescriptor;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw invalidPackage(
+      packageName,
+      `could not read its native adapter descriptor: ${detail}`,
+    );
+  }
+
+  if (typeof descriptor.id !== "string" || descriptor.id.trim() === "") {
+    throw invalidPackage(
+      packageName,
+      'its native adapter descriptor must define a non-empty "id"',
+    );
+  }
+  if (
+    typeof descriptor["linux-x64"] !== "string" ||
+    !descriptor["linux-x64"].startsWith("./") ||
+    descriptor["linux-x64"].includes("..")
+  ) {
+    throw invalidPackage(
+      packageName,
+      'its native adapter descriptor must define "linux-x64" as a package export path',
+    );
+  }
+  return descriptor;
 }
 
 function validatePackageAdapter(
@@ -108,8 +130,7 @@ function isLibraryAdapter(value: unknown): value is LibraryAdapter {
 }
 
 /**
- * Resolves the package's public `./verule-adapter` export from the config directory,
- * imports that ESM bridge, and checks that its installed package ships a Linux x64 library.
+ * Resolves the package's public bridge, native descriptor, and Linux x64 resource exports.
  */
 export async function resolveNativeAdapterPackages(
   packageNames: readonly string[],
@@ -141,25 +162,6 @@ export async function resolveNativeAdapterPackages(
       throw invalidPackage(packageName, detail);
     }
 
-    const { root, metadata } = findPackageRoot(entryPath, packageName);
-    const relativeLibraryPath = metadata.verule?.native?.["linux-x64"];
-    if (
-      typeof relativeLibraryPath !== "string" ||
-      relativeLibraryPath.trim() === ""
-    ) {
-      throw invalidPackage(
-        packageName,
-        'package.json must define "verule.native.linux-x64"',
-      );
-    }
-    const libraryPath = resolve(root, relativeLibraryPath);
-    if (!existsSync(libraryPath)) {
-      throw invalidPackage(
-        packageName,
-        `native library is missing at ${libraryPath}`,
-      );
-    }
-
     let imported: unknown;
     try {
       imported = await import(pathToFileURL(entryPath).href);
@@ -178,6 +180,31 @@ export async function resolveNativeAdapterPackages(
       imported as Record<string, unknown>,
       packageName,
     );
+    const descriptor = readNativeAdapterDescriptor(
+      packageName,
+      requireFromConfig,
+    );
+    const adapterId = descriptor.id as string;
+    if (adapter.id !== adapterId) {
+      throw invalidPackage(
+        packageName,
+        `native descriptor id "${adapterId}" does not match JavaScript bridge adapter id "${adapter.id}"`,
+      );
+    }
+
+    let libraryPath: string;
+    try {
+      libraryPath = requireFromConfig.resolve(
+        `${packageName}/${(descriptor["linux-x64"] as string).slice(2)}`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw invalidPackage(
+        packageName,
+        `could not resolve its declared Linux x64 resource through package exports: ${detail}`,
+      );
+    }
+
     const existingPackage = packageOwnersByAdapterId.get(adapter.id);
     if (existingPackage !== undefined) {
       throw invalidPackage(
@@ -187,7 +214,7 @@ export async function resolveNativeAdapterPackages(
     }
     packageOwnersByAdapterId.set(adapter.id, packageName);
     adapters.push(adapter);
-    nativeAdapters.push({ packageName, libraryPath });
+    nativeAdapters.push({ packageName, adapterId, libraryPath });
   }
 
   return { adapters, nativeAdapters };
