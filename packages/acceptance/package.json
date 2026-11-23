@@ -23,6 +23,13 @@
   "dependencies": {
     "@verule/acceptance-host-app": "workspace:*",
     "@verule/acceptance-host-data": "workspace:*",
+    "@verule/acceptance-host-drizzle-app": "workspace:*",
+    "@verule/acceptance-host-drizzle-data": "workspace:*",
+    "@verule/acceptance-host-drizzle-zod-app": "workspace:*",
+    "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
+    "@verule/acceptance-host-provider-session-data": "workspace:*",
+    "@verule/acceptance-host-zod-app": "workspace:*",
+    "@verule/acceptance-host-zod-data": "workspace:*",
     "@verule/adapter-drizzle": "workspace:*",
     "@verule/adapter-zod": "workspace:*",
     "@verule/cli": "workspace:*",

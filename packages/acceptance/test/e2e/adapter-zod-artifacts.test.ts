@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,9 +8,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -25,6 +24,8 @@ import type {
 } from "@verule/adapter-zod";
 import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
 
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
+
 const adapterPackageName = "@verule/adapter-zod";
 
 type CliEnvelope = {
@@ -37,37 +38,6 @@ type ZodFactMessage = {
   readonly input: ValidatorInputFieldsFactValue;
   readonly output: ValidatorOutputFieldsFactValue;
 };
-
-function resolveExportedPackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(`${packageName}/package.json`),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(
-  packageName: string,
-  destination: string,
-  excludedParts: readonly string[] = [],
-): void {
-  const source = resolveExportedPackageRoot(packageName);
-  const excluded = new Set([
-    "dist",
-    "host-root",
-    "node_modules",
-    "test",
-    "drizzle-zod-overlay",
-    "provider-session-overlay",
-    ...excludedParts,
-  ]);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) => excluded.has(part));
-    },
-  });
-}
 
 function findInstalledPackageRoot(entryPath: string): string {
   let current = dirname(entryPath);
@@ -93,62 +63,8 @@ void test("installs the native Zod adapter and queries real schemas from a stati
   const environmentDir = mkdtempSync(join(tmpdir(), "verule-zod-native-host-"));
   const hostDir = join(environmentDir, "host");
   const storeDir = join(environmentDir, "pnpm-store");
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-
-  const hostRootTemplate = dirname(
-    fileURLToPath(
-      import.meta.resolve("@verule/acceptance-host-app/host-root/package.json"),
-    ),
-  );
-  cpSync(hostRootTemplate, hostDir, { recursive: true });
-  copyExportedPackage(
-    "@verule/acceptance-host-data",
-    join(hostDir, "packages/data"),
-  );
-  copyExportedPackage(
-    "@verule/acceptance-host-app",
-    join(hostDir, "packages/app"),
-    ["zod-overlay"],
-  );
-
-  const appDir = join(hostDir, "packages/app");
-  const overlayDir = join(
-    resolveExportedPackageRoot("@verule/acceptance-host-app"),
-    "zod-overlay",
-  );
-  const appOverlayDir = join(overlayDir, "app");
-  const dataOverlayDir = join(overlayDir, "data");
-  cpSync(join(appOverlayDir, "package.json"), join(appDir, "package.json"));
-  cpSync(join(appOverlayDir, "tsconfig.json"), join(appDir, "tsconfig.json"));
-  cpSync(
-    join(appOverlayDir, "src/zod-fields.ts"),
-    join(appDir, "src/zod-fields.ts"),
-  );
-  cpSync(
-    join(appOverlayDir, "verule.zod.native.config.ts"),
-    join(appDir, "verule.zod.native.config.ts"),
-  );
-  cpSync(
-    join(dataOverlayDir, "package.json"),
-    join(hostDir, "packages/data/package.json"),
-  );
-  cpSync(
-    join(dataOverlayDir, "tsconfig.json"),
-    join(hostDir, "packages/data/tsconfig.json"),
-  );
-  cpSync(
-    join(dataOverlayDir, "src/user-table.ts"),
-    join(hostDir, "packages/data/src/user-table.ts"),
-  );
-  cpSync(
-    join(dataOverlayDir, "src/index.ts"),
-    join(hostDir, "packages/data/src/index.ts"),
-  );
-  cpSync(
-    join(overlayDir, "host-root/tsconfig.json"),
-    join(hostDir, "tsconfig.json"),
-  );
+  copyAcceptanceHost(hostDir, "zod");
 
   const env = process.env;
   const bundle = await packWorkspaceArtifacts({

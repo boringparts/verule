@@ -19,7 +19,7 @@
       "tags": ["work:preparation"]
     },
     "format:check": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -32,7 +32,7 @@
     },
     "lint": {
       "dependsOn": ["^lint"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -59,14 +59,14 @@
         "no_proxy",
         "XDG_CACHE_HOME"
       ],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "cache": false,
       "tags": ["quality:heavy"]
     },
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     }

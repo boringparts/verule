@@ -1,0 +1,29 @@
+{
+  "type": "verule-acceptance-host-materials",
+  "version": 1,
+  "files": [
+    "host-root/fixture.inputs.json",
+    "host-root/pnpm-workspace.yaml",
+    "host-root/tsconfig.json",
+    "package.json",
+    "provider-session-overlay/app/host-package.json",
+    "provider-session-overlay/app/host-tsconfig.json",
+    "provider-session-overlay/app/src/provider-session-rules.ts",
+    "provider-session-overlay/app/src/provider-session.ts",
+    "provider-session-overlay/app/verule.provider-session.conflict-forward.config.ts",
+    "provider-session-overlay/app/verule.provider-session.conflict-reverse.config.ts",
+    "provider-session-overlay/app/verule.provider-session.filtered.config.ts",
+    "provider-session-overlay/app/verule.provider-session.native.config.ts",
+    "provider-session-overlay/app/verule.provider-session.replacement.config.ts",
+    "provider-session-overlay/app/verule.provider-session.unqueried.config.ts",
+    "provider-session-overlay/host-root/pnpm-workspace.yaml",
+    "provider-session-overlay/host-root/tsconfig.json",
+    "src/cache.ts",
+    "src/review.ts",
+    "src/rule.ts",
+    "tsconfig.json",
+    "verule.config.ts",
+    "verule.missing-adapter.config.ts",
+    "verule.native.config.ts"
+  ]
+}

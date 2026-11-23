@@ -1,4 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "include": ["scenarios/multiple-sources.ts", "../data/src/**/*.ts"]
-}

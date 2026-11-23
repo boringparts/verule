@@ -10,8 +10,13 @@
       "default": "./src/review.ts"
     },
     "./package.json": "./package.json",
-    "./host-root/package.json": "./host-root/package.json",
-    "./host-root/*": "./host-root/*"
+    "./rule": {
+      "source": "./src/rule.ts",
+      "types": "./src/rule.ts",
+      "default": "./src/rule.ts"
+    },
+    "./host-materials": "./host-materials.json",
+    "./host-materials/*": "./*"
   },
   "scripts": {
     "format:check": "oxfmt --list-different .",

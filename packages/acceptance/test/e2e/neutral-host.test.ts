@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,9 +9,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -23,42 +22,13 @@ import {
 import { INLINE_IGNORE_RULE_ID } from "@verule/sdk";
 import type { CheckReport, VeruleConfig } from "@verule/sdk";
 
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
+
 type CliEnvelope = {
   readonly kind: string;
   readonly variant: string;
   readonly data: CheckReport;
 };
-
-function resolveExportedPackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(`${packageName}/package.json`),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(
-  packageName: string,
-  destination: string,
-  excludedFiles: readonly string[] = [],
-): void {
-  const source = resolveExportedPackageRoot(packageName);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) =>
-        [
-          "dist",
-          "host-root",
-          "node_modules",
-          "provider-session-overlay",
-          "test",
-          ...excludedFiles,
-        ].includes(part),
-      );
-    },
-  });
-}
 
 function findSourceTarget(source: string, token: string): string {
   const offset = source.indexOf(token);
@@ -91,21 +61,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
   const storeDir = join(environmentDir, "pnpm-store");
   mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-
-  const hostRootTemplate = dirname(
-    fileURLToPath(
-      import.meta.resolve("@verule/acceptance-host-app/host-root/package.json"),
-    ),
-  );
-  cpSync(hostRootTemplate, hostDir, { recursive: true });
-  copyExportedPackage(
-    "@verule/acceptance-host-data",
-    join(hostDir, "packages/data"),
-  );
-  copyExportedPackage(
-    "@verule/acceptance-host-app",
-    join(hostDir, "packages/app"),
-  );
+  copyAcceptanceHost(hostDir);
 
   const env = process.env;
   const bundle = await packWorkspaceArtifacts();

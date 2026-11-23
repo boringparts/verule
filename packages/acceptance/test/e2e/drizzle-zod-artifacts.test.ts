@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,9 +11,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   installArtifactPackages,
@@ -24,6 +23,8 @@ import {
 } from "@verule/acceptance";
 import type { PackedArtifact } from "@verule/acceptance";
 import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
+
+import { copyAcceptanceHost } from "./support/host-fixtures.ts";
 
 const adapterPackageNames = [
   "@verule/adapter-drizzle",
@@ -48,67 +49,16 @@ type HostConfigModule = {
   readonly default: NormalizedVeruleConfig;
 };
 
-function resolveExportedPackageRoot(packageName: string): string {
-  const manifestPath = fileURLToPath(
-    import.meta.resolve(packageName + "/package.json"),
-  );
-  return dirname(realpathSync(manifestPath));
-}
-
-function copyExportedPackage(
-  packageName: string,
-  destination: string,
-  excludedParts: readonly string[] = [],
-): void {
-  const source = resolveExportedPackageRoot(packageName);
-  const excluded = new Set([
-    "dist",
-    "host-root",
-    "node_modules",
-    "test",
-    "drizzle-overlay",
-    "zod-overlay",
-    "drizzle-zod-overlay",
-    "provider-session-overlay",
-    ...excludedParts,
-  ]);
-  cpSync(source, destination, {
-    recursive: true,
-    filter: (sourcePath) => {
-      const parts = relative(source, sourcePath).split(sep);
-      return !parts.some((part) => excluded.has(part));
-    },
-  });
-}
-
 function createArtifactHost(environmentDir: string): {
   readonly hostDir: string;
   readonly appDir: string;
   readonly storeDir: string;
 } {
   const hostDir = join(environmentDir, "host");
-  const appRoot = resolveExportedPackageRoot("@verule/acceptance-host-app");
-  const overlayDir = join(appRoot, "drizzle-zod-overlay");
-  const appDir = join(hostDir, "packages/app");
-  const dataDir = join(hostDir, "packages/data");
   const storeDir = join(environmentDir, "pnpm-store");
 
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
   mkdirSync(storeDir);
-  cpSync(join(appRoot, "host-root"), hostDir, { recursive: true });
-  copyExportedPackage("@verule/acceptance-host-app", appDir);
-  copyExportedPackage("@verule/acceptance-host-data", dataDir);
-
-  cpSync(
-    join(overlayDir, "host-root/pnpm-workspace.yaml"),
-    join(hostDir, "pnpm-workspace.yaml"),
-  );
-  cpSync(
-    join(overlayDir, "host-root/tsconfig.json"),
-    join(hostDir, "tsconfig.json"),
-  );
-  cpSync(join(overlayDir, "app"), appDir, { recursive: true });
-  cpSync(join(overlayDir, "data"), dataDir, { recursive: true });
+  const { appDir } = copyAcceptanceHost(hostDir, "drizzle-zod");
 
   return { hostDir, appDir, storeDir };
 }
@@ -155,10 +105,18 @@ async function runCliCheck(
   hostDir: string,
   storeDir: string,
   configPath: string,
+  observe = false,
 ): Promise<{ readonly report: CheckReport; readonly status: number }> {
   const result = await runBareVeruleInHost({
     checkoutDir: hostDir,
-    args: ["check", "--config", configPath, "--output", "json"],
+    args: [
+      "check",
+      "--config",
+      configPath,
+      "--output",
+      "json",
+      ...(observe ? ["--observe", "summary"] : []),
+    ],
     isolated: true,
     pnpmStoreDir: storeDir,
   });
@@ -319,13 +277,25 @@ void test("loads both installed native adapters from the neutral static host and
     const mainConfig = await loadConfig(mainConfigAbsPath);
     assert.deepEqual(mainConfig.adapterPackages, adapterPackageNames);
 
-    const coldInitial = await runCliCheck(hostDir, storeDir, mainConfigPath);
+    const coldInitial = await runCliCheck(
+      hostDir,
+      storeDir,
+      mainConfigPath,
+      true,
+    );
     assert.equal(
       coldInitial.status,
       0,
       JSON.stringify(coldInitial.report, null, 2),
     );
     assert.equal(coldInitial.report.diagnostics.length, 0);
+    for (const providerId of ["drizzle", "zod"] as const) {
+      assert.ok(
+        (coldInitial.report.observation?.engineExtractions[providerId]
+          ?.extractions ?? 0) > 0,
+        `Expected an observed extraction from the ${providerId} provider.`,
+      );
+    }
     const sdkInitial = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
