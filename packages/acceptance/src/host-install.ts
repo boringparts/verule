@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PackedArtifact } from "./artifacts.ts";
@@ -100,7 +107,13 @@ export async function installArtifactPackages(
   const hadNpmrc = existsSync(npmrcPath);
   const previousNpmrc = hadNpmrc ? readFileSync(npmrcPath, "utf8") : "";
   const registry = await startArtifactRegistry(options.artifacts);
+  let isolatedCacheHome: string | undefined;
   try {
+    if (options.packageManager === "pnpm") {
+      // The loopback port can be reused, making pnpm's URL-keyed metadata stale.
+      isolatedCacheHome = mkdtempSync(join(tmpdir(), "verule-pnpm-cache-"));
+    }
+
     const scopeLines = registry.scopes.map(
       (scope) => `${scope}:registry=${registry.url}/`,
     );
@@ -136,11 +149,14 @@ export async function installArtifactPackages(
             ...specs,
           ];
     const [command, ...args] = commandArgs;
+    const env = options.env ?? process.env;
     const commandResult = await runAsyncCommand(
       command!,
       args,
       options.checkoutDir,
-      options.env ?? process.env,
+      isolatedCacheHome === undefined
+        ? env
+        : { ...env, XDG_CACHE_HOME: isolatedCacheHome },
     );
     if (commandResult.status !== 0) {
       return {
@@ -158,6 +174,12 @@ export async function installArtifactPackages(
     } else {
       rmSync(npmrcPath, { force: true });
     }
-    await registry.close();
+    try {
+      await registry.close();
+    } finally {
+      if (isolatedCacheHome !== undefined) {
+        rmSync(isolatedCacheHome, { recursive: true, force: true });
+      }
+    }
   }
 }

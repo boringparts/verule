@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempDisposableSync,
   readFileSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -20,7 +21,10 @@ import {
   verifyHostArtifactResolution,
 } from "../../src/index.ts";
 
-function createFakeVeruleTarballs(dir: string): {
+function createFakeVeruleTarballs(
+  dir: string,
+  engineVersion = "0.0.0-test",
+): {
   readonly artifacts: readonly PackedArtifact[];
   readonly binarySha256: string;
 } {
@@ -63,8 +67,7 @@ function createFakeVeruleTarballs(dir: string): {
     };
   }
 
-  const engineScript =
-    "#!/usr/bin/env node\nif (process.argv.includes('--version')) { console.log('0.0.0-test'); process.exit(0); }\nprocess.exit(2);\n";
+  const engineScript = `#!/usr/bin/env node\nif (process.argv.includes('--version')) { console.log(${JSON.stringify(engineVersion)}); process.exit(0); }\nprocess.exit(2);\n`;
   const binarySha256 = createHash("sha256").update(engineScript).digest("hex");
   const executableName =
     process.platform === "win32" ? "verule-engine.exe" : "verule-engine";
@@ -218,4 +221,115 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
       }),
     /development repository/iu,
   );
+});
+
+void test("isolates pnpm metadata for repeated same-version artifact batches", async () => {
+  using fixture = mkdtempDisposableSync(
+    join(tmpdir(), "verule-artifact-batches-"),
+  );
+  const firstBundleDir = join(fixture.path, "first-bundle");
+  const secondBundleDir = join(fixture.path, "second-bundle");
+  mkdirSync(firstBundleDir);
+  mkdirSync(secondBundleDir);
+  const firstBatch = createFakeVeruleTarballs(firstBundleDir, "0.0.0-test-a");
+  const secondBatch = createFakeVeruleTarballs(secondBundleDir, "0.0.0-test-b");
+  assert.notEqual(
+    firstBatch.artifacts.find((artifact) => artifact.name === "@verule/engine")
+      ?.sha256,
+    secondBatch.artifacts.find((artifact) => artifact.name === "@verule/engine")
+      ?.sha256,
+  );
+
+  const pnpmShimDir = join(fixture.path, "pnpm-shim");
+  mkdirSync(pnpmShimDir);
+  const pnpmExecutable = execFileSync("which", ["pnpm"], {
+    encoding: "utf8",
+  }).trim();
+  const cacheRecordPath = join(fixture.path, "cache-homes.txt");
+  const pnpmShimPath = join(pnpmShimDir, "pnpm");
+  writeFileSync(
+    pnpmShimPath,
+    `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const recordPath = process.env.PNPM_CACHE_RECORD;
+const executablePath = process.env.PNPM_REAL_PATH;
+if (recordPath === undefined || executablePath === undefined) {
+  throw new Error("Missing pnpm shim configuration");
+}
+appendFileSync(
+  recordPath,
+  (process.env.XDG_CACHE_HOME ?? "") + String.fromCharCode(10),
+);
+const result = spawnSync(executablePath, process.argv.slice(2), {
+  env: process.env,
+  stdio: "inherit",
+});
+process.exit(result.status ?? 1);
+`,
+  );
+  chmodSync(pnpmShimPath, 0o755);
+
+  const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+  const callerCacheHome = join(fixture.path, "caller-cache");
+  mkdirSync(callerCacheHome);
+  const installEnv = {
+    ...process.env,
+    PATH: `${pnpmShimDir}${delimiter}${process.env.PATH ?? ""}`,
+    XDG_CACHE_HOME: callerCacheHome,
+    PNPM_CACHE_RECORD: cacheRecordPath,
+    PNPM_REAL_PATH: pnpmExecutable,
+  };
+
+  const firstHost = join(fixture.path, "first-host");
+  const secondHost = join(fixture.path, "second-host");
+  const firstStore = join(fixture.path, "first-store");
+  const secondStore = join(fixture.path, "second-store");
+  for (const dir of [firstHost, secondHost, firstStore, secondStore]) {
+    mkdirSync(dir);
+  }
+  for (const host of [firstHost, secondHost]) {
+    writeFileSync(
+      join(host, "package.json"),
+      '{"name":"artifact-batch-host","private":true}\n',
+    );
+  }
+
+  const firstInstall = await installArtifactPackages({
+    checkoutDir: firstHost,
+    packageManager: "pnpm",
+    artifacts: firstBatch.artifacts,
+    storeDir: firstStore,
+    env: installEnv,
+  });
+  assert.equal(firstInstall.status, "ready", JSON.stringify(firstInstall));
+  const secondInstall = await installArtifactPackages({
+    checkoutDir: secondHost,
+    packageManager: "pnpm",
+    artifacts: secondBatch.artifacts,
+    storeDir: secondStore,
+    env: installEnv,
+  });
+  assert.equal(secondInstall.status, "ready", JSON.stringify(secondInstall));
+
+  const firstRun = await runBareVeruleInHost({
+    checkoutDir: firstHost,
+    args: [],
+  });
+  const secondRun = await runBareVeruleInHost({
+    checkoutDir: secondHost,
+    args: [],
+  });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  assert.equal(firstRun.stdout, "verule 0.0.0 (engine 0.0.0-test-a)\n");
+  assert.equal(secondRun.status, 0, secondRun.stderr);
+  assert.equal(secondRun.stdout, "verule 0.0.0 (engine 0.0.0-test-b)\n");
+
+  const cacheHomes = readFileSync(cacheRecordPath, "utf8").trim().split("\n");
+  assert.equal(cacheHomes.length, 2);
+  assert.notEqual(cacheHomes[0], cacheHomes[1]);
+  assert.ok(cacheHomes.every((path) => path !== callerCacheHome));
+  assert.ok(cacheHomes.every((path) => !existsSync(path)));
+  assert.equal(process.env.XDG_CACHE_HOME, originalXdgCacheHome);
 });
