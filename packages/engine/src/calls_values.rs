@@ -763,18 +763,27 @@ pub fn get_or_build_call_graph(
     project_id: &str,
     program: &'static Program,
     checker: &mut CheckerHandle,
+    lookup_files: Option<&[String]>,
 ) -> Arc<ProjectCallGraph> {
-    if let Some(cached) = snapshot.call_graph_cache.get(project_id) {
+    let cache_key = scoped_project_cache_key(project_id, lookup_files);
+    if let Some(cached) = snapshot.call_graph_cache.get(&cache_key) {
         return Arc::clone(cached);
     }
 
     let cwd = snapshot.cwd.clone();
+    let lookup_file_set =
+        lookup_files.map(|files| files.iter().map(String::as_str).collect::<FxHashSet<_>>());
     let mut source_files: Vec<(String, P<SourceFile>)> = program
         .get_source_files()
         .iter()
         .copied()
         .filter(|&sf| is_project_source_file(program, sf))
         .map(|sf| (relative_to_cwd(&cwd, sf.file_name()), sf))
+        .filter(|(file, _)| {
+            lookup_file_set
+                .as_ref()
+                .is_none_or(|lookup_files| lookup_files.contains(file.as_str()))
+        })
         .collect();
     source_files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -812,8 +821,16 @@ pub fn get_or_build_call_graph(
     });
     snapshot
         .call_graph_cache
-        .insert(project_id.to_string(), Arc::clone(&graph));
+        .insert(cache_key, Arc::clone(&graph));
     graph
+}
+
+pub fn scoped_project_cache_key(project_id: &str, lookup_files: Option<&[String]>) -> String {
+    let Some(files) = lookup_files else {
+        return project_id.to_string();
+    };
+    let files_key = serde_json::to_string(files).expect("lookup file paths are serializable");
+    format!("{project_id}\0{files_key}")
 }
 
 fn collect_call_sites_in_node(
@@ -850,6 +867,7 @@ pub fn run_callers_of(
     program: &'static Program,
     checker: &mut CheckerHandle,
     targets: &[String],
+    lookup_files: Option<&[String]>,
 ) -> Result<Vec<DeclarationCallersRow>, crate::serve::RpcErr> {
     let mut decl_inputs = Vec::with_capacity(targets.len());
     for handle_id in targets {
@@ -866,7 +884,7 @@ pub fn run_callers_of(
         decl_inputs.push((handle_id.clone(), node, canonical_sym));
     }
 
-    let graph = get_or_build_call_graph(snapshot, project_id, program, checker);
+    let graph = get_or_build_call_graph(snapshot, project_id, program, checker, lookup_files);
     let mut rows = Vec::with_capacity(decl_inputs.len());
 
     for (decl_id, decl_node, sym_opt) in decl_inputs {
@@ -1444,10 +1462,13 @@ fn make_step(
 }
 
 struct PropagationRunner<'a> {
-    cwd: &'a str,
+    snapshot: &'a mut crate::serve::SnapshotState,
+    project_id: &'a str,
+    cwd: String,
     program: &'static Program,
     checker: &'a mut CheckerHandle,
-    call_graph: Arc<ProjectCallGraph>,
+    lookup_files: Option<Vec<String>>,
+    call_graph: Option<Arc<ProjectCallGraph>>,
     package_impl_cache: PackageImplCache,
     all_gaps: Vec<GapItem>,
     target_endpoints: Vec<(String, EndpointSpec)>,
@@ -1457,25 +1478,45 @@ struct PropagationRunner<'a> {
 
 impl<'a> PropagationRunner<'a> {
     fn new(
-        cwd: &'a str,
+        snapshot: &'a mut crate::serve::SnapshotState,
+        project_id: &'a str,
         program: &'static Program,
         checker: &'a mut CheckerHandle,
-        call_graph: Arc<ProjectCallGraph>,
+        lookup_files: Option<&[String]>,
         package_impl_cache: PackageImplCache,
         target_endpoints: Vec<(String, EndpointSpec)>,
     ) -> Self {
         let n = target_endpoints.len();
+        let cwd = snapshot.cwd.clone();
         Self {
+            snapshot,
+            project_id,
             cwd,
             program,
             checker,
-            call_graph,
+            lookup_files: lookup_files.map(<[String]>::to_vec),
+            call_graph: None,
             package_impl_cache,
             all_gaps: Vec::new(),
             target_endpoints,
             found_paths: (0..n).map(|_| Vec::new()).collect(),
             target_gaps: vec![BTreeSet::new(); n],
         }
+    }
+
+    fn call_graph(&mut self) -> Arc<ProjectCallGraph> {
+        if let Some(graph) = &self.call_graph {
+            return Arc::clone(graph);
+        }
+        let graph = get_or_build_call_graph(
+            self.snapshot,
+            self.project_id,
+            self.program,
+            self.checker,
+            self.lookup_files.as_deref(),
+        );
+        self.call_graph = Some(Arc::clone(&graph));
+        graph
     }
 
     fn record_gap(&mut self, gap: GapItem) -> usize {
@@ -1525,7 +1566,7 @@ impl<'a> PropagationRunner<'a> {
         mut steps: Vec<ValuePropagationStepPayload>,
         gap_indices: BTreeSet<usize>,
     ) {
-        if let Some(step) = make_step(self.cwd, kind, description, from_node, to_node) {
+        if let Some(step) = make_step(&self.cwd, kind, description, from_node, to_node) {
             steps.push(step);
         }
         let is_gap_tainted = !gap_indices.is_empty();
@@ -1565,7 +1606,7 @@ impl<'a> PropagationRunner<'a> {
                         "Origin value starts here".to_string(),
                         Some(first.from_location.clone()),
                     ));
-                } else if let Some(loc) = node_location_rel(self.cwd, item.key.node) {
+                } else if let Some(loc) = node_location_rel(&self.cwd, item.key.node) {
                     evidence.push(EvidenceItem::simple(
                         "source",
                         "Origin value matches target directly".to_string(),
@@ -1965,7 +2006,7 @@ impl<'a> PropagationRunner<'a> {
                                 item.gap_indices.clone(),
                             );
                         }
-                    } else if let Some(loc) = node_location_rel(self.cwd, parent) {
+                    } else if let Some(loc) = node_location_rel(&self.cwd, parent) {
                         let gap_idx = self.record_gap(GapItem {
                             kind: "dynamic-property-access",
                             message: "Computed element access prevents static property tracking."
@@ -2218,22 +2259,26 @@ impl<'a> PropagationRunner<'a> {
         }
 
         let fn_sym = canonical_symbol_for_node(self.checker, fn_node);
+        let graph = self.call_graph();
         let mut call_indices = BTreeSet::new();
         if let Some(sym) = fn_sym
-            && let Some(indices) = self.call_graph.by_symbol.get(&sym)
+            && let Some(indices) = graph.by_symbol.get(&sym)
         {
             call_indices.extend(indices.iter().copied());
         }
-        if let Some(indices) = self.call_graph.by_decl.get(&fn_node) {
+        if let Some(indices) = graph.by_decl.get(&fn_node) {
             call_indices.extend(indices.iter().copied());
         }
-        for idx in call_indices {
-            let site = &self.call_graph.sites[idx];
+        let call_nodes = call_indices
+            .into_iter()
+            .map(|idx| graph.sites[idx].call_node)
+            .collect::<Vec<_>>();
+        for call_node in call_nodes {
             self.enqueue_step(
                 queue,
                 visited,
                 ret_expr,
-                site.call_node,
+                call_node,
                 item.key.field_path.clone(),
                 Vec::new(),
                 "returnValue",
@@ -2259,7 +2304,7 @@ impl<'a> PropagationRunner<'a> {
         visited: &mut FxHashSet<TraceKey>,
         encountered_gaps: &mut BTreeSet<usize>,
     ) {
-        let resolution = resolve_call_targets(self.cwd, self.program, self.checker, call_node);
+        let resolution = resolve_call_targets(&self.cwd, self.program, self.checker, call_node);
         let return_used = call_node
             .parent()
             .is_some_and(|p| p.kind() != Kind::ExpressionStatement);
@@ -2294,7 +2339,7 @@ impl<'a> PropagationRunner<'a> {
             } else {
                 match resolve_impl_for_call_target(
                     &self.package_impl_cache,
-                    self.cwd,
+                    &self.cwd,
                     self.program,
                     self.checker,
                     call_node,
@@ -2359,7 +2404,7 @@ impl<'a> PropagationRunner<'a> {
                     }
                 }
                 Err((kind, message)) => {
-                    let loc = node_location_rel(self.cwd, call_node);
+                    let loc = node_location_rel(&self.cwd, call_node);
                     let gap_idx = self.record_gap(GapItem {
                         kind,
                         message,
@@ -2469,6 +2514,10 @@ fn resolve_endpoint_spec(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Forwards propagation endpoints, mode, and reverse-search file scope to one query runner."
+)]
 pub fn run_value_propagation(
     snapshot: &mut crate::serve::SnapshotState,
     project_id: &str,
@@ -2477,6 +2526,7 @@ pub fn run_value_propagation(
     propagation: Option<&str>,
     from_handles: &[String],
     to_handles: &[String],
+    lookup_files: Option<&[String]>,
 ) -> Result<ValuePropagationResultPayload, crate::serve::RpcErr> {
     if let Some(mode) = propagation
         && mode != "value"
@@ -2503,14 +2553,13 @@ pub fn run_value_propagation(
         to_specs.push((handle_id.clone(), spec));
     }
 
-    let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
-    let cwd = snapshot.cwd.clone();
     let package_impl_cache = snapshot.package_impl_cache.clone();
     let mut runner = PropagationRunner::new(
-        &cwd,
+        snapshot,
+        project_id,
         program,
         checker,
-        call_graph,
+        lookup_files,
         package_impl_cache,
         to_specs,
     );

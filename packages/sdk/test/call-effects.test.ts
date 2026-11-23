@@ -347,15 +347,23 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
         const [res2] = await ctx.instanceCleanup({
           scopes: [getDisconnectCall("extractedHelperCleanup")],
           targets: [instA2],
+          lookupFiles: ["src/scenarios.ts"],
         });
         recorded.extractedHelperCleanup = res2!;
 
         // 3. Container wrapper ({ dispose: () => store.dispose() })
         const instA3 = await resolveVar("containerWrapperCleanup", "resourceA");
         const instB3 = await resolveVar("containerWrapperCleanup", "resourceB");
+        const [containerWrapperNarrow] = await ctx.instanceCleanup({
+          scopes: [getDisconnectCall("containerWrapperCleanup")],
+          targets: [instA3, instB3],
+          lookupFiles: ["src/scenarios.ts"],
+        });
+        recorded.containerWrapperNarrow = containerWrapperNarrow!;
         const [res3] = await ctx.instanceCleanup({
           scopes: [getDisconnectCall("containerWrapperCleanup")],
           targets: [instA3, instB3],
+          lookupFiles: ["src/scenarios.ts", "src/helpers.ts"],
         });
         recorded.containerWrapperCleanup = res3!;
 
@@ -472,6 +480,14 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
       const wrapRes = recorded.containerWrapperCleanup!;
       assert.equal(wrapRes.targetResults[0]!.status, "covered");
       assert.equal(wrapRes.targetResults[1]!.status, "not-cleaned");
+      assert.equal(
+        recorded.containerWrapperNarrow!.targetResults[0]!.status,
+        "not-cleaned",
+      );
+      assert.equal(
+        recorded.containerWrapperNarrow!.targetResults[1]!.status,
+        "not-cleaned",
+      );
 
       // Verify MutableDisposable.value = second disposes first, and .clear() disposes second
       const repRes = recorded.mutableReplace!;
