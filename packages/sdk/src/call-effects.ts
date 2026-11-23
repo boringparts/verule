@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
 import type { InstanceModelMatch } from "./instance-identity.ts";
+import { normalizeLookupFiles } from "./lookup-files.ts";
 import { validateProgramRefs } from "./projection.ts";
 import {
   VeruleExecutionError,
@@ -14,6 +15,7 @@ import {
   type ExplainCleanupPath,
   type Gap,
   type InstanceRef,
+  type LookupFilesOptions,
   type Model,
   type SyntaxRef,
 } from "./types.ts";
@@ -53,7 +55,7 @@ export type LifecycleEventBehavior = {
 
 export type CleanupScopeRef = SyntaxRef | CallRef | DeclarationRef;
 
-export type InstanceCleanupOptions = {
+export type InstanceCleanupOptions = LookupFilesOptions & {
   /** Functions, methods, or lifecycle-event calls to analyze for cleanup paths. */
   readonly scopes: readonly CleanupScopeRef[];
   /** Target instances to check whether every modeled path in each scope disposes them. */
@@ -627,6 +629,8 @@ export function createCallEffectsQueries(deps: {
   readonly sessionToken: symbol;
   readonly snapshotId: number;
   readonly projectId: string;
+  readonly cwd: string;
+  readonly sourceFiles: readonly string[];
   readonly assertOpen: () => void;
   readonly recordGaps: (gaps: readonly Gap[]) => void;
   readonly resolveSyntaxLocation?: (
@@ -651,6 +655,8 @@ export function createCallEffectsQueries(deps: {
     sessionToken,
     snapshotId,
     projectId,
+    cwd,
+    sourceFiles,
     assertOpen,
     recordGaps,
     resolveSyntaxLocation,
@@ -670,6 +676,11 @@ export function createCallEffectsQueries(deps: {
       options: InstanceCleanupOptions,
     ): Promise<readonly InstanceCleanupScopeResult[]> => {
       assertOpen();
+      const lookupFiles = normalizeLookupFiles(
+        options.lookupFiles,
+        cwd,
+        sourceFiles,
+      );
       if (options.scopes.length === 0) return [];
       const targets = options.targets ?? [];
       validateProgramRefs(options.scopes, sessionToken, snapshotId, projectId);
@@ -684,6 +695,7 @@ export function createCallEffectsQueries(deps: {
         snapshotId,
         projectId,
         modelsDigest,
+        lookupFiles ?? null,
         options.scopes.map((s) => s.handleId),
         targets.map((t) => t.handleId),
       ]);
@@ -710,6 +722,7 @@ export function createCallEffectsQueries(deps: {
                   scopes: options.scopes.map((s) => s.handleId),
                   targets: targets.map((t) => t.handleId),
                   models: engineModels,
+                  ...(lookupFiles !== undefined ? { lookupFiles } : {}),
                 },
               ],
             },

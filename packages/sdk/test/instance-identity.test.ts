@@ -906,4 +906,102 @@ void describe("@verule/sdk instance identity", () => {
         err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
     );
   });
+
+  void it("scopes only unanchored instance caller lookup and keeps known cross-file factories intact", async () => {
+    const root = createTempProject({
+      "src/resource.ts": [
+        "export class Store {}",
+        "export function createStore(): Store { return new Store(); }",
+        "",
+      ].join("\n"),
+      "src/forward.ts": [
+        "export function forward<T>(value: T): T { return value; }",
+        "",
+      ].join("\n"),
+      "src/app.ts": [
+        'import { createStore, Store } from "./resource.js";',
+        'import { forward } from "./forward.js";',
+        "export const appValue = forward(createStore());",
+        "export const appFactory = createStore();",
+        "void Store;",
+        "",
+      ].join("\n"),
+      "src/other.ts": [
+        'import { Store } from "./resource.js";',
+        'import { forward } from "./forward.js";',
+        "export const otherValue = forward(new Store());",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let scopedLocations: string[] = [];
+      let fullLocations: string[] = [];
+      let scopedFactoryKey = "";
+      let fullFactoryKey = "";
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [
+            defineRule({
+              id: "scoped-instance-resolution",
+              run: async (ctx) => {
+                const params = await ctx.findSyntax({
+                  files: ["src/forward.ts"],
+                  kinds: ["Parameter"],
+                });
+                const valueParam = params.find((param) =>
+                  param.text.startsWith("value:"),
+                );
+                const appFactory = await ctx.findSyntax({
+                  files: ["src/app.ts"],
+                  kinds: ["CallExpression"],
+                });
+                const factoryCall = appFactory.find(
+                  (call) =>
+                    call.text.startsWith("createStore") &&
+                    call.location.line === 4,
+                );
+                assert.ok(valueParam && factoryCall);
+
+                const [scoped] = await ctx.resolveInstances([valueParam.ref], {
+                  lookupFiles: ["src/app.ts"],
+                });
+                const [full] = await ctx.resolveInstances([valueParam.ref]);
+                scopedLocations = scoped!.instances
+                  .map((instance) => instance.allocationLocation?.file ?? "")
+                  .toSorted();
+                fullLocations = full!.instances
+                  .map((instance) => instance.allocationLocation?.file ?? "")
+                  .toSorted();
+
+                const [scopedFactory] = await ctx.resolveInstances(
+                  [factoryCall.ref],
+                  { lookupFiles: ["src/app.ts"] },
+                );
+                const [fullFactory] = await ctx.resolveInstances([
+                  factoryCall.ref,
+                ]);
+                assert.ok(scopedFactory?.instance && fullFactory?.instance);
+                assert.equal(
+                  isSameInstance(scopedFactory.instance, fullFactory.instance),
+                  true,
+                );
+                scopedFactoryKey = scopedFactory.instanceKey!;
+                fullFactoryKey = fullFactory.instanceKey!;
+              },
+            }),
+          ],
+        }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(scopedLocations, ["src/resource.ts"]);
+      assert.deepEqual(fullLocations, ["src/other.ts", "src/resource.ts"]);
+      assert.equal(scopedFactoryKey, fullFactoryKey);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

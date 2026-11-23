@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { normalizeLookupFiles } from "./lookup-files.ts";
 import type { ResolvedImplementationTarget } from "./package-impl.ts";
 import { validateProgramRefs } from "./projection.ts";
 import {
@@ -10,6 +11,7 @@ import {
   type DiagnosticLocation,
   type Evidence,
   type Gap,
+  type LookupFilesOptions,
   type SyntaxRef,
 } from "./types.ts";
 
@@ -93,7 +95,7 @@ export type ValuePropagationOptions = {
   readonly propagation?: ValuePropagationMode;
   readonly from: ValueEndpoint | readonly ValueEndpoint[];
   readonly to: ValueEndpoint | readonly ValueEndpoint[];
-};
+} & LookupFilesOptions;
 
 export type ValuePropagationResult = {
   readonly propagation: ValuePropagationMode;
@@ -242,6 +244,8 @@ export function createCallsValuesQueries(deps: {
   readonly sessionToken: symbol;
   readonly snapshotId: number;
   readonly projectId: string;
+  readonly cwd: string;
+  readonly sourceFiles: readonly string[];
   readonly assertOpen: () => void;
   readonly recordGaps: (gaps: readonly Gap[]) => void;
   readonly getRpcOptions?: () => RpcRequestOptions | undefined;
@@ -258,6 +262,8 @@ export function createCallsValuesQueries(deps: {
     sessionToken,
     snapshotId,
     projectId,
+    cwd,
+    sourceFiles,
     assertOpen,
     recordGaps,
     getRpcOptions,
@@ -267,14 +273,24 @@ export function createCallsValuesQueries(deps: {
   return {
     callersOf: async (
       declarations: readonly DeclarationRef[],
+      options?: LookupFilesOptions,
     ): Promise<readonly DeclarationCallersResult[]> => {
       assertOpen();
+      const lookupFiles = normalizeLookupFiles(
+        options?.lookupFiles,
+        cwd,
+        sourceFiles,
+      );
+      const lookupScopeKey = JSON.stringify(lookupFiles ?? null);
       if (declarations.length === 0) return [];
       validateProgramRefs(declarations, sessionToken, snapshotId, projectId);
 
+      const cacheKeyFor = (decl: DeclarationRef) =>
+        `${snapshotId}:${projectId}:${lookupScopeKey}:${decl.handleId}`;
+
       const missing: DeclarationRef[] = [];
       for (const decl of declarations) {
-        const key = `${snapshotId}:${projectId}:${decl.handleId}`;
+        const key = cacheKeyFor(decl);
         if (!cache.callersCache.has(key)) {
           missing.push(decl);
         }
@@ -294,6 +310,7 @@ export function createCallsValuesQueries(deps: {
               {
                 op: "callersOf",
                 targets: missing.map((d) => d.handleId),
+                ...(lookupFiles !== undefined ? { lookupFiles } : {}),
               },
             ],
           },
@@ -301,7 +318,7 @@ export function createCallsValuesQueries(deps: {
         );
 
         for (const [index, decl] of missing.entries()) {
-          const key = `${snapshotId}:${projectId}:${decl.handleId}`;
+          const key = cacheKeyFor(decl);
           const rowPromise = batchPromise.then((batch) => {
             const items = (batch.results[0]?.items ??
               []) as readonly RawDeclarationCallersRow[];
@@ -365,11 +382,7 @@ export function createCallsValuesQueries(deps: {
       }
 
       const results = await Promise.all(
-        declarations.map((decl) =>
-          cache.callersCache.get(
-            `${snapshotId}:${projectId}:${decl.handleId}`,
-          )!,
-        ),
+        declarations.map((decl) => cache.callersCache.get(cacheKeyFor(decl))!),
       );
 
       if (onQueryCompleted) {
@@ -514,6 +527,11 @@ export function createCallsValuesQueries(deps: {
     ): Promise<ValuePropagationResult> => {
       assertOpen();
       const propagation: ValuePropagationMode = options.propagation ?? "value";
+      const lookupFiles = normalizeLookupFiles(
+        options.lookupFiles,
+        cwd,
+        sourceFiles,
+      );
       const fromList = Array.isArray(options.from)
         ? options.from
         : [options.from];
@@ -537,6 +555,7 @@ export function createCallsValuesQueries(deps: {
       const cacheKey = JSON.stringify([
         snapshotId,
         projectId,
+        lookupFiles ?? null,
         propagation,
         fromList.map((e) => e.handleId),
         toList.map((e) => e.handleId),
@@ -564,6 +583,7 @@ export function createCallsValuesQueries(deps: {
                   propagation,
                   from: fromList.map((e) => e.handleId),
                   to: toList.map((e) => e.handleId),
+                  ...(lookupFiles !== undefined ? { lookupFiles } : {}),
                 },
               ],
             },

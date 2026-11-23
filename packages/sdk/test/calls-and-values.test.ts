@@ -1244,4 +1244,238 @@ void describe("@verule/sdk call graph and value propagation", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("limits reverse caller and return searches to normalized lookup files without mixing cached scopes", async () => {
+    const root = createTempProject({
+      "src/library.ts": [
+        "export function getFactory() {",
+        "  return function factoryResult(value: number): number {",
+        "    return value > 0 ? factoryResult(value - 1) : value;",
+        "  };",
+        "}",
+        "export function genericTarget(value: number): number {",
+        "  return value > 0 ? genericTarget(value - 1) : value;",
+        "}",
+        "export function keepIdentity<T>(value: T): T { return value; }",
+        "export function forward(value: number): number {",
+        "  return value;",
+        "}",
+        "",
+      ].join("\n"),
+      "src/entry.ts": [
+        'import { forward, getFactory, genericTarget, keepIdentity } from "./library.js";',
+        "const factory = getFactory();",
+        "factory(1);",
+        "getFactory()(2);",
+        "const generic = keepIdentity(genericTarget);",
+        "generic(3);",
+        "export const entryValue = forward(4);",
+        "",
+      ].join("\n"),
+      "src/other.ts": [
+        'import { forward, getFactory, genericTarget } from "./library.js";',
+        "getFactory()(5);",
+        "genericTarget(6);",
+        "export const otherValue = forward(7);",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let observed: Record<string, readonly string[]> = {};
+      let gaps: Record<string, readonly string[]> = {};
+      let propagation: Record<string, readonly boolean[]> = {};
+      let propagationGaps: Record<string, readonly string[]> = {};
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [
+            defineRule({
+              id: "scoped-reverse-query-contract",
+              run: async (ctx) => {
+                const functions = await ctx.findSyntax({
+                  files: ["src/library.ts"],
+                  kinds: ["FunctionExpression", "FunctionDeclaration"],
+                });
+                const declarations = await ctx.resolveDeclarations(
+                  functions.map((node) => node.ref),
+                  { select: { name: true } },
+                );
+                const factoryTarget = declarations.find(
+                  (row) => row.name === "factoryResult",
+                )?.declaration;
+                const forwardTarget = declarations.find(
+                  (row) => row.name === "forward",
+                )?.declaration;
+                assert.ok(factoryTarget && forwardTarget);
+
+                const entryCalls = await ctx.findSyntax({
+                  files: ["src/entry.ts"],
+                  kinds: ["CallExpression"],
+                });
+                const genericCall = entryCalls.find(
+                  (call) => call.location.line === 6,
+                );
+                const returnValue = await ctx.findSyntax({
+                  files: ["src/library.ts"],
+                  kinds: ["Identifier"],
+                });
+                assert.ok(genericCall && returnValue.length > 0);
+                const [resolvedGenericCall] = await ctx.resolveCalls([
+                  genericCall.ref,
+                ]);
+                assert.ok(resolvedGenericCall?.call);
+                const [genericCallee] = await ctx.calleesOf([
+                  resolvedGenericCall.call,
+                ]);
+                const genericTarget = genericCallee?.targets[0];
+                assert.ok(genericTarget);
+
+                const factoryFull = await ctx.callersOf([factoryTarget]);
+                const factoryEntryOnly = await ctx.callersOf([factoryTarget], {
+                  lookupFiles: ["src/entry.ts"],
+                });
+                const factoryEmpty = await ctx.callersOf([factoryTarget], {
+                  lookupFiles: [],
+                });
+                const factoryNormalized = await ctx.callersOf([factoryTarget], {
+                  lookupFiles: [
+                    join(root, "src/entry.ts"),
+                    "src/./entry.ts",
+                    "src/entry.ts",
+                  ],
+                });
+                observed.factoryFull = factoryFull[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                observed.factoryEntryOnly = factoryEntryOnly[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                observed.factoryEmpty = factoryEmpty[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                observed.factoryNormalized =
+                  factoryNormalized[0]!.callSites.map(
+                    (site) => `${site.location.file}:${site.location.line}`,
+                  );
+                gaps.factoryFull = factoryFull[0]!.gaps.map((gap) => gap.kind);
+                gaps.factoryEntryOnly = factoryEntryOnly[0]!.gaps.map(
+                  (gap) => gap.kind,
+                );
+
+                const genericEntryOnly = await ctx.callersOf([genericTarget], {
+                  lookupFiles: ["src/entry.ts"],
+                });
+                const genericFull = await ctx.callersOf([genericTarget]);
+                observed.genericEntryOnly = genericEntryOnly[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                observed.genericFull = genericFull[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                gaps.genericEntryOnly = genericEntryOnly[0]!.gaps.map(
+                  (gap) => gap.kind,
+                );
+                gaps.genericFull = genericFull[0]!.gaps.map((gap) => gap.kind);
+
+                await assert.rejects(
+                  () =>
+                    ctx.callersOf([factoryTarget], {
+                      lookupFiles: ["src/not-in-project.ts"],
+                    }),
+                  (error: unknown) =>
+                    error instanceof VeruleExecutionError &&
+                    error.message.includes("not a source file in project"),
+                );
+
+                const forwardCalls = await ctx.findSyntax({
+                  kinds: ["CallExpression"],
+                  files: ["src/entry.ts", "src/other.ts"],
+                });
+                const from = returnValue.find(
+                  (node) => node.location.line === 11 && node.text === "value",
+                );
+                const entryTarget = forwardCalls.find(
+                  (node) =>
+                    node.location.file === "src/entry.ts" &&
+                    node.location.line === 7,
+                );
+                const otherTarget = forwardCalls.find(
+                  (node) =>
+                    node.location.file === "src/other.ts" &&
+                    node.location.line === 4,
+                );
+                assert.ok(from && entryTarget && otherTarget);
+                const scopedPropagation = await ctx.valuePropagation({
+                  from: from.ref,
+                  to: [entryTarget.ref, otherTarget.ref],
+                  lookupFiles: ["src/entry.ts"],
+                });
+                const fullPropagation = await ctx.valuePropagation({
+                  from: from.ref,
+                  to: [entryTarget.ref, otherTarget.ref],
+                });
+                const emptyPropagation = await ctx.valuePropagation({
+                  from: from.ref,
+                  to: [entryTarget.ref, otherTarget.ref],
+                  lookupFiles: [],
+                });
+                propagation.scoped = scopedPropagation.results.map(
+                  (row) => row.reachable,
+                );
+                propagation.full = fullPropagation.results.map(
+                  (row) => row.reachable,
+                );
+                propagation.empty = emptyPropagation.results.map(
+                  (row) => row.reachable,
+                );
+                propagationGaps.scoped = scopedPropagation.gaps.map(
+                  (gap) => gap.kind,
+                );
+                propagationGaps.full = fullPropagation.gaps.map(
+                  (gap) => gap.kind,
+                );
+                propagationGaps.empty = emptyPropagation.gaps.map(
+                  (gap) => gap.kind,
+                );
+              },
+            }),
+          ],
+        }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(observed.factoryFull, [
+        "src/entry.ts:3",
+        "src/entry.ts:4",
+        "src/library.ts:3",
+        "src/other.ts:2",
+      ]);
+      assert.deepEqual(observed.factoryEntryOnly, [
+        "src/entry.ts:3",
+        "src/entry.ts:4",
+      ]);
+      assert.deepEqual(observed.factoryEmpty, []);
+      assert.deepEqual(observed.factoryNormalized, observed.factoryEntryOnly);
+      assert.deepEqual(gaps.factoryFull, []);
+      assert.deepEqual(gaps.factoryEntryOnly, []);
+      assert.deepEqual(observed.genericEntryOnly, ["src/entry.ts:6"]);
+      assert.deepEqual(observed.genericFull, [
+        "src/entry.ts:6",
+        "src/library.ts:7",
+        "src/other.ts:3",
+      ]);
+      assert.deepEqual(gaps.genericEntryOnly, []);
+      assert.deepEqual(gaps.genericFull, []);
+      assert.deepEqual(propagation.scoped, [true, false]);
+      assert.deepEqual(propagation.full, [true, true]);
+      assert.deepEqual(propagation.empty, [false, false]);
+      assert.deepEqual(propagationGaps.scoped, []);
+      assert.deepEqual(propagationGaps.full, []);
+      assert.deepEqual(propagationGaps.empty, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
