@@ -43,6 +43,28 @@ export type InstallArtifactsResult =
     }
   | PreparationFailure;
 
+export type InstallArtifactPackagesOptions = {
+  readonly checkoutDir: string;
+  readonly packageManager: "npm" | "pnpm";
+  readonly artifacts: readonly PackedArtifact[];
+  readonly directPackages?: readonly string[];
+  readonly storeDir?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+};
+
+export type InstallArtifactPackagesResult =
+  | {
+      readonly status: "ready";
+      readonly directPackages: readonly string[];
+    }
+  | {
+      readonly status: "install-failed";
+      readonly command: string;
+      readonly exitCode: number;
+      readonly message: string;
+      readonly stderr: string;
+    };
+
 export type RestoreDependenciesResult =
   | {
       readonly status: "ready";
@@ -154,13 +176,45 @@ export async function installArtifactsInHost(
   options: InstallArtifactsOptions,
 ): Promise<InstallArtifactsResult> {
   const host = HOST_DEFINITIONS[options.hostId];
+  const result = await installArtifactPackages({
+    checkoutDir: options.checkoutDir,
+    packageManager: host.packageManager,
+    artifacts: options.artifacts,
+    ...(options.directPackages === undefined
+      ? {}
+      : { directPackages: options.directPackages }),
+    ...(options.env === undefined ? {} : { env: options.env }),
+  });
+  if (result.status === "install-failed") {
+    return preparationFailure(
+      "install-artifacts",
+      options.hostId,
+      options.sha,
+      `Failed to install Verule direct packages into ${host.displayName} at ${options.sha}`,
+      result.command,
+      {
+        status: result.exitCode,
+        stdout: "",
+        stderr: result.stderr,
+      },
+    );
+  }
+  return result;
+}
+
+/**
+ * Installs direct Verule packages from one local artifact batch into an
+ * existing host workspace or repository.
+ */
+export async function installArtifactPackages(
+  options: InstallArtifactPackagesOptions,
+): Promise<InstallArtifactPackagesResult> {
   const directPackages = [
     ...new Set(options.directPackages ?? DEFAULT_DIRECT_VERULE_PACKAGES),
   ];
   const artifactByName = new Map(
     options.artifacts.map((artifact) => [artifact.name, artifact]),
   );
-
   const specs = directPackages.map((name) => {
     const artifact = artifactByName.get(name);
     if (artifact === undefined) {
@@ -172,7 +226,6 @@ export async function installArtifactsInHost(
   const npmrcPath = join(options.checkoutDir, ".npmrc");
   const hadNpmrc = existsSync(npmrcPath);
   const previousNpmrc = hadNpmrc ? readFileSync(npmrcPath, "utf8") : "";
-
   const registry = await startArtifactRegistry(options.artifacts);
   try {
     const scopeLines = registry.scopes.map(
@@ -186,7 +239,7 @@ export async function installArtifactsInHost(
     );
 
     const commandArgs =
-      host.packageManager === "npm"
+      options.packageManager === "npm"
         ? [
             "npm",
             "install",
@@ -198,6 +251,9 @@ export async function installArtifactsInHost(
           ]
         : [
             "pnpm",
+            ...(options.storeDir === undefined
+              ? []
+              : ["--store-dir", options.storeDir]),
             "add",
             "--save-dev",
             ...(existsSync(join(options.checkoutDir, "pnpm-workspace.yaml"))
@@ -206,25 +262,22 @@ export async function installArtifactsInHost(
             "--ignore-scripts",
             ...specs,
           ];
-
     const [command, ...args] = commandArgs;
-    const result = await runAsyncCommand(
+    const commandResult = await runAsyncCommand(
       command!,
       args,
       options.checkoutDir,
       options.env ?? process.env,
     );
-    if (result.status !== 0) {
-      return preparationFailure(
-        "install-artifacts",
-        options.hostId,
-        options.sha,
-        `Failed to install Verule direct packages into ${host.displayName} at ${options.sha}`,
-        commandArgs.join(" "),
-        result,
-      );
+    if (commandResult.status !== 0) {
+      return {
+        status: "install-failed",
+        command: commandArgs.join(" "),
+        exitCode: commandResult.status,
+        message: "Failed to install packed Verule artifacts.",
+        stderr: commandResult.stderr.trim(),
+      };
     }
-
     return { status: "ready", directPackages };
   } finally {
     if (hadNpmrc) {

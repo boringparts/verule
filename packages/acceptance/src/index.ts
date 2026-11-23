@@ -29,8 +29,11 @@ export {
 export {
   DEFAULT_DIRECT_VERULE_PACKAGES,
   installArtifactsInHost,
+  installArtifactPackages,
   prepareHostWithArtifacts,
   restoreHostDependencies,
+  type InstallArtifactPackagesOptions,
+  type InstallArtifactPackagesResult,
   type CommandOutcome,
   type InstallArtifactsOptions,
   type InstallArtifactsResult,

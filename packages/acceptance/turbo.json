@@ -3,7 +3,14 @@
   "tags": ["verification"],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": [
+        "@verule/adapter-drizzle#build",
+        "@verule/adapter-zod#build",
+        "@verule/cli#build",
+        "@verule/engine#build",
+        "@verule/rules-reference#build",
+        "@verule/sdk#build"
+      ],
       "inputs": [],
       "outputs": ["dist/**"],
       "cache": false,
@@ -40,7 +47,7 @@
       "tags": ["quality:light"]
     },
     "test:e2e": {
-      "dependsOn": ["^build", "build"],
+      "dependsOn": ["build"],
       "passThroughEnv": [
         "HTTP_PROXY",
         "HTTPS_PROXY",

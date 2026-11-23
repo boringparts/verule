@@ -9,6 +9,12 @@ coverage/
 .env
 .vitest/
 data/
+/fixtures/acceptance-host/data/
+!/fixtures/acceptance-host/data/
+!/fixtures/acceptance-host/data/**
+/fixtures/acceptance-host/data/.turbo/
+/fixtures/acceptance-host/data/node_modules/
+/fixtures/acceptance-host/data/dist/
 playwright-report/
 test-results/
 .changeset/packed/
