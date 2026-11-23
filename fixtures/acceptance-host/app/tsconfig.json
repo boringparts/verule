@@ -14,6 +14,7 @@
     "src/**/*.ts",
     "verule.config.ts",
     "verule.native.config.ts",
+    "verule.zod.native.config.ts",
     "verule.missing-adapter.config.ts"
   ]
 }

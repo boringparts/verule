@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
-  zodAdapter,
   type ValidatorInputFieldsFactValue,
 } from "@verule/adapter-zod";
 import {
@@ -20,8 +26,16 @@ import {
   type FactResult,
 } from "@verule/sdk";
 
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
 function createTempProject(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "verule-zod-providers-"));
+  mkdirSync(join(root, "node_modules", "@verule"), { recursive: true });
+  symlinkSync(
+    packageRoot,
+    join(root, "node_modules", "@verule", "adapter-zod"),
+    "dir",
+  );
   writeFileSync(
     join(root, "tsconfig.json"),
     JSON.stringify(
@@ -117,7 +131,7 @@ const customValibotAdapter = defineAdapter({
 });
 
 void describe("@verule/adapter-zod provider replacement, complementation, and conflicts", () => {
-  void it("runs the exact same business rule unchanged when replacing zodAdapter with a custom validator adapter", async () => {
+  void it("runs the same business rule with the package-loaded Zod adapter or a custom validator adapter", async () => {
     // Shared business rule written once against ValidatorInputFieldsFact:
     const requireAgeRule = defineRule({
       id: "require-age-input",
@@ -183,7 +197,7 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
         cwd: zodRoot,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          adapters: [zodAdapter],
+          adapters: ["@verule/adapter-zod"],
           rules: [requireAgeRule],
         }),
       });

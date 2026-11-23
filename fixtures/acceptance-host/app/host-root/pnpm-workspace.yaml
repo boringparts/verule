@@ -2,4 +2,7 @@ packages:
   - packages/data
   - packages/app
 catalog:
+  "@verule/adapter-zod": "*"
   "@verule/sdk": "*"
+  drizzle-orm: rc
+  zod: ^4.6.7
