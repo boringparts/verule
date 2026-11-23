@@ -23,6 +23,7 @@ export type RunBareVeruleOptions = {
   readonly checkoutDir: string;
   readonly args: readonly string[];
   readonly isolated?: boolean;
+  readonly pnpmStoreDir?: string;
   readonly blockedPaths?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
@@ -96,12 +97,20 @@ export function resolveDefaultBlockedPaths(
   return [...candidates];
 }
 
-function resolvePnpmStorePath(cwd: string): string | undefined {
+function resolvePnpmStorePath(
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>>,
+  storeDir?: string,
+): string | undefined {
+  if (storeDir !== undefined && existsSync(storeDir)) {
+    return realpathSync(storeDir);
+  }
   try {
     const storePath = execFileSync("pnpm", ["store", "path"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...env },
     }).trim();
     return storePath.length > 0 && existsSync(storePath)
       ? realpathSync(storePath)
@@ -293,7 +302,11 @@ export async function runBareVeruleInHost(
         ]
       : [];
 
-    const pnpmStorePath = resolvePnpmStorePath(checkoutRealpath);
+    const pnpmStorePath = resolvePnpmStorePath(
+      checkoutRealpath,
+      baseEnv,
+      options.pnpmStoreDir,
+    );
     const isolatedEnv: Record<string, string | undefined> = useBwrap
       ? {
           ...envWithPath,

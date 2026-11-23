@@ -21,6 +21,8 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@verule/acceptance-host-app": "workspace:*",
+    "@verule/acceptance-host-data": "workspace:*",
     "@verule/adapter-drizzle": "workspace:*",
     "@verule/adapter-zod": "workspace:*",
     "@verule/cli": "workspace:*",
