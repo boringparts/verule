@@ -1001,4 +1001,247 @@ void describe("@verule/sdk call graph and value propagation", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("resolves callersOf across default exports, exported variable aliases, constructors, super(), and string element calls", async () => {
+    const root = createTempProject({
+      "src/defs.ts": [
+        "function internalMake(tag: string): { tag: string } {",
+        "  return { tag };",
+        "}",
+        "export const publicMake = internalMake;",
+        "export default function defaultFactory(x: string): string {",
+        "  return x;",
+        "}",
+        "export class BaseBox {",
+        "  constructor(public readonly label: string) {}",
+        "  ping(): string { return this.label; }",
+        "}",
+        "",
+      ].join("\n"),
+      "src/caller.ts": [
+        "import defFn, { BaseBox, publicMake as renamedMake } from './defs.js';",
+        "export class ChildBox extends BaseBox {",
+        "  constructor(label: string) {",
+        "    super(label);",
+        "  }",
+        "}",
+        "export function exercise(flag: boolean): string {",
+        "  const pick = flag ? renamedMake : renamedMake;",
+        "  const made = pick('ok');",
+        "  const box = new BaseBox(made.tag);",
+        "  const child = new ChildBox(defFn('hi'));",
+        "  return box['ping']() + child.ping();",
+        "}",
+        "",
+      ].join("\n"),
+      "src/unrelated.ts": [
+        "export function ping(): string { return 'other'; }",
+        "export function runUnrelated(): string { return ping(); }",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let internalCallerLines: number[] = [];
+      let defaultCallerLines: number[] = [];
+      let ctorCallerLines: number[] = [];
+      let pingCallerLines: number[] = [];
+
+      await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [
+            defineRule({
+              id: "lazy-call-graph-coverage",
+              run: async (ctx) => {
+                const defsNodes = await ctx.findSyntax({
+                  files: ["src/defs.ts"],
+                  kinds: [
+                    "FunctionDeclaration",
+                    "Constructor",
+                    "MethodDeclaration",
+                  ],
+                });
+                const decls = await ctx.resolveDeclarations(
+                  defsNodes.map((n) => n.ref),
+                  { select: { name: true, kind: true } },
+                );
+
+                const internalDecl = decls.find(
+                  (d) => d.name === "internalMake",
+                )?.declaration;
+                const defaultDecl = decls.find(
+                  (d) => d.name === "default" || d.name === "defaultFactory",
+                )?.declaration;
+                const ctorDecl = decls.find(
+                  (d) => d.kind === "Constructor",
+                )?.declaration;
+                const pingDecl = decls.find(
+                  (d) => d.name === "ping",
+                )?.declaration;
+
+                assert.ok(internalDecl && defaultDecl && ctorDecl && pingDecl);
+                const rows = await ctx.callersOf([
+                  internalDecl,
+                  defaultDecl,
+                  ctorDecl,
+                  pingDecl,
+                ]);
+                internalCallerLines = rows[0]!.callSites.map(
+                  (s) => s.location.line,
+                );
+                defaultCallerLines = rows[1]!.callSites.map(
+                  (s) => s.location.line,
+                );
+                ctorCallerLines = rows[2]!.callSites.map(
+                  (s) => s.location.line,
+                );
+                pingCallerLines = rows[3]!.callSites.map(
+                  (s) => s.location.line,
+                );
+              },
+            }),
+          ],
+        }),
+      });
+
+      assert.deepEqual(internalCallerLines, [9]);
+      assert.deepEqual(defaultCallerLines, [11]);
+      assert.deepEqual(ctorCallerLines, [4, 10]);
+      assert.deepEqual(pingCallerLines, [12, 12]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("finds callers of functions returned by a factory", async () => {
+    const root = createTempProject({
+      "src/defs.ts": [
+        "export function getCallable() {",
+        "  return function computeUnique(value: number): number {",
+        "    return value > 10 ? computeUnique(value - 1) : value + 1;",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+      "src/entry.ts": [
+        'import { getCallable } from "./defs.js";',
+        "const selected = getCallable();",
+        "selected(1);",
+        "getCallable()(2);",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let callerLocations: string[] = [];
+      let gapKinds: string[] = [];
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [
+            defineRule({
+              id: "returned-function-callers",
+              run: async (ctx) => {
+                const declarations = await ctx.findSyntax({
+                  files: ["src/defs.ts"],
+                  kinds: ["FunctionExpression"],
+                });
+                const projected = await ctx.resolveDeclarations(
+                  declarations.map((node) => node.ref),
+                  { select: { name: true } },
+                );
+                const target = projected.find(
+                  (row) => row.name === "computeUnique",
+                )?.declaration;
+                assert.ok(target);
+
+                const callers = await ctx.callersOf([target]);
+                callerLocations = callers[0]!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                callerLocations.sort();
+                gapKinds = callers[0]!.gaps.map((gap) => gap.kind);
+              },
+            }),
+          ],
+        }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(callerLocations, [
+        "src/defs.ts:3",
+        "src/entry.ts:3",
+        "src/entry.ts:4",
+      ]);
+      assert.deepEqual(gapKinds, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("finds callers through a generic identity function", async () => {
+    const root = createTempProject({
+      "src/library.ts": [
+        "export function computeUnique(input: number): number {",
+        "  return input > 10 ? computeUnique(input - 1) : input + 1;",
+        "}",
+        "export function keepIdentity<T>(value: T): T {",
+        "  return value;",
+        "}",
+        "",
+      ].join("\n"),
+      "src/entry.ts": [
+        'import { computeUnique, keepIdentity } from "./library.js";',
+        "const selected = keepIdentity(computeUnique);",
+        "selected(1);",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      let callerLocations: string[] = [];
+      let gapKinds: string[] = [];
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [
+            defineRule({
+              id: "generic-callers",
+              run: async (ctx) => {
+                const callSyntaxes = await ctx.findSyntax({
+                  files: ["src/entry.ts"],
+                  kinds: ["CallExpression"],
+                });
+                const targetCall = callSyntaxes.find(
+                  (call) => call.location.line === 3,
+                );
+                assert.ok(targetCall);
+                const [resolvedCall] = await ctx.resolveCalls([targetCall.ref]);
+                assert.ok(resolvedCall?.call);
+                const [callee] = await ctx.calleesOf([resolvedCall.call]);
+                const target = callee?.targets[0];
+                assert.ok(target);
+                const [callers] = await ctx.callersOf([target]);
+                callerLocations = callers!.callSites.map(
+                  (site) => `${site.location.file}:${site.location.line}`,
+                );
+                callerLocations.sort();
+                gapKinds = callers!.gaps.map((gap) => gap.kind);
+              },
+            }),
+          ],
+        }),
+      });
+
+      assert.equal(report.status, "clean");
+      assert.deepEqual(callerLocations, ["src/entry.ts:3", "src/library.ts:2"]);
+      assert.deepEqual(gapKinds, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

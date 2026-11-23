@@ -1141,6 +1141,8 @@ export async function openSession(
         query.kinds ? query.kinds.toSorted() : null,
         query.files ? query.files.toSorted() : null,
         query.range ?? null,
+        query.textIncludes ? query.textIncludes.toSorted() : null,
+        query.calleeNames ? query.calleeNames.toSorted() : null,
       ]);
       const cached = syntaxCache.get(cacheKey);
       const queryStart = collector.isActive() ? performance.now() : 0;
@@ -1164,6 +1166,12 @@ export async function openSession(
                   ...(query.kinds !== undefined ? { kinds: query.kinds } : {}),
                   ...(query.files !== undefined ? { files: query.files } : {}),
                   ...(query.range !== undefined ? { range: query.range } : {}),
+                  ...(query.textIncludes !== undefined
+                    ? { textIncludes: query.textIncludes }
+                    : {}),
+                  ...(query.calleeNames !== undefined
+                    ? { calleeNames: query.calleeNames }
+                    : {}),
                 },
               ],
             },
@@ -1226,6 +1234,12 @@ export async function openSession(
                       : {}),
                     ...(query.range !== undefined
                       ? { range: query.range }
+                      : {}),
+                    ...(query.textIncludes !== undefined
+                      ? { textIncludes: query.textIncludes }
+                      : {}),
+                    ...(query.calleeNames !== undefined
+                      ? { calleeNames: query.calleeNames }
                       : {}),
                   },
                 }

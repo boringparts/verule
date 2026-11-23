@@ -21,8 +21,8 @@ use crate::call_effects::{
     run_instance_cleanup,
 };
 use crate::calls_values::{
-    CallTargetsRow, DeclarationCallersRow, ValuePropagationResultPayload, run_callees_of,
-    run_callers_of, run_value_propagation,
+    CallTargetsRow, DeclarationCallersRow, ValuePropagationResultPayload, node_text, prop_key_text,
+    run_callees_of, run_callers_of, run_value_propagation, unwrap_expr_wrappers,
 };
 use crate::cfg::GapItem;
 use crate::drizzle_facts::{EngineFactContributionPayload, run_extract_facts};
@@ -91,6 +91,10 @@ pub enum QueryStep {
         kinds: Option<Vec<String>>,
         #[serde(default)]
         range: Option<SourceRangeFilter>,
+        #[serde(default, rename = "textIncludes")]
+        text_includes: Option<Vec<String>>,
+        #[serde(default, rename = "calleeNames")]
+        callee_names: Option<Vec<String>>,
     },
     TypeAtLocation {
         targets: Vec<String>,
@@ -728,6 +732,8 @@ fn execute_step(
             files,
             kinds,
             range,
+            text_includes,
+            callee_names,
         } => execute_find_syntax_step(
             snapshot,
             project_id,
@@ -735,6 +741,8 @@ fn execute_step(
             files.as_deref(),
             kinds.as_deref(),
             range.as_ref(),
+            text_includes.as_deref(),
+            callee_names.as_deref(),
             step_start,
             observer,
         ),
@@ -1047,10 +1055,21 @@ fn execute_find_syntax_step(
     files: Option<&[String]>,
     kinds: Option<&[String]>,
     range: Option<&SourceRangeFilter>,
+    text_includes: Option<&[String]>,
+    callee_names: Option<&[String]>,
     step_start: Option<Instant>,
     observer: &mut ObserveCollector,
 ) -> Result<StepResult, RpcErr> {
-    let items = run_find_syntax(snapshot, project_id, program, files, kinds, range)?;
+    let items = run_find_syntax(
+        snapshot,
+        project_id,
+        program,
+        files,
+        kinds,
+        range,
+        text_includes,
+        callee_names,
+    )?;
     let raw_details = if observer.is_detail() {
         items
             .iter()
@@ -1251,6 +1270,10 @@ fn resolve_byte_range(
     Ok(ResolvedByteRange { start, end, mode })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Query filtering extends the existing find-syntax parameters without changing the RPC shape."
+)]
 fn run_find_syntax(
     snapshot: &mut SnapshotState,
     project_id: &str,
@@ -1258,6 +1281,8 @@ fn run_find_syntax(
     files: Option<&[String]>,
     kinds: Option<&[String]>,
     range: Option<&SourceRangeFilter>,
+    text_includes: Option<&[String]>,
+    callee_names: Option<&[String]>,
 ) -> Result<Vec<SyntaxItem>, RpcErr> {
     let kinds_slice = kinds.unwrap_or(&[]);
     if kinds_slice.is_empty() && range.is_none() {
@@ -1276,6 +1301,14 @@ fn run_find_syntax(
             ));
         };
         target_kinds.push((kind, kind_name.as_str()));
+    }
+
+    let text_filter = syntax_needles(text_includes);
+    let callee_filter = syntax_needles(callee_names);
+    if (text_includes.is_some() && text_filter.is_empty())
+        || (callee_names.is_some() && callee_filter.is_empty())
+    {
+        return Ok(Vec::new());
     }
 
     let range_file =
@@ -1300,6 +1333,18 @@ fn run_find_syntax(
             }
         })
         .filter_map(|sf| {
+            if !text_filter.is_empty() {
+                let sf_text = sf.text();
+                if !text_filter.iter().any(|needle| sf_text.contains(needle)) {
+                    return None;
+                }
+            }
+            if !callee_filter.is_empty() {
+                let sf_text = sf.text();
+                if !callee_filter.iter().any(|name| sf_text.contains(name)) {
+                    return None;
+                }
+            }
             let rel = relative_to_cwd(&snapshot.cwd, sf.file_name());
             if let Some(target_file) = &range_file
                 && target_file != &rel
@@ -1330,10 +1375,43 @@ fn run_find_syntax(
             sf.as_node(),
             &target_kinds,
             byte_range,
+            &text_filter,
+            &callee_filter,
             &mut items,
         );
     }
     Ok(items)
+}
+
+fn syntax_needles(values: Option<&[String]>) -> Vec<&str> {
+    values
+        .unwrap_or(&[])
+        .iter()
+        .map(String::as_str)
+        .filter(|needle| !needle.is_empty())
+        .collect()
+}
+
+fn call_callee_name(node: P<Node>) -> Option<String> {
+    if !matches!(node.kind(), Kind::CallExpression | Kind::NewExpression) {
+        return None;
+    }
+    let expr = unwrap_expr_wrappers(node.expression()?);
+    match expr.kind() {
+        Kind::Identifier => node_text(expr),
+        Kind::PropertyAccessExpression => node_text(expr.as_property_access_expression().name()),
+        Kind::ElementAccessExpression => {
+            let arg =
+                unwrap_expr_wrappers(expr.as_element_access_expression().argument_expression());
+            matches!(
+                arg.kind(),
+                Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
+            )
+            .then(|| prop_key_text(arg))
+            .flatten()
+        }
+        _ => None,
+    }
 }
 
 #[expect(
@@ -1348,13 +1426,27 @@ fn collect_matching_nodes(
     node: P<Node>,
     target_kinds: &[(Kind, &str)],
     range: Option<ResolvedByteRange>,
+    text_filter: &[&str],
+    callee_filter: &[&str],
     out: &mut Vec<SyntaxItem>,
 ) {
-    if let Some(r) = range {
-        let full_start = node.pos().source_offset().unwrap_or(0);
-        let full_end = node.end().source_offset().unwrap_or(full_start);
-        if full_end < r.start || full_start > r.end {
-            return;
+    let full_start = node.pos().source_offset().unwrap_or(0);
+    let full_end = node.end().source_offset().unwrap_or(full_start);
+    if let Some(r) = range
+        && (full_end < r.start || full_start > r.end)
+    {
+        return;
+    }
+    if !text_filter.is_empty() || !callee_filter.is_empty() {
+        let start_idx = usize::try_from(full_start).unwrap_or(0);
+        let end_idx = usize::try_from(full_end).unwrap_or(start_idx);
+        if let Some(sub) = sf.text().get(start_idx..end_idx) {
+            if !text_filter.is_empty() && !text_filter.iter().any(|needle| sub.contains(needle)) {
+                return;
+            }
+            if !callee_filter.is_empty() && !callee_filter.iter().any(|name| sub.contains(name)) {
+                return;
+            }
         }
     }
 
@@ -1368,18 +1460,31 @@ fn collect_matching_nodes(
     };
 
     if let Some(kind_label) = kind_label_opt {
-        let location = node_location(sf, rel_file, node);
-        let matches_range = match range {
-            None => true,
-            Some(r) => match r.mode {
-                RangeMatchMode::Within => location.start >= r.start && location.end <= r.end,
-                RangeMatchMode::Intersects => location.end > r.start && location.start < r.end,
-            },
+        let matches_text = text_filter.is_empty() || {
+            let tok_start = get_token_pos_of_node(node, sf, false);
+            let tok_end = full_end.max(tok_start);
+            let s_idx = usize::try_from(tok_start).unwrap_or(0);
+            let e_idx = usize::try_from(tok_end).unwrap_or(s_idx);
+            sf.text()
+                .get(s_idx..e_idx)
+                .is_some_and(|slice| text_filter.iter().any(|needle| slice.contains(needle)))
         };
-        if matches_range {
-            out.push(build_syntax_item(
-                snapshot, project_id, sf, node, kind_label, location,
-            ));
+        let matches_callee = callee_filter.is_empty()
+            || call_callee_name(node).is_some_and(|name| callee_filter.contains(&name.as_str()));
+        if matches_text && matches_callee {
+            let location = node_location(sf, rel_file, node);
+            let matches_range = match range {
+                None => true,
+                Some(r) => match r.mode {
+                    RangeMatchMode::Within => location.start >= r.start && location.end <= r.end,
+                    RangeMatchMode::Intersects => location.end > r.start && location.start < r.end,
+                },
+            };
+            if matches_range {
+                out.push(build_syntax_item(
+                    snapshot, project_id, sf, node, kind_label, location,
+                ));
+            }
         }
     }
 
@@ -1392,6 +1497,8 @@ fn collect_matching_nodes(
             child,
             target_kinds,
             range,
+            text_filter,
+            callee_filter,
             out,
         );
         false
