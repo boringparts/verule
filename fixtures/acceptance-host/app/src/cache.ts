@@ -1,9 +1,9 @@
-import { getCachedMember, type Member } from "@verule/acceptance-host-data";
+import { getCachedProduct, type Product } from "@verule/acceptance-host-data";
 
-export function reviewCachedMember(
+export function reviewCachedProduct(
   id: string,
-  invoke: (member: Member) => void,
+  invoke: (product: Product) => void,
 ): void {
-  const member = getCachedMember(id);
-  invoke(member);
+  const product = getCachedProduct(id);
+  invoke(product);
 }

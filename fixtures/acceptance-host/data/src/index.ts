@@ -1,1 +1,1 @@
-export { getCachedMember, getMember, type Member } from "./member.ts";
+export { findProduct, getCachedProduct, type Product } from "./product.ts";

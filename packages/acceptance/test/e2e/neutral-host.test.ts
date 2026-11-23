@@ -137,6 +137,8 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     assert.equal(audit.engineBinarySha256, engineArtifact.binarySha256);
     assert.ok(audit.workspaceSymlinkCount > 0);
 
+    const reviewPath = join(hostDir, "packages/app/src/review.ts");
+    const reviewSource = readFileSync(reviewPath, "utf8");
     const result = await runBareVeruleInHost({
       checkoutDir: hostDir,
       args: [
@@ -155,15 +157,38 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     const envelope = JSON.parse(result.stdout) as CliEnvelope;
     assert.equal(envelope.kind, "data");
     assert.equal(envelope.variant, "findings");
-    assert.equal(envelope.data.diagnostics.length, 1);
-    assert.equal(envelope.data.diagnostics[0]?.ruleId, "neutral-member-review");
+    assert.equal(
+      envelope.data.diagnostics.length,
+      1,
+      JSON.stringify(envelope.data.diagnostics),
+    );
+    assert.equal(
+      envelope.data.diagnostics[0]?.ruleId,
+      "neutral-product-review",
+      JSON.stringify(envelope.data.diagnostics),
+    );
+    assert.ok(
+      envelope.data.diagnostics[0]?.evidence.some(
+        (item) =>
+          item.at?.file === "packages/data/src/product.ts" &&
+          item.message ===
+            "The call resolves to the data package product query.",
+      ),
+    );
+    assert.ok(
+      envelope.data.diagnostics[0]?.evidence.some(
+        (item) =>
+          item.at?.file === "packages/app/src/review.ts" &&
+          item.message === "The returned product reaches its price validation.",
+      ),
+    );
     assert.equal(
       envelope.data.diagnostics[0]?.at.file,
       "packages/app/src/review.ts",
     );
     assert.ok(
       envelope.data.diagnostics[0]?.evidence.some(
-        (item) => item.at?.file === "packages/data/src/member.ts",
+        (item) => item.at?.file === "packages/data/src/product.ts",
       ),
     );
     assert.deepEqual(await runInstalledSdk(hostDir), envelope.data);
@@ -175,9 +200,36 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       ),
     );
 
+    const disconnectedSource = reviewSource.replace(
+      "const product = getProduct(id);",
+      'const loadedProduct = getProduct(id);\n  const product = { id, name: "Local product", price: 1 };',
+    );
+    assert.notEqual(disconnectedSource, reviewSource);
+    writeFileSync(reviewPath, disconnectedSource, "utf8");
+    const disconnectedRun = await runBareVeruleInHost({
+      checkoutDir: hostDir,
+      args: [
+        "check",
+        "--config",
+        "packages/app/verule.config.ts",
+        "--output",
+        "json",
+      ],
+      isolated: true,
+      pnpmStoreDir: storeDir,
+      env,
+    });
+    assert.equal(disconnectedRun.status, 0, disconnectedRun.stderr);
+    const disconnectedEnvelope = JSON.parse(
+      disconnectedRun.stdout,
+    ) as CliEnvelope;
+    assert.deepEqual(disconnectedEnvelope.data.diagnostics, []);
+    assert.deepEqual(await runInstalledSdk(hostDir), disconnectedEnvelope.data);
+    writeFileSync(reviewPath, reviewSource, "utf8");
+
     const cachePath = join(hostDir, "packages/app/src/cache.ts");
     const cacheSource = readFileSync(cachePath, "utf8");
-    const cachedCall = findSourceTarget(cacheSource, "getCachedMember(id)");
+    const cachedCall = findSourceTarget(cacheSource, "getCachedProduct(id)");
     const explanationRun = await runBareVeruleInHost({
       checkoutDir: hostDir,
       args: [
@@ -185,7 +237,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
         "--config",
         "packages/app/verule.config.ts",
         "--rule",
-        "neutral-member-review",
+        "neutral-product-review",
         "--at",
         `packages/app/src/cache.ts:${cachedCall}`,
         "--output",
@@ -207,11 +259,9 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       explanationEnvelope.data.explanation?.excludedByQuery?.op,
       "findSyntax",
     );
-    const reviewPath = join(hostDir, "packages/app/src/review.ts");
-    const reviewSource = readFileSync(reviewPath, "utf8");
     const suppressedCall = findSourceTarget(
       reviewSource,
-      'getMember("legacy")',
+      'getProduct("legacy")',
     );
     const suppressedLine = Number(suppressedCall.split(":")[0]);
     const suppressedExplanation = await runBareVeruleInHost({
@@ -221,7 +271,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
         "--config",
         "packages/app/verule.config.ts",
         "--rule",
-        "neutral-member-review",
+        "neutral-product-review",
         "--at",
         `packages/app/src/review.ts:${suppressedCall}`,
         "--output",
@@ -251,7 +301,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       envelope.data.inlineIgnores?.some(
         (entry) =>
           entry.status === "suppressed" &&
-          entry.ruleId === "neutral-member-review" &&
+          entry.ruleId === "neutral-product-review" &&
           entry.reason === "Keep this legacy lookup covered during migration.",
       ),
     );
@@ -259,8 +309,8 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     writeFileSync(
       reviewPath,
       reviewSource.replace(
-        'const member = getMember("legacy");',
-        'const member = getCachedMember("legacy");',
+        'const product = getProduct("legacy");',
+        'const product = getCachedProduct("legacy");',
       ),
       "utf8",
     );
@@ -297,8 +347,8 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     writeFileSync(
       reviewPath,
       unusedSource.replace(
-        'const member = getCachedMember("legacy");',
-        'const member = getMember("legacy"); const repeated = getMember("legacy");',
+        'const product = getCachedProduct("legacy");',
+        'const product = getProduct("legacy"); const repeatedProduct = getProduct("legacy"); if (product.price <= 0 || repeatedProduct.price <= 0) { invoke(product); }',
       ),
       "utf8",
     );
@@ -322,7 +372,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     assert.equal(
       ambiguousIgnoreEnvelope.data.diagnostics.filter(
         (diagnostic) =>
-          diagnostic.ruleId === "neutral-member-review" &&
+          diagnostic.ruleId === "neutral-product-review" &&
           diagnostic.at.file === "packages/app/src/review.ts" &&
           diagnostic.at.line === suppressedLine,
       ).length,
@@ -344,11 +394,11 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     );
 
     writeFileSync(reviewPath, reviewSource, "utf8");
-    const activeCall = "const member = getMember(id);";
+    const activeCall = "const product = getProduct(id);";
     assert.equal(reviewSource.split(activeCall).length - 1, 1);
     writeFileSync(
       reviewPath,
-      reviewSource.replace(activeCall, "const member = getCachedMember(id);"),
+      reviewSource.replace(activeCall, "const product = getCachedProduct(id);"),
       "utf8",
     );
     const revokedRun = await runBareVeruleInHost({
@@ -374,7 +424,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       envelope.data.projects.flatMap((project) => project.sourceFiles),
     );
     assert.ok(sourceFiles.has("packages/app/src/review.ts"));
-    assert.ok(sourceFiles.has("packages/data/src/member.ts"));
+    assert.ok(sourceFiles.has("packages/data/src/product.ts"));
     t.diagnostic(
       `Packed CLI ${cliArtifact.version}; engine SHA-256 ${audit.engineBinarySha256}; isolation ${result.isolation?.mode}`,
     );
