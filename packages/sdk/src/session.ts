@@ -39,7 +39,6 @@ import {
   type FactContribution,
   type FactQueryOptions,
   type FactType,
-  type ConfiguredAdapter,
   type LibraryAdapter,
 } from "./facts.ts";
 import {

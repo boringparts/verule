@@ -40,7 +40,6 @@
       "tags": ["quality:light"]
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]

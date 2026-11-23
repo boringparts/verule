@@ -1,6 +1,6 @@
 {
   "extends": ["//"],
-  "tags": ["library"],
+  "tags": ["tooling"],
   "tasks": {
     "build": {
       "dependsOn": ["//#toolchain:prepare"],
