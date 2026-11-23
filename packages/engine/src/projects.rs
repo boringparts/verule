@@ -71,6 +71,7 @@ pub struct OpenedProjectsSnapshot {
     pub opened_configs: Vec<String>,
     pub project_ids: BTreeMap<String, ProjectId>,
     pub summaries: Vec<ProjectSummary>,
+    pub workspace_source_files: Vec<String>,
     pub snapshot_digest: String,
 }
 
@@ -693,6 +694,9 @@ fn build_opened_snapshot(
         let mut files_with_text = collect_project_files_with_text(cwd, program);
         files_with_text.sort_by(|a, b| a.0.cmp(&b.0));
         files_with_text.dedup_by(|a, b| a.0 == b.0);
+        let mut workspace_files_with_text = collect_workspace_files_with_text(cwd, program);
+        workspace_files_with_text.sort_by(|a, b| a.0.cmp(&b.0));
+        workspace_files_with_text.dedup_by(|a, b| a.0 == b.0);
 
         let prov = state.provenance.get(config_abs);
         let entry_config = prov.map_or_else(|| config_rel.clone(), |p| p.entry_config.clone());
@@ -722,6 +726,7 @@ fn build_opened_snapshot(
             config_abs: config_abs.clone(),
             summary: summary.clone(),
             files_with_text,
+            workspace_files_with_text,
         });
         project_ids.insert(project_id, tsrs_pid.clone());
         summaries.push(summary);
@@ -734,6 +739,17 @@ fn build_opened_snapshot(
         ));
     }
 
+    let workspace_source_files = digest_entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .workspace_files_with_text
+                .iter()
+                .map(|(path, _)| path.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let snapshot_digest = compute_snapshot_digest(&mut digest_entries);
 
     Ok(OpenedProjectsSnapshot {
@@ -743,14 +759,55 @@ fn build_opened_snapshot(
         opened_configs: state.discovery_order.clone(),
         project_ids,
         summaries,
+        workspace_source_files,
         snapshot_digest,
     })
+}
+
+fn collect_workspace_files_with_text(
+    cwd: &str,
+    program: &'static Program,
+) -> Vec<(String, &'static str)> {
+    let workspace_root = Path::new(cwd)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(cwd).to_path_buf());
+    let workspace_root = workspace_root.to_string_lossy();
+
+    // These files affect adapter facts and snapshot identity but stay outside public source coverage.
+    let mut files = Vec::new();
+    for &source_file in program.get_source_files() {
+        if program.is_source_file_default_library(source_file.path())
+            || !program.is_source_file_from_external_library(source_file)
+        {
+            continue;
+        }
+        let Ok(real_path) = Path::new(source_file.file_name()).canonicalize() else {
+            continue;
+        };
+        if !real_path.starts_with(Path::new(workspace_root.as_ref()))
+            || real_path
+                .components()
+                .any(|component| component.as_os_str() == "node_modules")
+        {
+            continue;
+        }
+        let Some(real_path) = real_path.to_str() else {
+            continue;
+        };
+        files.push((
+            relative_to_cwd(workspace_root.as_ref(), real_path),
+            source_file.text(),
+        ));
+    }
+
+    files
 }
 
 struct ProjectDigestEntry {
     config_abs: String,
     summary: ProjectSummary,
     files_with_text: Vec<(String, &'static str)>,
+    workspace_files_with_text: Vec<(String, &'static str)>,
 }
 
 fn collect_project_files_with_text(
@@ -776,6 +833,10 @@ fn compute_snapshot_digest(entries: &mut [ProjectDigestEntry]) -> String {
         hasher.update_len_prefixed(&config_bytes);
         hasher.update_len_prefixed(&summary_bytes);
         for (rel_file, text) in &entry.files_with_text {
+            hasher.update_len_prefixed(rel_file.as_bytes());
+            hasher.update_len_prefixed(text.as_bytes());
+        }
+        for (rel_file, text) in &entry.workspace_files_with_text {
             hasher.update_len_prefixed(rel_file.as_bytes());
             hasher.update_len_prefixed(text.as_bytes());
         }

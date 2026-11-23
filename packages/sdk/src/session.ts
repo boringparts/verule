@@ -116,6 +116,7 @@ type EngineOpenResult = {
   readonly snapshotId: number;
   readonly snapshotDigest: string;
   readonly projects: readonly ProjectSummary[];
+  readonly workspaceSourceFiles: readonly string[];
   readonly nativeAdapters: readonly NativeAdapterObservation[];
   readonly engineRssBytes?: number;
 };
@@ -127,6 +128,22 @@ type EngineUpdateResult = EngineOpenResult & {
   readonly reusedFiles: readonly string[];
   readonly removedFiles: readonly string[];
 };
+
+type SessionWorkspaceFileState = {
+  files: readonly string[];
+};
+
+// Watch needs these paths for hashing without adding them to the public project summary.
+const sessionWorkspaceFileStates = new WeakMap<
+  AnalysisSession,
+  SessionWorkspaceFileState
+>();
+
+export function getSessionWorkspaceFiles(
+  session: AnalysisSession,
+): readonly string[] {
+  return sessionWorkspaceFileStates.get(session)?.files ?? [];
+}
 
 type EngineSyntaxItem = {
   readonly ref: string;
@@ -859,6 +876,9 @@ export async function openSession(
   let currentSnapshotId = openResult.snapshotId;
   let currentSnapshotDigest = openResult.snapshotDigest;
   let currentProjects = openResult.projects;
+  const workspaceFileState: SessionWorkspaceFileState = {
+    files: openResult.workspaceSourceFiles,
+  };
   let currentNativeAdapters = openResult.nativeAdapters;
   let currentFileOrigins = initialFileOrigins;
   let lastEngineRssBytes = openResult.engineRssBytes;
@@ -2101,7 +2121,7 @@ export async function openSession(
     };
   }
 
-  return {
+  const analysisSession: AnalysisSession = {
     get snapshotId() {
       return currentSnapshotId;
     },
@@ -2192,6 +2212,7 @@ export async function openSession(
       currentSnapshotId = updated.snapshotId;
       currentSnapshotDigest = updated.snapshotDigest;
       currentProjects = updated.projects;
+      workspaceFileState.files = updated.workspaceSourceFiles;
       currentNativeAdapters = updated.nativeAdapters;
       currentFileOrigins = updatedFileOrigins;
       lastEngineRssBytes = updated.engineRssBytes;
@@ -2281,6 +2302,8 @@ export async function openSession(
       }
     },
   };
+  sessionWorkspaceFileStates.set(analysisSession, workspaceFileState);
+  return analysisSession;
 }
 
 /** Runs a one-shot check in a dedicated analysis session and releases resources before returning. */

@@ -22,7 +22,12 @@ import {
   verifyHostArtifactResolution,
 } from "@verule/acceptance";
 import type { PackedArtifact } from "@verule/acceptance";
-import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
+import type {
+  AnalysisSession,
+  CheckReport,
+  NormalizedVeruleConfig,
+  WatchReportEvent,
+} from "@verule/sdk";
 
 import { copyAcceptanceHost } from "./support/host-fixtures.ts";
 
@@ -127,9 +132,9 @@ async function runCliCheck(
   return { report: envelope.data, status: result.status };
 }
 
-async function readWatchReport(
+async function readWatchEvent(
   iterator: AsyncIterator<unknown>,
-): Promise<CheckReport> {
+): Promise<WatchReportEvent> {
   let timer: NodeJS.Timeout | undefined;
   const result = await Promise.race([
     iterator.next(),
@@ -149,7 +154,13 @@ async function readWatchReport(
   };
   assert.equal(event.kind, "report");
   assert.ok(event.report);
-  return event.report;
+  return event as WatchReportEvent;
+}
+
+async function readWatchReport(
+  iterator: AsyncIterator<unknown>,
+): Promise<CheckReport> {
+  return (await readWatchEvent(iterator)).report;
 }
 
 async function loadConfig(configPath: string): Promise<NormalizedVeruleConfig> {
@@ -216,6 +227,7 @@ void test("loads both installed native adapters from the neutral static host and
   });
   let watchAbort: AbortController | undefined;
   let watchIterator: AsyncIterator<unknown> | undefined;
+  let explicitSession: AnalysisSession | undefined;
   let sharedSession:
     | { readonly endpoint: string; close(): Promise<void> }
     | undefined;
@@ -289,6 +301,15 @@ void test("loads both installed native adapters from the neutral static host and
       JSON.stringify(coldInitial.report, null, 2),
     );
     assert.equal(coldInitial.report.diagnostics.length, 0);
+    const appProject = coldInitial.report.projects.find(
+      (project) => project.configFile === "packages/app/tsconfig.json",
+    );
+    assert.ok(appProject);
+    assert.ok(
+      !appProject.sourceFiles.includes(
+        "packages/data/src/drizzle-projections.ts",
+      ),
+    );
     for (const providerId of ["drizzle", "zod"] as const) {
       assert.ok(
         (coldInitial.report.observation?.engineExtractions[providerId]
@@ -343,6 +364,15 @@ void test("loads both installed native adapters from the neutral static host and
       semanticReport(sharedInitial),
       semanticReport(coldInitial.report),
     );
+    explicitSession = await sdk.openSession({
+      cwd: hostDir,
+      adapterResolutionRoot: appDir,
+      config: mainConfig,
+    });
+    assert.deepEqual(
+      semanticReport(await explicitSession.check()),
+      semanticReport(coldInitial.report),
+    );
 
     const projectionsPath = join(
       hostDir,
@@ -356,18 +386,71 @@ void test("loads both installed native adapters from the neutral static host and
     assert.notEqual(missingRequiredColumn, originalProjections);
     writeFileSync(projectionsPath, missingRequiredColumn, "utf8");
 
+    const sharedImmediate = await sdk.requestSharedReport({
+      cwd: hostDir,
+      endpoint: sharedSession.endpoint,
+    });
+    const explicitMissingUpdate = await explicitSession.update({
+      changed: ["packages/data/src/drizzle-projections.ts"],
+    });
+    assert.ok(
+      explicitMissingUpdate.recomputation.invalidatedBy.includes(
+        "changed:packages/data/src/drizzle-projections.ts",
+      ),
+    );
+    const explicitMissing = await explicitSession.check();
+
     const coldMissing = await runCliCheck(hostDir, storeDir, mainConfigPath);
     assert.equal(coldMissing.status, 1);
+    assert.deepEqual(
+      coldMissing.report.projects.find(
+        (project) => project.configFile === "packages/app/tsconfig.json",
+      )?.sourceFiles,
+      appProject.sourceFiles,
+    );
+    assert.notEqual(
+      coldMissing.report.identity.snapshotDigest,
+      coldInitial.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      explicitMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
+    assert.deepEqual(
+      semanticReport(sharedImmediate),
+      semanticReport(coldMissing.report),
+      "shared immediate",
+    );
+    assert.deepEqual(
+      semanticReport(explicitMissing),
+      semanticReport(coldMissing.report),
+      "explicit update",
+    );
     const sdkMissing = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
       config: mainConfig,
     });
-    const watchMissing = await readWatchReport(watchIterator);
+    const watchMissingEvent = await readWatchEvent(watchIterator);
+    assert.ok(
+      watchMissingEvent.recomputation.invalidatedBy.includes(
+        "changed:packages/data/src/drizzle-projections.ts",
+      ),
+      JSON.stringify(watchMissingEvent.recomputation),
+    );
+    const watchMissing = watchMissingEvent.report;
     const sharedMissing = await sdk.requestSharedReport({
       cwd: hostDir,
       endpoint: sharedSession.endpoint,
     });
+    assert.equal(
+      watchMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      sharedMissing.identity.snapshotDigest,
+      coldMissing.report.identity.snapshotDigest,
+    );
     for (const [label, report] of [
       ["SDK", sdkMissing],
       ["watch", watchMissing],
@@ -408,8 +491,25 @@ void test("loads both installed native adapters from the neutral static host and
     );
 
     writeFileSync(projectionsPath, originalProjections, "utf8");
+    await explicitSession.update({
+      changed: ["packages/data/src/drizzle-projections.ts"],
+    });
+    const explicitRestored = await explicitSession.check();
     const coldRestored = await runCliCheck(hostDir, storeDir, mainConfigPath);
     assert.equal(coldRestored.status, 0);
+    assert.equal(
+      coldRestored.report.identity.snapshotDigest,
+      coldInitial.report.identity.snapshotDigest,
+    );
+    assert.equal(
+      explicitRestored.identity.snapshotDigest,
+      coldRestored.report.identity.snapshotDigest,
+    );
+    assert.deepEqual(
+      semanticReport(explicitRestored),
+      semanticReport(coldRestored.report),
+      "explicit update after restore",
+    );
     const sdkRestored = await sdk.runCheck({
       cwd: hostDir,
       adapterResolutionRoot: appDir,
@@ -565,6 +665,7 @@ void test("loads both installed native adapters from the neutral static host and
   } finally {
     watchAbort?.abort();
     await watchIterator?.return?.();
+    await explicitSession?.close();
     await sharedSession?.close();
     bundle.dispose();
     rmSync(environmentDir, { recursive: true, force: true });
