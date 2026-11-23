@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { normalizeLookupFiles } from "./lookup-files.ts";
 import { validateProgramRefs, type SelectedKeys } from "./projection.ts";
 import {
   VeruleExecutionError,
@@ -11,6 +12,7 @@ import {
   type DiagnosticLocation,
   type Evidence,
   type Gap,
+  type LookupFilesOptions,
   type InstanceRef,
   type Model,
   type SyntaxRef,
@@ -335,6 +337,8 @@ export function createInstanceIdentityQueries(deps: {
   readonly sessionToken: symbol;
   readonly snapshotId: number;
   readonly projectId: string;
+  readonly cwd: string;
+  readonly sourceFiles: readonly string[];
   readonly assertOpen: () => void;
   readonly recordGaps: (gaps: readonly Gap[]) => void;
   readonly getRpcOptions?: () => RpcRequestOptions | undefined;
@@ -352,6 +356,8 @@ export function createInstanceIdentityQueries(deps: {
     sessionToken,
     snapshotId,
     projectId,
+    cwd,
+    sourceFiles,
     assertOpen,
     recordGaps,
     getRpcOptions,
@@ -367,15 +373,23 @@ export function createInstanceIdentityQueries(deps: {
   return {
     resolveInstances: async (
       targets: readonly InstanceTargetRef[],
+      options?: LookupFilesOptions,
     ): Promise<readonly InstanceResolutionResult[]> => {
       assertOpen();
+      const lookupFiles = normalizeLookupFiles(
+        options?.lookupFiles,
+        cwd,
+        sourceFiles,
+      );
       if (targets.length === 0) return [];
       validateProgramRefs(targets, sessionToken, snapshotId, projectId);
+
+      const lookupScopeKey = JSON.stringify(lookupFiles ?? null);
 
       const missing: InstanceTargetRef[] = [];
       const seenMissing = new Set<string>();
       for (const target of targets) {
-        const key = `${snapshotId}:${projectId}:${modelsDigest}:${target.handleId}`;
+        const key = `${snapshotId}:${projectId}:${modelsDigest}:${lookupScopeKey}:${target.handleId}`;
         if (!cache.resolutionCache.has(key) && !seenMissing.has(key)) {
           seenMissing.add(key);
           missing.push(target);
@@ -397,6 +411,7 @@ export function createInstanceIdentityQueries(deps: {
                 op: "resolveInstances",
                 targets: missing.map((t) => t.handleId),
                 models: engineModels,
+                ...(lookupFiles !== undefined ? { lookupFiles } : {}),
               },
             ],
           },
@@ -404,7 +419,7 @@ export function createInstanceIdentityQueries(deps: {
         );
 
         for (const [index, target] of missing.entries()) {
-          const key = `${snapshotId}:${projectId}:${modelsDigest}:${target.handleId}`;
+          const key = `${snapshotId}:${projectId}:${modelsDigest}:${lookupScopeKey}:${target.handleId}`;
           const rowPromise = batchPromise.then((batch) => {
             const items = (batch.results[0]?.items ??
               []) as readonly RawInstanceResolutionRow[];
@@ -469,7 +484,7 @@ export function createInstanceIdentityQueries(deps: {
 
       const results = await Promise.all(
         targets.map((target) => {
-          const key = `${snapshotId}:${projectId}:${modelsDigest}:${target.handleId}`;
+          const key = `${snapshotId}:${projectId}:${modelsDigest}:${lookupScopeKey}:${target.handleId}`;
           return cache.resolutionCache.get(key)!.then((cached) => ({
             ...cached,
             target,

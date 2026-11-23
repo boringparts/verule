@@ -65,7 +65,8 @@ export type VeruleErrorCode =
   | "CROSS_PROJECT_REFERENCE"
   | "STALE_SNAPSHOT"
   | "SESSION_CLOSED"
-  | "ENGINE_ERROR";
+  | "ENGINE_ERROR"
+  | "INVALID_QUERY";
 
 export type FactConflictParty = {
   readonly providerId: string;
@@ -512,6 +513,15 @@ export type FindSyntaxOptions = {
   readonly calleeNames?: readonly string[];
 };
 
+/**
+ * Restricts unanchored reverse searches to these files in the current project.
+ * An empty list supplies no reverse candidates; traversal from a known call
+ * still follows source in the complete compiler project.
+ */
+export type LookupFilesOptions = {
+  readonly lookupFiles?: readonly string[];
+};
+
 export type SyntaxNodeResult = {
   readonly ref: SyntaxRef;
   readonly kind: SyntaxKind | (string & {});
@@ -587,6 +597,7 @@ export type RuleContext = {
   readAdditionalInput: (filePath: string) => string;
   callersOf: (
     declarations: readonly DeclarationRef[],
+    options?: LookupFilesOptions,
   ) => Promise<readonly DeclarationCallersResult[]>;
   calleesOf: (
     calls: readonly CallRef[],
@@ -599,6 +610,7 @@ export type RuleContext = {
   ) => Promise<ValuePropagationResult>;
   resolveInstances: (
     targets: readonly InstanceTargetRef[],
+    options?: LookupFilesOptions,
   ) => Promise<readonly InstanceResolutionResult[]>;
   projectInstances: <
     const S extends InstanceProjectionSelection = Record<never, never>,

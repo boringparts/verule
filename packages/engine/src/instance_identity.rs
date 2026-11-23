@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tsrs_ast::{
     Kind, Node, SourceFile, Symbol, get_source_file_of_node, is_function_like_declaration,
@@ -13,7 +14,7 @@ use crate::calls_values::{
     enclosing_loop, extract_callable_from_decl, get_or_build_call_graph, is_ancestor_of,
     is_direct_block_statement, node_byte_span, node_location_rel, node_text,
     pick_preferred_impl_decl, prop_key_text, resolve_call_targets,
-    resolve_property_in_object_literal, unwrap_expr_wrappers,
+    resolve_property_in_object_literal, scoped_project_cache_key, unwrap_expr_wrappers,
 };
 use crate::cfg::{EvidenceItem, GapItem, resolve_enclosing_function};
 use crate::package_impl::{
@@ -334,18 +335,27 @@ pub fn get_or_build_field_index(
     snapshot: &mut SnapshotState,
     project_id: &str,
     program: &'static Program,
+    lookup_files: Option<&[String]>,
 ) -> Arc<FieldWriteIndex> {
-    if let Some(cached) = snapshot.field_write_index.get(project_id) {
+    let cache_key = scoped_project_cache_key(project_id, lookup_files);
+    if let Some(cached) = snapshot.field_write_index.get(&cache_key) {
         return Arc::clone(cached);
     }
 
     let cwd = snapshot.cwd.clone();
+    let lookup_file_set =
+        lookup_files.map(|files| files.iter().map(String::as_str).collect::<FxHashSet<_>>());
     let mut source_files: Vec<(String, P<SourceFile>)> = program
         .get_source_files()
         .iter()
         .copied()
         .filter(|&sf| is_project_source_file(program, sf))
         .map(|sf| (relative_to_cwd(&cwd, sf.file_name()), sf))
+        .filter(|(file, _)| {
+            lookup_file_set
+                .as_ref()
+                .is_none_or(|lookup_files| lookup_files.contains(file.as_str()))
+        })
         .collect();
     source_files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -360,7 +370,7 @@ pub fn get_or_build_field_index(
     let index = Arc::new(FieldWriteIndex { writes_by_field });
     snapshot
         .field_write_index
-        .insert(project_id.to_string(), Arc::clone(&index));
+        .insert(cache_key, Arc::clone(&index));
     index
 }
 
@@ -748,13 +758,45 @@ pub struct InstanceResolver<'a> {
     pub cwd: &'a str,
     pub program: &'static Program,
     pub checker: &'a mut CheckerHandle,
-    pub call_graph: Arc<ProjectCallGraph>,
-    pub field_index: Arc<FieldWriteIndex>,
+    pub snapshot: &'a mut SnapshotState,
+    pub project_id: &'a str,
+    pub lookup_files: Option<&'a [String]>,
+    pub(crate) call_graph: Option<Arc<ProjectCallGraph>>,
+    pub(crate) field_index: Option<Arc<FieldWriteIndex>>,
     pub package_impl_cache: PackageImplCache,
     pub models: &'a [InstanceModelInput],
 }
 
 impl InstanceResolver<'_> {
+    fn call_graph(&mut self) -> Arc<ProjectCallGraph> {
+        if let Some(graph) = &self.call_graph {
+            return Arc::clone(graph);
+        }
+        let graph = get_or_build_call_graph(
+            self.snapshot,
+            self.project_id,
+            self.program,
+            self.checker,
+            self.lookup_files,
+        );
+        self.call_graph = Some(Arc::clone(&graph));
+        graph
+    }
+
+    fn field_index(&mut self) -> Arc<FieldWriteIndex> {
+        if let Some(index) = &self.field_index {
+            return Arc::clone(index);
+        }
+        let index = get_or_build_field_index(
+            self.snapshot,
+            self.project_id,
+            self.program,
+            self.lookup_files,
+        );
+        self.field_index = Some(Arc::clone(&index));
+        index
+    }
+
     fn resolve_target(&mut self, node: P<Node>) -> TraceOutcome {
         let mut active = Vec::new();
         let mut out = self.resolve_node(node, &[], node, 0, &mut active);
@@ -1437,13 +1479,14 @@ impl InstanceResolver<'_> {
         // Empty or non-matching stack: check direct callers of `fn_node` in the project call graph.
         if call_stack.is_empty() {
             let fn_sym = canonical_symbol_for_node(self.checker, fn_node);
+            let graph = self.call_graph();
             let mut site_indices = Vec::new();
             if let Some(sym) = fn_sym
-                && let Some(indices) = self.call_graph.by_symbol.get(&sym)
+                && let Some(indices) = graph.by_symbol.get(&sym)
             {
                 site_indices.extend_from_slice(indices);
             }
-            if let Some(indices) = self.call_graph.by_decl.get(&fn_node) {
+            if let Some(indices) = graph.by_decl.get(&fn_node) {
                 for &idx in indices {
                     if !site_indices.contains(&idx) {
                         site_indices.push(idx);
@@ -1454,7 +1497,7 @@ impl InstanceResolver<'_> {
             if !site_indices.is_empty() {
                 let mut combined = TraceOutcome::default();
                 for idx in site_indices {
-                    let call_node = self.call_graph.sites[idx].call_node;
+                    let call_node = graph.sites[idx].call_node;
                     if let Some(&arg) = call_node.arguments().get(param_idx) {
                         let mut sub = self.resolve_node(arg, &[], arg, depth + 1, active);
                         if let Some(loc) = node_location_rel(self.cwd, call_node) {
@@ -2340,7 +2383,7 @@ impl InstanceResolver<'_> {
         depth: usize,
         active: &mut Vec<VisitKey>,
     ) -> Vec<(FieldWriteSite, Vec<CallFrame>)> {
-        let field_index = Arc::clone(&self.field_index);
+        let field_index = self.field_index();
         let Some(all_writes) = field_index.writes_by_field.get(prop_name) else {
             return Vec::new();
         };
@@ -2668,20 +2711,21 @@ impl InstanceResolver<'_> {
     }
 
     fn collect_callers_for_fn(&mut self, fn_node: P<Node>) -> Vec<P<Node>> {
+        let graph = self.call_graph();
         let mut indices = Vec::new();
         if let Some(sym) = canonical_symbol_for_node(self.checker, fn_node)
-            && let Some(list) = self.call_graph.by_symbol.get(&sym)
+            && let Some(list) = graph.by_symbol.get(&sym)
         {
             indices.extend_from_slice(list);
         }
-        if let Some(list) = self.call_graph.by_decl.get(&fn_node) {
+        if let Some(list) = graph.by_decl.get(&fn_node) {
             indices.extend_from_slice(list);
         }
         indices.sort_unstable();
         indices.dedup();
         indices
             .into_iter()
-            .map(|idx| self.call_graph.sites[idx].call_node)
+            .map(|idx| graph.sites[idx].call_node)
             .collect()
     }
 }
@@ -2821,6 +2865,7 @@ pub fn run_resolve_instances(
     checker: &mut CheckerHandle,
     targets: &[String],
     models: &[InstanceModelInput],
+    lookup_files: Option<&[String]>,
 ) -> Result<Vec<InstanceResolutionRow>, RpcErr> {
     let mut target_nodes = Vec::with_capacity(targets.len());
     for handle_id in targets {
@@ -2830,8 +2875,6 @@ pub fn run_resolve_instances(
         ));
     }
 
-    let call_graph = get_or_build_call_graph(snapshot, project_id, program, checker);
-    let field_index = get_or_build_field_index(snapshot, project_id, program);
     let cwd = snapshot.cwd.clone();
     let package_impl_cache = snapshot.package_impl_cache.clone();
 
@@ -2841,8 +2884,11 @@ pub fn run_resolve_instances(
             cwd: &cwd,
             program,
             checker,
-            call_graph,
-            field_index,
+            snapshot,
+            project_id,
+            lookup_files,
+            call_graph: None,
+            field_index: None,
             package_impl_cache,
             models,
         };
