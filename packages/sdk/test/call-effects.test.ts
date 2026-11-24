@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -18,35 +15,11 @@ import {
   type InstanceRef,
   type SyntaxRef,
 } from "@verule/sdk";
-
-function createTempProject(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "verule-call-effects-test-"));
-  if (!("tsconfig.json" in files)) {
-    writeFileSync(
-      join(root, "tsconfig.json"),
-      JSON.stringify(
-        {
-          compilerOptions: {
-            strict: true,
-            target: "ES2022",
-            module: "NodeNext",
-            moduleResolution: "NodeNext",
-          },
-          include: ["src/**/*"],
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-  }
-  for (const [relPath, content] of Object.entries(files)) {
-    const absPath = join(root, relPath);
-    mkdirSync(join(absPath, ".."), { recursive: true });
-    writeFileSync(absPath, content, "utf8");
-  }
-  return root;
-}
+import {
+  copyDirectory,
+  resolveHostDir,
+  withTempHost,
+} from "@verule/test-hosts";
 
 const LIFECYCLE_MODEL = defineModel({
   id: "test-lifecycle-model",
@@ -111,1293 +84,1023 @@ const LIFECYCLE_MODEL = defineModel({
 
 void describe("@verule/sdk call-effects and instanceCleanup", () => {
   void it("identifies both target A and wrongly disposed B, preserves conclusions across cross-file helpers/wrappers, distinguishes .value/.clear() vs .delete(), and retains known effects with dynamic Gaps", async () => {
-    const root = createTempProject({
-      "node_modules/@acme/lifecycle/index.d.ts": [
-        "export interface IDisposable {",
-        "  dispose(): void;",
-        "}",
-        "export declare class DisposableStore implements IDisposable {",
-        "  add<T extends IDisposable>(o: T): T;",
-        "  delete<T extends IDisposable>(o: T): void;",
-        "  clear(): void;",
-        "  dispose(): void;",
-        "}",
-        "export declare class MutableDisposable<T extends IDisposable = IDisposable> implements IDisposable {",
-        "  value: T | undefined;",
-        "  clear(): void;",
-        "  dispose(): void;",
-        "}",
-        "export declare class Disposable implements IDisposable {",
-        "  protected _register<T extends IDisposable>(o: T): T;",
-        "  dispose(): void;",
-        "}",
-        "export declare function createExternalResource(name: string): IDisposable;",
-        "export declare function onDidDisconnect(cb: () => void): IDisposable;",
-        "",
-      ].join("\n"),
-      "node_modules/@acme/lifecycle/package.json": JSON.stringify(
-        {
-          name: "@acme/lifecycle",
-          version: "1.0.0",
-          types: "./index.d.ts",
+    await withTempHost(
+      {
+        host: "sdk-queries/call-effects-cleanup",
+        setup: (host) => {
+          copyDirectory(
+            resolveHostDir("sdk-queries/acme-lifecycle"),
+            host.resolvePath("node_modules/@acme/lifecycle"),
+          );
         },
-        null,
-        2,
-      ),
-      "src/leaf.ts": [
-        "import type { IDisposable } from '@acme/lifecycle';",
-        "",
-        "export function finalRelease(target: IDisposable): void {",
-        "  target.dispose();",
-        "}",
-        "",
-      ].join("\n"),
-      "src/helpers.ts": [
-        "import { DisposableStore, type IDisposable } from '@acme/lifecycle';",
-        "import { finalRelease } from './leaf.js';",
-        "",
-        "export function cleanupHelper(item: IDisposable): void {",
-        "  finalRelease(item);",
-        "}",
-        "",
-        "export function makeStoreWrapper(item: IDisposable): IDisposable {",
-        "  const store = new DisposableStore();",
-        "  store.add(item);",
-        "  return { dispose: () => store.dispose() };",
-        "}",
-        "",
-      ].join("\n"),
-      "src/scenarios.ts": [
-        "import {",
-        "  DisposableStore,",
-        "  MutableDisposable,",
-        "  createExternalResource,",
-        "  onDidDisconnect,",
-        "  type IDisposable,",
-        "} from '@acme/lifecycle';",
-        "import { cleanupHelper, makeStoreWrapper } from './helpers.js';",
-        "",
-        "export function closeAButCleanB(): void {",
-        "  const resourceA = createExternalResource('A');",
-        "  const resourceB = createExternalResource('B');",
-        "  onDidDisconnect(() => {",
-        "    resourceB.dispose();",
-        "  });",
-        "  void resourceA;",
-        "}",
-        "",
-        "export function extractedHelperCleanup(): void {",
-        "  const resourceA = createExternalResource('A-helper');",
-        "  onDidDisconnect(() => {",
-        "    cleanupHelper(resourceA);",
-        "  });",
-        "}",
-        "",
-        "export function containerWrapperCleanup(): void {",
-        "  const resourceA = createExternalResource('A-wrap');",
-        "  const resourceB = createExternalResource('B-wrap');",
-        "  const wrapperA = makeStoreWrapper(resourceA);",
-        "  const wrapperB = makeStoreWrapper(resourceB);",
-        "  onDidDisconnect(() => {",
-        "    wrapperA.dispose();",
-        "  });",
-        "  void wrapperB;",
-        "}",
-        "",
-        "export function mutableReplaceAndClear(): void {",
-        "  const slot = new MutableDisposable<IDisposable>();",
-        "  const first = createExternalResource('first');",
-        "  const second = createExternalResource('second');",
-        "  slot.value = first;",
-        "  const replaceWrite = () => {",
-        "    slot.value = second;",
-        "  };",
-        "  const clearSlot = () => {",
-        "    slot.clear();",
-        "  };",
-        "  void [replaceWrite, clearSlot];",
-        "}",
-        "",
-        "export function detachWithoutDispose(): void {",
-        "  const store = new DisposableStore();",
-        "  const conn = createExternalResource('conn');",
-        "  store.add(conn);",
-        "  onDidDisconnect(() => {",
-        "    store.delete(conn);",
-        "  });",
-        "}",
-        "",
-        "export function conditionalAndDeadCleanup(flag: boolean, kind: 'a' | 'b'): void {",
-        "  const resPartial = createExternalResource('partial');",
-        "  const resCovered = createExternalResource('covered');",
-        "  const resDead = createExternalResource('dead');",
-        "  const partialCb = () => {",
-        "    if (flag) {",
-        "      resPartial.dispose();",
-        "    }",
-        "  };",
-        "  const multiBranchCb = () => {",
-        "    if (kind === 'a') {",
-        "      cleanupHelper(resCovered);",
-        "    } else {",
-        "      resCovered.dispose();",
-        "    }",
-        "  };",
-        "  const deadCb = () => {",
-        "    if (false) {",
-        "      resDead.dispose();",
-        "    }",
-        "  };",
-        "  void [partialCb, multiBranchCb, deadCb];",
-        "}",
-        "",
-        "export function dynamicCallbackMix(extraCb?: () => void): void {",
-        "  const resA = createExternalResource('dyn-A');",
-        "  const resB = createExternalResource('dyn-B');",
-        "  const knownPlusDyn = () => {",
-        "    cleanupHelper(resA);",
-        "    extraCb?.();",
-        "  };",
-        "  const wrongPlusDyn = () => {",
-        "    resB.dispose();",
-        "    extraCb?.();",
-        "  };",
-        "  void [knownPlusDyn, wrongPlusDyn];",
-        "}",
-        "",
-      ].join("\n"),
-    });
-
-    const recorded: Record<string, InstanceCleanupScopeResult> = {};
-    const instancesByName = new Map<string, InstanceRef>();
-
-    const rule = defineRule({
-      id: "verify-cleanup-paths",
-      run: async (ctx) => {
-        const fns = await ctx.findSyntax({
-          files: ["src/scenarios.ts"],
-          kinds: ["FunctionDeclaration"],
-        });
-        const varDecls = await ctx.findSyntax({
-          files: ["src/scenarios.ts"],
-          kinds: ["VariableDeclaration"],
-        });
-        const calls = await ctx.findSyntax({
-          files: ["src/scenarios.ts"],
-          kinds: ["CallExpression"],
-        });
-
-        const getVarInitInFn = (fnName: string, varName: string): SyntaxRef => {
-          const fn = fns.find((f) => f.text.includes(`function ${fnName}(`))!;
-          const decl = varDecls.find(
-            (v) =>
-              v.location.start >= fn.location.start &&
-              v.location.end <= fn.location.end &&
-              v.text.startsWith(`${varName} =`),
-          )!;
-          return decl.initializer ?? decl.ref;
-        };
-
-        const resolveVar = async (
-          fnName: string,
-          varName: string,
-        ): Promise<InstanceRef> => {
-          const target = getVarInitInFn(fnName, varName);
-          const [res] = await ctx.resolveInstances([target]);
-          assert.ok(
-            res?.instance,
-            `expected instance for ${fnName}.${varName}`,
-          );
-          instancesByName.set(`${fnName}.${varName}`, res.instance);
-          return res.instance;
-        };
-
-        const getDisconnectCall = (fnName: string): SyntaxRef => {
-          const fn = fns.find((f) => f.text.includes(`function ${fnName}(`))!;
-          return calls.find(
-            (c) =>
-              c.location.start >= fn.location.start &&
-              c.location.end <= fn.location.end &&
-              c.text.startsWith("onDidDisconnect("),
-          )!.ref;
-        };
-
-        // 1. Close A but clean B
-        const instA1 = await resolveVar("closeAButCleanB", "resourceA");
-        const instB1 = await resolveVar("closeAButCleanB", "resourceB");
-        const [res1] = await ctx.instanceCleanup({
-          scopes: [getDisconnectCall("closeAButCleanB")],
-          targets: [instA1],
-        });
-        recorded.closeAButCleanB = res1!;
-        if (res1 && !res1.targetResults[0]!.cleanedOnAllPaths) {
-          const wrong = res1.disposedInstances.find(
-            (d) => !isSameInstance(d.instance, instA1),
-          );
-          assert.ok(wrong && isSameInstance(wrong.instance, instB1));
-          ctx.report({
-            at: res1.targetResults[0]!.allocationLocation!,
-            message: `Resource A (${res1.targetResults[0]!.instanceKey}) was not disposed; callback disposed B (${wrong.instanceKey}) instead.`,
-            basis: [res1.targetResults[0]!, wrong],
-          });
-        }
-
-        // 2. Extracted cross-file helper (multi-hop)
-        const instA2 = await resolveVar("extractedHelperCleanup", "resourceA");
-        const [res2] = await ctx.instanceCleanup({
-          scopes: [getDisconnectCall("extractedHelperCleanup")],
-          targets: [instA2],
-          lookupFiles: ["src/scenarios.ts"],
-        });
-        recorded.extractedHelperCleanup = res2!;
-
-        // 3. Container wrapper ({ dispose: () => store.dispose() })
-        const instA3 = await resolveVar("containerWrapperCleanup", "resourceA");
-        const instB3 = await resolveVar("containerWrapperCleanup", "resourceB");
-        const [containerWrapperNarrow] = await ctx.instanceCleanup({
-          scopes: [getDisconnectCall("containerWrapperCleanup")],
-          targets: [instA3, instB3],
-          lookupFiles: ["src/scenarios.ts"],
-        });
-        recorded.containerWrapperNarrow = containerWrapperNarrow!;
-        const [res3] = await ctx.instanceCleanup({
-          scopes: [getDisconnectCall("containerWrapperCleanup")],
-          targets: [instA3, instB3],
-          lookupFiles: ["src/scenarios.ts", "src/helpers.ts"],
-        });
-        recorded.containerWrapperCleanup = res3!;
-
-        // 4. MutableDisposable.value = ... and .clear()
-        const firstInst = await resolveVar("mutableReplaceAndClear", "first");
-        const secondInst = await resolveVar("mutableReplaceAndClear", "second");
-        const replaceCb = getVarInitInFn(
-          "mutableReplaceAndClear",
-          "replaceWrite",
-        );
-        const clearCb = getVarInitInFn("mutableReplaceAndClear", "clearSlot");
-        const [resReplace, resClear] = await ctx.instanceCleanup({
-          scopes: [replaceCb, clearCb],
-          targets: [firstInst, secondInst],
-        });
-        recorded.mutableReplace = resReplace!;
-        recorded.mutableClear = resClear!;
-
-        // 5. Detach via .delete() without dispose
-        const connInst = await resolveVar("detachWithoutDispose", "conn");
-        const [resDetach] = await ctx.instanceCleanup({
-          scopes: [getDisconnectCall("detachWithoutDispose")],
-          targets: [connInst],
-        });
-        recorded.detachWithoutDispose = resDetach!;
-
-        // 6. Conditional, multi-branch, and dead cleanup
-        const resPartial = await resolveVar(
-          "conditionalAndDeadCleanup",
-          "resPartial",
-        );
-        const resCovered = await resolveVar(
-          "conditionalAndDeadCleanup",
-          "resCovered",
-        );
-        const resDead = await resolveVar(
-          "conditionalAndDeadCleanup",
-          "resDead",
-        );
-        const [partialRes] = await ctx.instanceCleanup({
-          scopes: [getVarInitInFn("conditionalAndDeadCleanup", "partialCb")],
-          targets: [resPartial],
-        });
-        const [multiRes] = await ctx.instanceCleanup({
-          scopes: [
-            getVarInitInFn("conditionalAndDeadCleanup", "multiBranchCb"),
-          ],
-          targets: [resCovered],
-        });
-        const [deadRes] = await ctx.instanceCleanup({
-          scopes: [getVarInitInFn("conditionalAndDeadCleanup", "deadCb")],
-          targets: [resDead],
-        });
-        recorded.partial = partialRes!;
-        recorded.multiBranch = multiRes!;
-        recorded.dead = deadRes!;
-
-        // 7. Dynamic callback alongside known static cleanup
-        const dynA = await resolveVar("dynamicCallbackMix", "resA");
-        const dynB = await resolveVar("dynamicCallbackMix", "resB");
-        const [knownDynRes] = await ctx.instanceCleanup({
-          scopes: [getVarInitInFn("dynamicCallbackMix", "knownPlusDyn")],
-          targets: [dynA],
-        });
-        const [wrongDynRes] = await ctx.instanceCleanup({
-          scopes: [getVarInitInFn("dynamicCallbackMix", "wrongPlusDyn")],
-          targets: [dynA],
-        });
-        recorded.knownPlusDyn = knownDynRes!;
-        recorded.wrongPlusDyn = wrongDynRes!;
-        void dynB;
       },
-    });
+      async (host) => {
+        await host.typecheck();
 
-    try {
-      const report = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          tsconfig: "tsconfig.json",
-          models: [LIFECYCLE_MODEL],
-          rules: [rule],
-        }),
-      });
+        const recorded: Record<string, InstanceCleanupScopeResult> = {};
+        const instancesByName = new Map<string, InstanceRef>();
 
-      assert.equal(report.status, "findings");
-      assert.equal(report.diagnostics.length, 1);
+        const rule = defineRule({
+          id: "verify-cleanup-paths",
+          run: async (ctx) => {
+            const fns = await ctx.findSyntax({
+              files: ["src/scenarios.ts"],
+              kinds: ["FunctionDeclaration"],
+            });
+            const varDecls = await ctx.findSyntax({
+              files: ["src/scenarios.ts"],
+              kinds: ["VariableDeclaration"],
+            });
+            const calls = await ctx.findSyntax({
+              files: ["src/scenarios.ts"],
+              kinds: ["CallExpression"],
+            });
 
-      // Verify close A clean B
-      const closeAB = recorded.closeAButCleanB!;
-      assert.equal(closeAB.targetResults[0]!.status, "not-cleaned");
-      assert.equal(closeAB.targetResults[0]!.cleanedOnAllPaths, false);
-      assert.equal(closeAB.disposedInstances.length, 1);
-      assert.ok(
-        isSameInstance(
-          closeAB.disposedInstances[0]!.instance,
-          instancesByName.get("closeAButCleanB.resourceB"),
-        ),
-      );
-      assert.ok(closeAB.disposedInstances[0]!.allocationLocation !== null);
+            const getVarInitInFn = (
+              fnName: string,
+              varName: string,
+            ): SyntaxRef => {
+              const fn = fns.find((f) =>
+                f.text.includes(`function ${fnName}(`),
+              )!;
+              const decl = varDecls.find(
+                (v) =>
+                  v.location.start >= fn.location.start &&
+                  v.location.end <= fn.location.end &&
+                  v.text.startsWith(`${varName} =`),
+              )!;
+              return decl.initializer ?? decl.ref;
+            };
 
-      // Verify cross-file helper multi-hop forwarding
-      const helperRes = recorded.extractedHelperCleanup!;
-      assert.equal(helperRes.targetResults[0]!.status, "covered");
-      assert.equal(helperRes.targetResults[0]!.cleanedOnAllPaths, true);
-      assert.ok(
-        helperRes.targetResults[0]!.evidence.some(
-          (e) =>
-            e.message.includes("cleanupHelper") ||
-            e.message.includes("finalRelease"),
-        ),
-      );
+            const resolveVar = async (
+              fnName: string,
+              varName: string,
+            ): Promise<InstanceRef> => {
+              const target = getVarInitInFn(fnName, varName);
+              const [res] = await ctx.resolveInstances([target]);
+              assert.ok(
+                res?.instance,
+                `expected instance for ${fnName}.${varName}`,
+              );
+              instancesByName.set(`${fnName}.${varName}`, res.instance);
+              return res.instance;
+            };
 
-      // Verify container wrapper only cleans wrapped A, not B
-      const wrapRes = recorded.containerWrapperCleanup!;
-      assert.equal(wrapRes.targetResults[0]!.status, "covered");
-      assert.equal(wrapRes.targetResults[1]!.status, "not-cleaned");
-      assert.equal(
-        recorded.containerWrapperNarrow!.targetResults[0]!.status,
-        "not-cleaned",
-      );
-      assert.equal(
-        recorded.containerWrapperNarrow!.targetResults[1]!.status,
-        "not-cleaned",
-      );
+            const getDisconnectCall = (fnName: string): SyntaxRef => {
+              const fn = fns.find((f) =>
+                f.text.includes(`function ${fnName}(`),
+              )!;
+              return calls.find(
+                (c) =>
+                  c.location.start >= fn.location.start &&
+                  c.location.end <= fn.location.end &&
+                  c.text.startsWith("onDidDisconnect("),
+              )!.ref;
+            };
 
-      // Verify MutableDisposable.value = second disposes first, and .clear() disposes second
-      const repRes = recorded.mutableReplace!;
-      assert.equal(repRes.targetResults[0]!.status, "covered");
-      assert.equal(
-        repRes.targetResults[0]!.cleanupSites[0]!.operationKind,
-        "replaces-previous-value",
-      );
-      assert.equal(repRes.targetResults[1]!.status, "not-cleaned");
-      const clrRes = recorded.mutableClear!;
-      assert.equal(clrRes.targetResults[1]!.status, "covered");
+            // 1. Close A but clean B
+            const instA1 = await resolveVar("closeAButCleanB", "resourceA");
+            const instB1 = await resolveVar("closeAButCleanB", "resourceB");
+            const [res1] = await ctx.instanceCleanup({
+              scopes: [getDisconnectCall("closeAButCleanB")],
+              targets: [instA1],
+            });
+            recorded.closeAButCleanB = res1!;
+            if (res1 && !res1.targetResults[0]!.cleanedOnAllPaths) {
+              const wrong = res1.disposedInstances.find(
+                (d) => !isSameInstance(d.instance, instA1),
+              );
+              assert.ok(wrong && isSameInstance(wrong.instance, instB1));
+              ctx.report({
+                at: res1.targetResults[0]!.allocationLocation!,
+                message: `Resource A (${res1.targetResults[0]!.instanceKey}) was not disposed; callback disposed B (${wrong.instanceKey}) instead.`,
+                basis: [res1.targetResults[0]!, wrong],
+              });
+            }
 
-      // Verify .delete() detaches without disposing
-      const detRes = recorded.detachWithoutDispose!;
-      assert.equal(detRes.targetResults[0]!.status, "not-cleaned");
-      assert.equal(detRes.disposedInstances.length, 0);
-      assert.equal(detRes.detachedInstances.length, 1);
-      assert.ok(
-        isSameInstance(
-          detRes.detachedInstances[0]!.instance,
-          instancesByName.get("detachWithoutDispose.conn"),
-        ),
-      );
+            // 2. Extracted cross-file helper (multi-hop)
+            const instA2 = await resolveVar(
+              "extractedHelperCleanup",
+              "resourceA",
+            );
+            const [res2] = await ctx.instanceCleanup({
+              scopes: [getDisconnectCall("extractedHelperCleanup")],
+              targets: [instA2],
+              lookupFiles: ["src/scenarios.ts"],
+            });
+            recorded.extractedHelperCleanup = res2!;
 
-      // Verify partial, multi-branch covered, and dead
-      assert.equal(recorded.partial!.targetResults[0]!.status, "partial");
-      assert.equal(recorded.partial!.targetResults[0]!.cleanedOnAnyPath, true);
-      assert.equal(
-        recorded.partial!.targetResults[0]!.cleanedOnAllPaths,
-        false,
-      );
+            // 3. Container wrapper ({ dispose: () => store.dispose() })
+            const instA3 = await resolveVar(
+              "containerWrapperCleanup",
+              "resourceA",
+            );
+            const instB3 = await resolveVar(
+              "containerWrapperCleanup",
+              "resourceB",
+            );
+            const [containerWrapperNarrow] = await ctx.instanceCleanup({
+              scopes: [getDisconnectCall("containerWrapperCleanup")],
+              targets: [instA3, instB3],
+              lookupFiles: ["src/scenarios.ts"],
+            });
+            recorded.containerWrapperNarrow = containerWrapperNarrow!;
+            const [res3] = await ctx.instanceCleanup({
+              scopes: [getDisconnectCall("containerWrapperCleanup")],
+              targets: [instA3, instB3],
+              lookupFiles: ["src/scenarios.ts", "src/helpers.ts"],
+            });
+            recorded.containerWrapperCleanup = res3!;
 
-      assert.equal(recorded.multiBranch!.targetResults[0]!.status, "covered");
-      assert.equal(
-        recorded.multiBranch!.targetResults[0]!.cleanedOnAllPaths,
-        true,
-      );
+            // 4. MutableDisposable.value = ... and .clear()
+            const firstInst = await resolveVar(
+              "mutableReplaceAndClear",
+              "first",
+            );
+            const secondInst = await resolveVar(
+              "mutableReplaceAndClear",
+              "second",
+            );
+            const replaceCb = getVarInitInFn(
+              "mutableReplaceAndClear",
+              "replaceWrite",
+            );
+            const clearCb = getVarInitInFn(
+              "mutableReplaceAndClear",
+              "clearSlot",
+            );
+            const [resReplace, resClear] = await ctx.instanceCleanup({
+              scopes: [replaceCb, clearCb],
+              targets: [firstInst, secondInst],
+            });
+            recorded.mutableReplace = resReplace!;
+            recorded.mutableClear = resClear!;
 
-      assert.equal(recorded.dead!.targetResults[0]!.status, "not-cleaned");
-      assert.equal(recorded.dead!.targetResults[0]!.cleanedOnAnyPath, false);
+            // 5. Detach via .delete() without dispose
+            const connInst = await resolveVar("detachWithoutDispose", "conn");
+            const [resDetach] = await ctx.instanceCleanup({
+              scopes: [getDisconnectCall("detachWithoutDispose")],
+              targets: [connInst],
+            });
+            recorded.detachWithoutDispose = resDetach!;
 
-      // Verify dynamic callback preserves known effects and gaps
-      const kDyn = recorded.knownPlusDyn!;
-      assert.equal(kDyn.targetResults[0]!.status, "covered");
-      assert.equal(kDyn.disposedInstances.length, 1);
-      assert.ok(kDyn.gaps.some((g) => g.kind === "dynamic-callee"));
+            // 6. Conditional, multi-branch, and dead cleanup
+            const resPartial = await resolveVar(
+              "conditionalAndDeadCleanup",
+              "resPartial",
+            );
+            const resCovered = await resolveVar(
+              "conditionalAndDeadCleanup",
+              "resCovered",
+            );
+            const resDead = await resolveVar(
+              "conditionalAndDeadCleanup",
+              "resDead",
+            );
+            const [partialRes] = await ctx.instanceCleanup({
+              scopes: [
+                getVarInitInFn("conditionalAndDeadCleanup", "partialCb"),
+              ],
+              targets: [resPartial],
+            });
+            const [multiRes] = await ctx.instanceCleanup({
+              scopes: [
+                getVarInitInFn("conditionalAndDeadCleanup", "multiBranchCb"),
+              ],
+              targets: [resCovered],
+            });
+            const [deadRes] = await ctx.instanceCleanup({
+              scopes: [getVarInitInFn("conditionalAndDeadCleanup", "deadCb")],
+              targets: [resDead],
+            });
+            recorded.partial = partialRes!;
+            recorded.multiBranch = multiRes!;
+            recorded.dead = deadRes!;
 
-      const wDyn = recorded.wrongPlusDyn!;
-      assert.equal(wDyn.targetResults[0]!.status, "unknown");
-      assert.equal(wDyn.disposedInstances.length, 1);
-      assert.ok(
-        isSameInstance(
-          wDyn.disposedInstances[0]!.instance,
-          instancesByName.get("dynamicCallbackMix.resB"),
-        ),
-      );
-      assert.ok(wDyn.gaps.some((g) => g.kind === "dynamic-callee"));
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+            // 7. Dynamic callback alongside known static cleanup
+            const dynA = await resolveVar("dynamicCallbackMix", "resA");
+            const dynB = await resolveVar("dynamicCallbackMix", "resB");
+            const [knownDynRes] = await ctx.instanceCleanup({
+              scopes: [getVarInitInFn("dynamicCallbackMix", "knownPlusDyn")],
+              targets: [dynA],
+            });
+            const [wrongDynRes] = await ctx.instanceCleanup({
+              scopes: [getVarInitInFn("dynamicCallbackMix", "wrongPlusDyn")],
+              targets: [dynA],
+            });
+            recorded.knownPlusDyn = knownDynRes!;
+            recorded.wrongPlusDyn = wrongDynRes!;
+            void dynB;
+          },
+        });
+
+        const report = await runCheck({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            models: [LIFECYCLE_MODEL],
+            rules: [rule],
+          }),
+        });
+
+        assert.equal(report.status, "findings");
+        assert.equal(report.diagnostics.length, 1);
+
+        // Verify close A clean B
+        const closeAB = recorded.closeAButCleanB!;
+        assert.equal(closeAB.targetResults[0]!.status, "not-cleaned");
+        assert.equal(closeAB.targetResults[0]!.cleanedOnAllPaths, false);
+        assert.equal(closeAB.disposedInstances.length, 1);
+        assert.ok(
+          isSameInstance(
+            closeAB.disposedInstances[0]!.instance,
+            instancesByName.get("closeAButCleanB.resourceB"),
+          ),
+        );
+        assert.ok(closeAB.disposedInstances[0]!.allocationLocation !== null);
+
+        // Verify cross-file helper multi-hop forwarding
+        const helperRes = recorded.extractedHelperCleanup!;
+        assert.equal(helperRes.targetResults[0]!.status, "covered");
+        assert.equal(helperRes.targetResults[0]!.cleanedOnAllPaths, true);
+        assert.ok(
+          helperRes.targetResults[0]!.evidence.some(
+            (e) =>
+              e.message.includes("cleanupHelper") ||
+              e.message.includes("finalRelease"),
+          ),
+        );
+
+        // Verify container wrapper only cleans wrapped A, not B
+        const wrapRes = recorded.containerWrapperCleanup!;
+        assert.equal(wrapRes.targetResults[0]!.status, "covered");
+        assert.equal(wrapRes.targetResults[1]!.status, "not-cleaned");
+        assert.equal(
+          recorded.containerWrapperNarrow!.targetResults[0]!.status,
+          "not-cleaned",
+        );
+        assert.equal(
+          recorded.containerWrapperNarrow!.targetResults[1]!.status,
+          "not-cleaned",
+        );
+
+        // Verify MutableDisposable.value = second disposes first, and .clear() disposes second
+        const repRes = recorded.mutableReplace!;
+        assert.equal(repRes.targetResults[0]!.status, "covered");
+        assert.equal(
+          repRes.targetResults[0]!.cleanupSites[0]!.operationKind,
+          "replaces-previous-value",
+        );
+        assert.equal(repRes.targetResults[1]!.status, "not-cleaned");
+        const clrRes = recorded.mutableClear!;
+        assert.equal(clrRes.targetResults[1]!.status, "covered");
+
+        // Verify .delete() detaches without disposing
+        const detRes = recorded.detachWithoutDispose!;
+        assert.equal(detRes.targetResults[0]!.status, "not-cleaned");
+        assert.equal(detRes.disposedInstances.length, 0);
+        assert.equal(detRes.detachedInstances.length, 1);
+        assert.ok(
+          isSameInstance(
+            detRes.detachedInstances[0]!.instance,
+            instancesByName.get("detachWithoutDispose.conn"),
+          ),
+        );
+
+        // Verify partial, multi-branch covered, and dead
+        assert.equal(recorded.partial!.targetResults[0]!.status, "partial");
+        assert.equal(
+          recorded.partial!.targetResults[0]!.cleanedOnAnyPath,
+          true,
+        );
+        assert.equal(
+          recorded.partial!.targetResults[0]!.cleanedOnAllPaths,
+          false,
+        );
+
+        assert.equal(recorded.multiBranch!.targetResults[0]!.status, "covered");
+        assert.equal(
+          recorded.multiBranch!.targetResults[0]!.cleanedOnAllPaths,
+          true,
+        );
+
+        assert.equal(recorded.dead!.targetResults[0]!.status, "not-cleaned");
+        assert.equal(recorded.dead!.targetResults[0]!.cleanedOnAnyPath, false);
+
+        // Verify dynamic callback preserves known effects and gaps
+        const kDyn = recorded.knownPlusDyn!;
+        assert.equal(kDyn.targetResults[0]!.status, "covered");
+        assert.equal(kDyn.disposedInstances.length, 1);
+        assert.ok(kDyn.gaps.some((g) => g.kind === "dynamic-callee"));
+
+        const wDyn = recorded.wrongPlusDyn!;
+        assert.equal(wDyn.targetResults[0]!.status, "unknown");
+        assert.equal(wDyn.disposedInstances.length, 1);
+        assert.ok(
+          isSameInstance(
+            wDyn.disposedInstances[0]!.instance,
+            instancesByName.get("dynamicCallbackMix.resB"),
+          ),
+        );
+        assert.ok(wDyn.gaps.some((g) => g.kind === "dynamic-callee"));
+      },
+    );
   });
 
   void it("surfaces covered_by_cleanup and ExplainResult.cleanupPaths via session.explain when cleanup prevents a diagnostic", async () => {
-    const root = createTempProject({
-      "node_modules/@acme/lifecycle/index.d.ts": [
-        "export interface IDisposable { dispose(): void; }",
-        "export declare function createExternalResource(name: string): IDisposable;",
-        "export declare function onDidDisconnect(cb: () => void): IDisposable;",
-      ].join("\n"),
-      "node_modules/@acme/lifecycle/package.json": JSON.stringify({
-        name: "@acme/lifecycle",
-        version: "1.0.0",
-        types: "./index.d.ts",
-      }),
-      "src/helper.ts": [
-        "import type { IDisposable } from '@acme/lifecycle';",
-        "export function releaseResource(res: IDisposable): void {",
-        "  res.dispose();",
-        "}",
-      ].join("\n"),
-      "src/app.ts": [
-        "import { createExternalResource, onDidDisconnect } from '@acme/lifecycle';",
-        "import { releaseResource } from './helper.js';",
-        "",
-        "export function setupSession(): void {",
-        "  const conn = createExternalResource('conn');",
-        "  onDidDisconnect(() => {",
-        "    releaseResource(conn);",
-        "  });",
-        "}",
-      ].join("\n"),
-    });
+    await withTempHost(
+      {
+        host: "sdk-queries/call-effects-explain",
+        setup: (host) => {
+          copyDirectory(
+            resolveHostDir("sdk-queries/acme-lifecycle"),
+            host.resolvePath("node_modules/@acme/lifecycle"),
+          );
+        },
+      },
+      async (host) => {
+        await host.typecheck();
 
-    const rule = defineRule({
-      id: "require-disconnect-cleanup",
-      run: async (ctx) => {
-        const vars = await ctx.findSyntax({
-          files: ["src/app.ts"],
-          kinds: ["VariableDeclaration"],
-        });
-        const calls = await ctx.findSyntax({
-          files: ["src/app.ts"],
-          kinds: ["CallExpression"],
-        });
-        const connVar = vars.find((v) => v.text.startsWith("conn ="));
-        const disconnectCall = calls.find((c) =>
-          c.text.startsWith("onDidDisconnect("),
-        );
-        if (!connVar?.initializer || !disconnectCall) return;
+        const rule = defineRule({
+          id: "require-disconnect-cleanup",
+          run: async (ctx) => {
+            const vars = await ctx.findSyntax({
+              files: ["src/app.ts"],
+              kinds: ["VariableDeclaration"],
+            });
+            const calls = await ctx.findSyntax({
+              files: ["src/app.ts"],
+              kinds: ["CallExpression"],
+            });
+            const connVar = vars.find((v) => v.text.startsWith("conn ="));
+            const disconnectCall = calls.find((c) =>
+              c.text.startsWith("onDidDisconnect("),
+            );
+            if (!connVar?.initializer || !disconnectCall) return;
 
-        const [resolved] = await ctx.resolveInstances([connVar.initializer]);
-        if (!resolved?.instance) return;
+            const [resolved] = await ctx.resolveInstances([
+              connVar.initializer,
+            ]);
+            if (!resolved?.instance) return;
 
-        const [cleanup] = await ctx.instanceCleanup({
-          scopes: [disconnectCall.ref],
-          targets: [resolved.instance],
+            const [cleanup] = await ctx.instanceCleanup({
+              scopes: [disconnectCall.ref],
+              targets: [resolved.instance],
+            });
+            const targetRes = cleanup?.targetResults[0];
+            if (targetRes && !targetRes.cleanedOnAllPaths) {
+              ctx.report({
+                at: connVar.location,
+                message: "Connection resource is not disposed on disconnect.",
+              });
+            }
+          },
         });
-        const targetRes = cleanup?.targetResults[0];
-        if (targetRes && !targetRes.cleanedOnAllPaths) {
-          ctx.report({
-            at: connVar.location,
-            message: "Connection resource is not disposed on disconnect.",
+
+        const session = await openSession({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            models: [LIFECYCLE_MODEL],
+            rules: [rule],
+          }),
+        });
+
+        try {
+          const report = await session.check();
+          assert.equal(report.status, "clean");
+
+          const explained: ExplainReport = await session.explain({
+            ruleId: "require-disconnect-cleanup",
+            at: "src/app.ts:6",
           });
+          assert.equal(explained.explanation.status, "covered_by_cleanup");
+          assert.equal(explained.explanation.cleanupPaths.length, 1);
+          const cp = explained.explanation.cleanupPaths[0]!;
+          assert.equal(cp.allocationLocation?.file, "src/app.ts");
+          assert.equal(cp.allocationLocation?.line, 6);
+          assert.ok(
+            cp.cleanupLocations.some(
+              (l) => l.file === "src/app.ts" && l.line === 8,
+            ),
+          );
+          assert.ok(cp.modelIds.includes("test-lifecycle-model"));
+          assert.ok(
+            cp.evidence.some((e) => e.message.includes("releaseResource")),
+          );
+        } finally {
+          await session.close();
         }
       },
-    });
-
-    const session = await openSession({
-      cwd: root,
-      config: defineConfig({
-        tsconfig: "tsconfig.json",
-        models: [LIFECYCLE_MODEL],
-        rules: [rule],
-      }),
-    });
-
-    try {
-      const report = await session.check();
-      assert.equal(report.status, "clean");
-
-      const explained: ExplainReport = await session.explain({
-        ruleId: "require-disconnect-cleanup",
-        at: "src/app.ts:5",
-      });
-      assert.equal(explained.explanation.status, "covered_by_cleanup");
-      assert.equal(explained.explanation.cleanupPaths.length, 1);
-      const cp = explained.explanation.cleanupPaths[0]!;
-      assert.equal(cp.allocationLocation?.file, "src/app.ts");
-      assert.equal(cp.allocationLocation?.line, 5);
-      assert.ok(
-        cp.cleanupLocations.some(
-          (l) => l.file === "src/app.ts" && l.line === 7,
-        ),
-      );
-      assert.ok(cp.modelIds.includes("test-lifecycle-model"));
-      assert.ok(cp.evidence.some((e) => e.message.includes("releaseResource")));
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+    );
   });
 
   void it("distinguishes covered-branch-but-raw-argument from validated-output using the same query set", async () => {
-    const root = createTempProject({
-      "src/validator.ts": [
-        "export type RawPayload = { readonly untrusted: string };",
-        "export type ParsedPayload = { readonly clean: string };",
-        "export type ValidationResult =",
-        "  | { readonly ok: true; readonly data: ParsedPayload }",
-        "  | { readonly ok: false; readonly error: string };",
-        "",
-        "export function validate(raw: RawPayload): ValidationResult {",
-        "  const trimmed = raw.untrusted.trim();",
-        "  if (trimmed.length === 0) {",
-        "    return { ok: false, error: 'empty' };",
-        "  }",
-        "  return { ok: true, data: { clean: trimmed } };",
-        "}",
-        "",
-        "export function handler(_input: RawPayload | ParsedPayload): void {}",
-        "",
-      ].join("\n"),
-      "src/routes.ts": [
-        "import { handler, validate, type RawPayload } from './validator.js';",
-        "",
-        "export function unsafeRoute(raw: RawPayload): void {",
-        "  const parsed = validate(raw);",
-        "  if (!parsed.ok) {",
-        "    return;",
-        "  }",
-        "  handler(raw);",
-        "}",
-        "",
-        "export function safeRoute(raw: RawPayload): void {",
-        "  const parsed = validate(raw);",
-        "  if (!parsed.ok) {",
-        "    return;",
-        "  }",
-        "  handler(parsed.data);",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withTempHost(
+      { host: "sdk-queries/call-effects-validation" },
+      async (host) => {
+        await host.typecheck();
 
-    const routeAudit: Record<
-      string,
-      {
-        readonly branchStatus: string;
-        readonly rawPropagated: boolean;
-        readonly parsedDataPropagated: boolean;
-      }
-    > = {};
-
-    const validationRule = defineRule({
-      id: "require-validated-output",
-      run: async (ctx) => {
-        const fns = await ctx.findSyntax({
-          files: ["src/routes.ts"],
-          kinds: ["FunctionDeclaration"],
-        });
-        const calls = await ctx.findSyntax({
-          files: ["src/routes.ts"],
-          kinds: ["CallExpression"],
-        });
-        const branchesList = await ctx.listBranches(fns.map((fn) => fn.ref));
-        const fnEffects = await ctx.callEffects({
-          targets: fns.map((fn) => fn.ref),
-        });
-
-        for (const [fnIdx, fn] of fns.entries()) {
-          const fnName = fn.text.includes("unsafeRoute")
-            ? "unsafeRoute"
-            : "safeRoute";
-          const rawParam = fn.parameters?.[0];
-          const handlerCall = calls.find(
-            (c) =>
-              c.location.start >= fn.location.start &&
-              c.location.end <= fn.location.end &&
-              c.text.startsWith("handler("),
-          );
-          const validateCall = calls.find(
-            (c) =>
-              c.location.start >= fn.location.start &&
-              c.location.end <= fn.location.end &&
-              c.text.startsWith("validate("),
-          );
-          if (!rawParam || !handlerCall || !validateCall) continue;
-
-          const [resolvedHandler] = await ctx.resolveCalls([handlerCall.ref], {
-            select: { arguments: true },
-          });
-          const handlerArg = resolvedHandler?.arguments?.[0];
-          if (!handlerArg) continue;
-
-          // 1. Check control-flow branch coverage through `!parsed.ok` false branch (or early-return guard)
-          const fnBranches = branchesList[fnIdx]?.branches ?? [];
-          const okGuardBranch = fnBranches.find(
-            (b) =>
-              b.conditionText.includes("parsed.ok") && b.direction === "false",
-          );
-          const coverage = await ctx.branchCoverage({
-            function: fn.ref,
-            branches: okGuardBranch ? [okGuardBranch.ref] : [],
-            targets: [handlerCall.ref],
-          });
-
-          // 2. Collect field reads (`parsed.data`) via callEffects
-          const parsedDataReads = fnEffects[fnIdx]!.fieldReads.filter(
-            (r) => r.propertyName === "data",
-          );
-
-          // 3. Check valuePropagation from `raw` AND from `parsed.data` to `handlerArg`
-          const rawProp = await ctx.valuePropagation({
-            from: rawParam,
-            to: handlerArg,
-          });
-          const dataProp =
-            parsedDataReads.length > 0
-              ? await ctx.valuePropagation({
-                  from: parsedDataReads.map((r) => r.syntax),
-                  to: handlerArg,
-                })
-              : null;
-
-          const branchStatus = coverage[0]?.status ?? "unknown";
-          const rawPropagated = rawProp.reachableTargets.length > 0;
-          const parsedDataPropagated =
-            (dataProp?.reachableTargets.length ?? 0) > 0;
-
-          routeAudit[fnName] = {
-            branchStatus,
-            rawPropagated,
-            parsedDataPropagated,
-          };
-
-          if (
-            branchStatus !== "covered" ||
-            rawPropagated ||
-            !parsedDataPropagated
-          ) {
-            ctx.report({
-              at: handlerCall.location,
-              message: rawPropagated
-                ? "handler() was reached after validation succeeded, but received raw unvalidated input instead of parsed.data."
-                : "handler() did not receive validated output.",
-              basis: [...coverage, ...rawProp.results],
-            });
+        const routeAudit: Record<
+          string,
+          {
+            readonly branchStatus: string;
+            readonly rawPropagated: boolean;
+            readonly parsedDataPropagated: boolean;
           }
-        }
+        > = {};
+
+        const validationRule = defineRule({
+          id: "require-validated-output",
+          run: async (ctx) => {
+            const fns = await ctx.findSyntax({
+              files: ["src/routes.ts"],
+              kinds: ["FunctionDeclaration"],
+            });
+            const calls = await ctx.findSyntax({
+              files: ["src/routes.ts"],
+              kinds: ["CallExpression"],
+            });
+            const branchesList = await ctx.listBranches(
+              fns.map((fn) => fn.ref),
+            );
+            const fnEffects = await ctx.callEffects({
+              targets: fns.map((fn) => fn.ref),
+            });
+
+            for (const [fnIdx, fn] of fns.entries()) {
+              const fnName = fn.text.includes("unsafeRoute")
+                ? "unsafeRoute"
+                : "safeRoute";
+              const rawParam = fn.parameters?.[0];
+              const handlerCall = calls.find(
+                (c) =>
+                  c.location.start >= fn.location.start &&
+                  c.location.end <= fn.location.end &&
+                  c.text.startsWith("handler("),
+              );
+              const validateCall = calls.find(
+                (c) =>
+                  c.location.start >= fn.location.start &&
+                  c.location.end <= fn.location.end &&
+                  c.text.startsWith("validate("),
+              );
+              if (!rawParam || !handlerCall || !validateCall) continue;
+
+              const [resolvedHandler] = await ctx.resolveCalls(
+                [handlerCall.ref],
+                {
+                  select: { arguments: true },
+                },
+              );
+              const handlerArg = resolvedHandler?.arguments?.[0];
+              if (!handlerArg) continue;
+
+              // 1. Check control-flow branch coverage through `!parsed.ok` false branch (or early-return guard)
+              const fnBranches = branchesList[fnIdx]?.branches ?? [];
+              const okGuardBranch = fnBranches.find(
+                (b) =>
+                  b.conditionText.includes("parsed.ok") &&
+                  b.direction === "false",
+              );
+              const coverage = await ctx.branchCoverage({
+                function: fn.ref,
+                branches: okGuardBranch ? [okGuardBranch.ref] : [],
+                targets: [handlerCall.ref],
+              });
+
+              // 2. Collect field reads (`parsed.data`) via callEffects
+              const parsedDataReads = fnEffects[fnIdx]!.fieldReads.filter(
+                (r) => r.propertyName === "data",
+              );
+
+              // 3. Check valuePropagation from `raw` AND from `parsed.data` to `handlerArg`
+              const rawProp = await ctx.valuePropagation({
+                from: rawParam,
+                to: handlerArg,
+              });
+              const dataProp =
+                parsedDataReads.length > 0
+                  ? await ctx.valuePropagation({
+                      from: parsedDataReads.map((r) => r.syntax),
+                      to: handlerArg,
+                    })
+                  : null;
+
+              const branchStatus = coverage[0]?.status ?? "unknown";
+              const rawPropagated = rawProp.reachableTargets.length > 0;
+              const parsedDataPropagated =
+                (dataProp?.reachableTargets.length ?? 0) > 0;
+
+              routeAudit[fnName] = {
+                branchStatus,
+                rawPropagated,
+                parsedDataPropagated,
+              };
+
+              if (
+                branchStatus !== "covered" ||
+                rawPropagated ||
+                !parsedDataPropagated
+              ) {
+                ctx.report({
+                  at: handlerCall.location,
+                  message: rawPropagated
+                    ? "handler() was reached after validation succeeded, but received raw unvalidated input instead of parsed.data."
+                    : "handler() did not receive validated output.",
+                  basis: [...coverage, ...rawProp.results],
+                });
+              }
+            }
+          },
+        });
+
+        const report = await runCheck({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            rules: [validationRule],
+          }),
+        });
+
+        assert.deepEqual(routeAudit.unsafeRoute, {
+          branchStatus: "covered",
+          rawPropagated: true,
+          parsedDataPropagated: false,
+        });
+        assert.deepEqual(routeAudit.safeRoute, {
+          branchStatus: "covered",
+          rawPropagated: false,
+          parsedDataPropagated: true,
+        });
+        assert.equal(report.status, "findings");
+        assert.equal(report.diagnostics.length, 1);
+        assert.equal(report.diagnostics[0]!.at.file, "src/routes.ts");
+        assert.equal(report.diagnostics[0]!.at.line, 8);
       },
-    });
-
-    try {
-      const report = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          tsconfig: "tsconfig.json",
-          rules: [validationRule],
-        }),
-      });
-
-      assert.deepEqual(routeAudit.unsafeRoute, {
-        branchStatus: "covered",
-        rawPropagated: true,
-        parsedDataPropagated: false,
-      });
-      assert.deepEqual(routeAudit.safeRoute, {
-        branchStatus: "covered",
-        rawPropagated: false,
-        parsedDataPropagated: true,
-      });
-      assert.equal(report.status, "findings");
-      assert.equal(report.diagnostics.length, 1);
-      assert.equal(report.diagnostics[0]!.at.file, "src/routes.ts");
-      assert.equal(report.diagnostics[0]!.at.line, 8);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    );
   });
 
   void it("traces field reads/writes across cross-file callback helpers and checks branch guards on reentrant scheduler flags", async () => {
-    const root = createTempProject({
-      "src/errorHandling.ts": [
-        "export function callWithErrorHandling(",
-        "  fn: (...args: unknown[]) => unknown,",
-        "  args?: unknown[],",
-        "): unknown {",
-        "  return args ? fn(...args) : fn();",
-        "}",
-        "",
-      ].join("\n"),
-      "src/scheduler.ts": [
-        "import { callWithErrorHandling } from './errorHandling.js';",
-        "",
-        "export const SchedulerJobFlags = {",
-        "  QUEUED: 1 << 0,",
-        "  PRE: 1 << 1,",
-        "  ALLOW_RECURSE: 1 << 2,",
-        "} as const;",
-        "",
-        "export interface SchedulerJob {",
-        "  (): void;",
-        "  flags: number;",
-        "}",
-        "",
-        "const queue: SchedulerJob[] = [];",
-        "",
-        "export function queueJob(job: SchedulerJob): void {",
-        "  if (!(job.flags! & SchedulerJobFlags.QUEUED)) {",
-        "    job.flags! |= SchedulerJobFlags.QUEUED;",
-        "    queue.push(job);",
-        "  }",
-        "}",
-        "",
-        "export function flushJobBuggy(job: SchedulerJob): void {",
-        "  if (job.flags! & SchedulerJobFlags.ALLOW_RECURSE) {",
-        "    job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "  }",
-        "  callWithErrorHandling(() => {",
-        "    queueJob(job);",
-        "  });",
-        "  job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "}",
-        "",
-        "export function flushJobFixed(job: SchedulerJob): void {",
-        "  if (job.flags! & SchedulerJobFlags.ALLOW_RECURSE) {",
-        "    job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "  }",
-        "  callWithErrorHandling(() => {",
-        "    queueJob(job);",
-        "  });",
-        "  if (!(job.flags! & SchedulerJobFlags.ALLOW_RECURSE)) {",
-        "    job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "  }",
-        "}",
-        "",
-        "export function flushJobDynamic(job: SchedulerJob): void {",
-        "  if (job.flags! & SchedulerJobFlags.ALLOW_RECURSE) {",
-        "    job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "  }",
-        "  callWithErrorHandling(job);",
-        "  job.flags! &= ~SchedulerJobFlags.QUEUED;",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withTempHost(
+      { host: "sdk-queries/call-effects-scheduler" },
+      async (host) => {
+        await host.typecheck();
 
-    const effectsByFn = new Map<string, CallEffectsResult>();
-    const postCallGuardStatus: Record<string, string> = {};
+        const effectsByFn = new Map<string, CallEffectsResult>();
+        const postCallGuardStatus: Record<string, string> = {};
 
-    const schedulerRule = defineRule({
-      id: "reentrant-queue-flag-guard",
-      run: async (ctx) => {
-        const fns = await ctx.findSyntax({
-          files: ["src/scheduler.ts"],
-          kinds: ["FunctionDeclaration"],
-        });
-        const effectsList = await ctx.callEffects({
-          targets: fns.map((f) => f.ref),
-        });
-        const branchGroups = await ctx.listBranches(fns.map((f) => f.ref));
-
-        for (const [idx, fn] of fns.entries()) {
-          const nameMatch = /function\s+(\w+)/.exec(fn.text);
-          const fnName = nameMatch?.[1] ?? `fn_${idx}`;
-          const eff = effectsList[idx]!;
-          effectsByFn.set(fnName, eff);
-
-          if (!fnName.startsWith("flushJob")) continue;
-
-          // Find post-call `job.flags! &= ~SchedulerJobFlags.QUEUED` write directly inside `fn`
-          const directFlagClears = eff.fieldWrites.filter(
-            (w) =>
-              w.propertyName === "flags" &&
-              w.operator === "&=" &&
-              (w.valueText?.includes("QUEUED") ?? false) &&
-              w.viaCall === null,
-          );
-          const postCallClear = directFlagClears.at(-1);
-          assert.ok(
-            postCallClear,
-            `expected post-call clear write in ${fnName}`,
-          );
-
-          // Verify receiverSyntax can be chained into typeAt/resolveInstances
-          const [recvType] = await ctx.typeAt([postCallClear.receiverSyntax]);
-          assert.equal(recvType?.typeText, "SchedulerJob");
-
-          // Verify postCallClear.syntax can be chained directly into branchCoverage
-          const recurseFalseBranches = branchGroups[idx]!.branches.filter(
-            (b) =>
-              b.conditionText.includes("ALLOW_RECURSE") &&
-              ((b.conditionText.startsWith("!") && b.direction === "true") ||
-                (!b.conditionText.startsWith("!") && b.direction === "false")),
-          );
-          const [cov] = await ctx.branchCoverage({
-            function: fn.ref,
-            branches: recurseFalseBranches.map((b) => b.ref),
-            targets: [postCallClear.syntax],
-          });
-          postCallGuardStatus[fnName] = cov!.status;
-
-          if (cov!.status !== "covered") {
-            ctx.report({
-              at: postCallClear.location,
-              message: `Post-callback QUEUED clear in ${fnName} is not guarded by !(job.flags & ALLOW_RECURSE).`,
-              basis: [postCallClear, cov!],
+        const schedulerRule = defineRule({
+          id: "reentrant-queue-flag-guard",
+          run: async (ctx) => {
+            const fns = await ctx.findSyntax({
+              files: ["src/scheduler.ts"],
+              kinds: ["FunctionDeclaration"],
             });
-          }
-        }
+            const effectsList = await ctx.callEffects({
+              targets: fns.map((f) => f.ref),
+            });
+            const branchGroups = await ctx.listBranches(fns.map((f) => f.ref));
+
+            for (const [idx, fn] of fns.entries()) {
+              const nameMatch = /function\s+(\w+)/.exec(fn.text);
+              const fnName = nameMatch?.[1] ?? `fn_${idx}`;
+              const eff = effectsList[idx]!;
+              effectsByFn.set(fnName, eff);
+
+              if (!fnName.startsWith("flushJob")) continue;
+
+              // Find post-call `job.flags! &= ~SchedulerJobFlags.QUEUED` write directly inside `fn`
+              const directFlagClears = eff.fieldWrites.filter(
+                (w) =>
+                  w.propertyName === "flags" &&
+                  w.operator === "&=" &&
+                  (w.valueText?.includes("QUEUED") ?? false) &&
+                  w.viaCall === null,
+              );
+              const postCallClear = directFlagClears.at(-1);
+              assert.ok(
+                postCallClear,
+                `expected post-call clear write in ${fnName}`,
+              );
+
+              // Verify receiverSyntax can be chained into typeAt/resolveInstances
+              const [recvType] = await ctx.typeAt([
+                postCallClear.receiverSyntax,
+              ]);
+              assert.equal(recvType?.typeText, "SchedulerJob");
+
+              // Verify postCallClear.syntax can be chained directly into branchCoverage
+              const recurseFalseBranches = branchGroups[idx]!.branches.filter(
+                (b) =>
+                  b.conditionText.includes("ALLOW_RECURSE") &&
+                  ((b.conditionText.startsWith("!") &&
+                    b.direction === "true") ||
+                    (!b.conditionText.startsWith("!") &&
+                      b.direction === "false")),
+              );
+              const [cov] = await ctx.branchCoverage({
+                function: fn.ref,
+                branches: recurseFalseBranches.map((b) => b.ref),
+                targets: [postCallClear.syntax],
+              });
+              postCallGuardStatus[fnName] = cov!.status;
+
+              if (cov!.status !== "covered") {
+                ctx.report({
+                  at: postCallClear.location,
+                  message: `Post-callback QUEUED clear in ${fnName} is not guarded by !(job.flags & ALLOW_RECURSE).`,
+                  basis: [postCallClear, cov!],
+                });
+              }
+            }
+          },
+        });
+
+        const report = await runCheck({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            rules: [schedulerRule],
+          }),
+        });
+
+        // queueJob sets QUEUED with |=
+        const queueJobEff = effectsByFn.get("queueJob")!;
+        const queuedSet = queueJobEff.fieldWrites.find(
+          (w) => w.propertyName === "flags" && w.operator === "|=",
+        );
+        assert.ok(queuedSet);
+        assert.ok(queuedSet.valueText?.includes("SchedulerJobFlags.QUEUED"));
+
+        // flushJobBuggy traces through errorHandling.ts -> callback -> queueJob -> job.flags |= QUEUED!
+        const buggyEff = effectsByFn.get("flushJobBuggy")!;
+        assert.ok(
+          buggyEff.callbackInvocations.some(
+            (cb) =>
+              cb.location.file === "src/errorHandling.ts" &&
+              cb.parameterIndex === 0,
+          ),
+        );
+        const indirectQueuedSet = buggyEff.fieldWrites.find(
+          (w) => w.propertyName === "flags" && w.operator === "|=",
+        );
+        assert.ok(indirectQueuedSet);
+        assert.ok(indirectQueuedSet.viaCall !== null);
+        assert.ok(
+          indirectQueuedSet.evidence.some((e) =>
+            e.message.includes("callWithErrorHandling"),
+          ),
+        );
+        assert.ok(
+          indirectQueuedSet.evidence.some((e) =>
+            e.message.includes("queueJob"),
+          ),
+        );
+
+        // flushJobDynamic preserves direct writes AND records callbackInvocation + dynamic-callee Gap
+        const dynEff = effectsByFn.get("flushJobDynamic")!;
+        assert.ok(dynEff.fieldWrites.length >= 2);
+        assert.ok(
+          dynEff.callbackInvocations.some(
+            (cb) => cb.location.file === "src/errorHandling.ts",
+          ),
+        );
+        assert.ok(dynEff.gaps.some((g) => g.kind === "dynamic-callee"));
+
+        // branchCoverage distinguishes unguarded vs guarded post-call clear
+        assert.equal(postCallGuardStatus.flushJobBuggy, "bypass");
+        assert.equal(postCallGuardStatus.flushJobDynamic, "bypass");
+        assert.equal(postCallGuardStatus.flushJobFixed, "covered");
+
+        // flushJobFixed's clear also records structural guard
+        const fixedEff = effectsByFn.get("flushJobFixed")!;
+        const fixedPostClear = fixedEff.fieldWrites
+          .filter((w) => w.operator === "&=" && w.viaCall === null)
+          .at(-1)!;
+        assert.ok(
+          fixedPostClear.guards.some(
+            (g) =>
+              g.conditionText.includes("ALLOW_RECURSE") &&
+              g.direction === "true",
+          ),
+        );
+
+        // Report flags flushJobBuggy and flushJobDynamic, NOT flushJobFixed
+        assert.equal(report.status, "findings");
+        assert.equal(report.diagnostics.length, 2);
+        assert.ok(
+          report.diagnostics.every((d) => !d.message.includes("flushJobFixed")),
+        );
       },
-    });
-
-    try {
-      const report = await runCheck({
-        cwd: root,
-        config: defineConfig({
-          tsconfig: "tsconfig.json",
-          rules: [schedulerRule],
-        }),
-      });
-
-      // queueJob sets QUEUED with |=
-      const queueJobEff = effectsByFn.get("queueJob")!;
-      const queuedSet = queueJobEff.fieldWrites.find(
-        (w) => w.propertyName === "flags" && w.operator === "|=",
-      );
-      assert.ok(queuedSet);
-      assert.ok(queuedSet.valueText?.includes("SchedulerJobFlags.QUEUED"));
-
-      // flushJobBuggy traces through errorHandling.ts -> callback -> queueJob -> job.flags |= QUEUED!
-      const buggyEff = effectsByFn.get("flushJobBuggy")!;
-      assert.ok(
-        buggyEff.callbackInvocations.some(
-          (cb) =>
-            cb.location.file === "src/errorHandling.ts" &&
-            cb.parameterIndex === 0,
-        ),
-      );
-      const indirectQueuedSet = buggyEff.fieldWrites.find(
-        (w) => w.propertyName === "flags" && w.operator === "|=",
-      );
-      assert.ok(indirectQueuedSet);
-      assert.ok(indirectQueuedSet.viaCall !== null);
-      assert.ok(
-        indirectQueuedSet.evidence.some((e) =>
-          e.message.includes("callWithErrorHandling"),
-        ),
-      );
-      assert.ok(
-        indirectQueuedSet.evidence.some((e) => e.message.includes("queueJob")),
-      );
-
-      // flushJobDynamic preserves direct writes AND records callbackInvocation + dynamic-callee Gap
-      const dynEff = effectsByFn.get("flushJobDynamic")!;
-      assert.ok(dynEff.fieldWrites.length >= 2);
-      assert.ok(
-        dynEff.callbackInvocations.some(
-          (cb) => cb.location.file === "src/errorHandling.ts",
-        ),
-      );
-      assert.ok(dynEff.gaps.some((g) => g.kind === "dynamic-callee"));
-
-      // branchCoverage distinguishes unguarded vs guarded post-call clear
-      assert.equal(postCallGuardStatus.flushJobBuggy, "bypass");
-      assert.equal(postCallGuardStatus.flushJobDynamic, "bypass");
-      assert.equal(postCallGuardStatus.flushJobFixed, "covered");
-
-      // flushJobFixed's clear also records structural guard
-      const fixedEff = effectsByFn.get("flushJobFixed")!;
-      const fixedPostClear = fixedEff.fieldWrites
-        .filter((w) => w.operator === "&=" && w.viaCall === null)
-        .at(-1)!;
-      assert.ok(
-        fixedPostClear.guards.some(
-          (g) =>
-            g.conditionText.includes("ALLOW_RECURSE") && g.direction === "true",
-        ),
-      );
-
-      // Report flags flushJobBuggy and flushJobDynamic, NOT flushJobFixed
-      assert.equal(report.status, "findings");
-      assert.equal(report.diagnostics.length, 2);
-      assert.ok(
-        report.diagnostics.every((d) => !d.message.includes("flushJobFixed")),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    );
   });
 
   void it("rejects stale references in callEffects/instanceCleanup and invalidates cleanup cache when models update", async () => {
-    const root = createTempProject({
-      "node_modules/@acme/lifecycle/index.d.ts": [
-        "export interface IDisposable { dispose(): void; }",
-        "export declare function createExternalResource(name: string): IDisposable;",
-      ].join("\n"),
-      "node_modules/@acme/lifecycle/package.json": JSON.stringify({
-        name: "@acme/lifecycle",
-        version: "1.0.0",
-        types: "./index.d.ts",
-      }),
-      "src/app.ts": [
-        "import { createExternalResource } from '@acme/lifecycle';",
-        "export function run(): void {",
-        "  const item = createExternalResource('x');",
-        "  const close = () => {",
-        "    item.dispose();",
-        "  };",
-        "  void close;",
-        "}",
-      ].join("\n"),
-    });
-
-    let capturedScope: SyntaxRef | undefined;
-    let capturedInst: InstanceRef | undefined;
-    const statuses: string[] = [];
-
-    const checkRule = defineRule({
-      id: "check-stale-and-model-update",
-      run: async (ctx) => {
-        const vars = await ctx.findSyntax({ kinds: ["VariableDeclaration"] });
-        const itemVar = vars.find((v) => v.text.startsWith("item ="))!;
-        const closeVar = vars.find((v) => v.text.startsWith("close ="))!;
-        capturedScope = closeVar.initializer!;
-        const [instRes] = await ctx.resolveInstances([itemVar.initializer!]);
-        capturedInst = instRes!.instance!;
-        const [cleanupRes] = await ctx.instanceCleanup({
-          scopes: [capturedScope],
-          targets: [capturedInst],
-        });
-        statuses.push(cleanupRes!.targetResults[0]!.status);
+    await withTempHost(
+      {
+        host: "sdk-queries/call-effects-model-update",
+        setup: (host) => {
+          copyDirectory(
+            resolveHostDir("sdk-queries/acme-lifecycle"),
+            host.resolvePath("node_modules/@acme/lifecycle"),
+          );
+        },
       },
-    });
+      async (host) => {
+        await host.typecheck();
 
-    const session = await openSession({
-      cwd: root,
-      config: defineConfig({
-        tsconfig: "tsconfig.json",
-        models: [
-          defineModel({
-            id: "base-alloc",
-            instanceBehaviors: [
-              {
-                kind: "allocates-fresh-instance",
-                match: { symbol: "createExternalResource" },
-              },
+        let capturedScope: SyntaxRef | undefined;
+        let capturedInst: InstanceRef | undefined;
+        const statuses: string[] = [];
+
+        const checkRule = defineRule({
+          id: "check-stale-and-model-update",
+          run: async (ctx) => {
+            const vars = await ctx.findSyntax({
+              kinds: ["VariableDeclaration"],
+            });
+            const itemVar = vars.find((v) => v.text.startsWith("item ="))!;
+            const closeVar = vars.find((v) => v.text.startsWith("close ="))!;
+            capturedScope = closeVar.initializer!;
+            const [instRes] = await ctx.resolveInstances([
+              itemVar.initializer!,
+            ]);
+            capturedInst = instRes!.instance!;
+            const [cleanupRes] = await ctx.instanceCleanup({
+              scopes: [capturedScope],
+              targets: [capturedInst],
+            });
+            statuses.push(cleanupRes!.targetResults[0]!.status);
+          },
+        });
+
+        const session = await openSession({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            models: [
+              defineModel({
+                id: "base-alloc",
+                instanceBehaviors: [
+                  {
+                    kind: "allocates-fresh-instance",
+                    match: { symbol: "createExternalResource" },
+                  },
+                ],
+              }),
             ],
+            rules: [checkRule],
           }),
-        ],
-        rules: [checkRule],
-      }),
-    });
+        });
 
-    try {
-      await session.check();
-      // Without cleanupOperations model, external `.dispose()` is unmodeled and yields `unknown`
-      assert.equal(statuses[0], "unknown");
-      const staleScope = capturedScope!;
-      const staleInst = capturedInst!;
+        try {
+          await session.check();
+          // Without cleanupOperations model, external `.dispose()` is unmodeled and yields `unknown`
+          assert.equal(statuses[0], "unknown");
+          const staleScope = capturedScope!;
+          const staleInst = capturedInst!;
 
-      // Update models to add `disposes-target` for `.dispose()` -> must invalidate cache and return `covered`
-      await session.update({
-        models: [LIFECYCLE_MODEL],
-      });
-      await session.check();
-      assert.equal(statuses[1], "covered");
+          // Update models to add `disposes-target` for `.dispose()` -> must invalidate cache and return `covered`
+          await session.update({
+            models: [LIFECYCLE_MODEL],
+          });
+          await session.check();
+          assert.equal(statuses[1], "covered");
 
-      // Using stale refs captured from snapshot 1 in snapshot 2 must throw STALE_REFERENCE
-      await assert.rejects(
-        () =>
-          session.check([
-            defineRule({
-              id: "use-stale-refs",
-              run: async (ctx) => {
-                await ctx.callEffects({ targets: [staleScope] });
-              },
-            }),
-          ]),
-        (err: unknown) =>
-          err instanceof VeruleExecutionError && err.code === "STALE_REFERENCE",
-      );
-      await assert.rejects(
-        () =>
-          session.check([
-            defineRule({
-              id: "use-stale-inst",
-              run: async (ctx) => {
-                const fns = await ctx.findSyntax({
-                  kinds: ["FunctionDeclaration"],
-                });
-                await ctx.instanceCleanup({
-                  scopes: [fns[0]!.ref],
-                  targets: [staleInst],
-                });
-              },
-            }),
-          ]),
-        (err: unknown) =>
-          err instanceof VeruleExecutionError && err.code === "STALE_REFERENCE",
-      );
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+          // Using stale refs captured from snapshot 1 in snapshot 2 must throw STALE_REFERENCE
+          await assert.rejects(
+            () =>
+              session.check([
+                defineRule({
+                  id: "use-stale-refs",
+                  run: async (ctx) => {
+                    await ctx.callEffects({ targets: [staleScope] });
+                  },
+                }),
+              ]),
+            (err: unknown) =>
+              err instanceof VeruleExecutionError &&
+              err.code === "STALE_REFERENCE",
+          );
+          await assert.rejects(
+            () =>
+              session.check([
+                defineRule({
+                  id: "use-stale-inst",
+                  run: async (ctx) => {
+                    const fns = await ctx.findSyntax({
+                      kinds: ["FunctionDeclaration"],
+                    });
+                    await ctx.instanceCleanup({
+                      scopes: [fns[0]!.ref],
+                      targets: [staleInst],
+                    });
+                  },
+                }),
+              ]),
+            (err: unknown) =>
+              err instanceof VeruleExecutionError &&
+              err.code === "STALE_REFERENCE",
+          );
+        } finally {
+          await session.close();
+        }
+      },
+    );
   });
 
   void it("exposes canonical receiver/helper/target DeclarationRefs, direct & indirect CallbackInvocationInfo, cfgScope, and per-item basis provenance", async () => {
-    const root = createTempProject({
-      "src/helper.ts": [
-        "export function invokeSafely(fn: () => void): void {",
-        "  try {",
-        "    fn();",
-        "  } catch {",
-        "    // handled",
-        "  }",
-        "}",
-        "",
-      ].join("\n"),
-      "src/queue.ts": [
-        "import { invokeSafely } from './helper.js';",
-        "",
-        "export interface Job {",
-        "  (): void;",
-        "  flags: number;",
-        "}",
-        "",
-        "const queue: Job[] = [];",
-        "",
-        "export function runDirectAndIndirect(skip: boolean): void {",
-        "  try {",
-        "    for (let i = 0; i < queue.length; i++) {",
-        "      const cb = queue[i];",
-        "      if (cb) {",
-        "        if (skip) {",
-        "          continue;",
-        "        }",
-        "        cb();",
-        "        if (!(cb.flags & 4)) {",
-        "          cb.flags &= ~1;",
-        "        }",
-        "      }",
-        "    }",
-        "    for (let j = 0; j < queue.length; j++) {",
-        "      const job = queue[j];",
-        "      if (job) {",
-        "        invokeSafely(job);",
-        "        job.flags &= ~1;",
-        "      }",
-        "    }",
-        "  } finally {",
-        "    queue.length = 0;",
-        "  }",
-        "}",
-        "",
-        "export function runWithConcreteCallback(job: Job): void {",
-        "  const onDone = (): void => {",
-        "    job.flags |= 1;",
-        "  };",
-        "  invokeSafely(onDone);",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withTempHost(
+      { host: "sdk-queries/call-effects-canonical" },
+      async (host) => {
+        await host.typecheck();
 
-    try {
-      const rule = defineRule({
-        id: "canonical-call-effects-check",
-        run: async (ctx) => {
-          const fns = await ctx.findSyntax({
-            files: ["src/queue.ts"],
-            kinds: ["FunctionDeclaration"],
-          });
-          const helperFns = await ctx.findSyntax({
-            files: ["src/helper.ts"],
-            kinds: ["FunctionDeclaration"],
-          });
-          const helperDecl = (
-            await ctx.resolveDeclarations([helperFns[0]!.ref])
-          )[0]!.declaration!;
+        const rule = defineRule({
+          id: "canonical-call-effects-check",
+          run: async (ctx) => {
+            const fns = await ctx.findSyntax({
+              files: ["src/queue.ts"],
+              kinds: ["FunctionDeclaration"],
+            });
+            const helperFns = await ctx.findSyntax({
+              files: ["src/helper.ts"],
+              kinds: ["FunctionDeclaration"],
+            });
+            const helperDecl = (
+              await ctx.resolveDeclarations([helperFns[0]!.ref])
+            )[0]!.declaration!;
 
-          const runFn = fns.find((f) =>
-            f.text.includes("function runDirectAndIndirect"),
-          )!;
-          const concreteFn = fns.find((f) =>
-            f.text.includes("function runWithConcreteCallback"),
-          )!;
+            const runFn = fns.find((f) =>
+              f.text.includes("function runDirectAndIndirect"),
+            )!;
+            const concreteFn = fns.find((f) =>
+              f.text.includes("function runWithConcreteCallback"),
+            )!;
 
-          const [runEff, concreteEff] = await ctx.callEffects({
-            targets: [runFn.ref, concreteFn.ref],
-            followCallbacks: true,
-          });
-          assert.ok(runEff && concreteEff);
+            const [runEff, concreteEff] = await ctx.callEffects({
+              targets: [runFn.ref, concreteFn.ref],
+              followCallbacks: true,
+            });
+            assert.ok(runEff && concreteEff);
 
-          const clearWrites = runEff.fieldWrites.filter(
-            (w) => w.propertyName === "flags" && w.operator === "&=",
-          );
-          assert.equal(clearWrites.length, 2);
-          const guardedWrite = clearWrites[0]!;
-          const unguardedWrite = clearWrites[1]!;
+            const clearWrites = runEff.fieldWrites.filter(
+              (w) => w.propertyName === "flags" && w.operator === "&=",
+            );
+            assert.equal(clearWrites.length, 2);
+            const guardedWrite = clearWrites[0]!;
+            const unguardedWrite = clearWrites[1]!;
 
-          const resolvedReceivers = await ctx.resolveDeclarations([
-            guardedWrite.receiverSyntax,
-            unguardedWrite.receiverSyntax,
-          ]);
-          assert.equal(
-            guardedWrite.receiverDeclaration?.handleId,
-            resolvedReceivers[0]!.declaration?.handleId,
-          );
-          assert.equal(
-            unguardedWrite.receiverDeclaration?.handleId,
-            resolvedReceivers[1]!.declaration?.handleId,
-          );
-          assert.ok(guardedWrite.enclosingBlock !== null);
-          assert.ok(guardedWrite.cfgScope !== null);
+            const resolvedReceivers = await ctx.resolveDeclarations([
+              guardedWrite.receiverSyntax,
+              unguardedWrite.receiverSyntax,
+            ]);
+            assert.equal(
+              guardedWrite.receiverDeclaration?.handleId,
+              resolvedReceivers[0]!.declaration?.handleId,
+            );
+            assert.equal(
+              unguardedWrite.receiverDeclaration?.handleId,
+              resolvedReceivers[1]!.declaration?.handleId,
+            );
+            assert.ok(guardedWrite.enclosingBlock !== null);
+            assert.ok(guardedWrite.cfgScope !== null);
 
-          const directInv = runEff.callbackInvocations.find(
-            (inv) => inv.kind === "direct",
-          );
-          const indirectInv = runEff.callbackInvocations.find(
-            (inv) => inv.kind === "indirect",
-          );
-          assert.ok(directInv);
-          assert.ok(indirectInv);
+            const directInv = runEff.callbackInvocations.find(
+              (inv) => inv.kind === "direct",
+            );
+            const indirectInv = runEff.callbackInvocations.find(
+              (inv) => inv.kind === "indirect",
+            );
+            assert.ok(directInv);
+            assert.ok(indirectInv);
 
-          assert.equal(directInv.parameterIndex, null);
-          assert.equal(directInv.helperDeclaration, null);
-          assert.equal(
-            directInv.targetDeclaration?.handleId,
-            guardedWrite.receiverDeclaration?.handleId,
-          );
-          assert.equal(directInv.outerCall.handleId, directInv.call.handleId);
-          assert.equal(directInv.outerCallLocation.line, 18);
-          assert.equal(
-            directInv.enclosingFunction?.handleId,
-            runFn.ref.handleId,
-          );
-          assert.ok(directInv.cfgScope !== null);
+            assert.equal(directInv.parameterIndex, null);
+            assert.equal(directInv.helperDeclaration, null);
+            assert.equal(
+              directInv.targetDeclaration?.handleId,
+              guardedWrite.receiverDeclaration?.handleId,
+            );
+            assert.equal(directInv.outerCall.handleId, directInv.call.handleId);
+            assert.equal(directInv.outerCallLocation.line, 18);
+            assert.equal(
+              directInv.enclosingFunction?.handleId,
+              runFn.ref.handleId,
+            );
+            assert.ok(directInv.cfgScope !== null);
 
-          assert.equal(indirectInv.parameterIndex, 0);
-          assert.equal(
-            indirectInv.helperDeclaration?.handleId,
-            helperDecl.handleId,
-          );
-          assert.equal(
-            indirectInv.targetDeclaration?.handleId,
-            unguardedWrite.receiverDeclaration?.handleId,
-          );
-          assert.equal(indirectInv.outerCallLocation.file, "src/queue.ts");
-          assert.equal(indirectInv.outerCallLocation.line, 27);
-          assert.equal(indirectInv.location.file, "src/helper.ts");
-          assert.equal(indirectInv.location.line, 3);
-          assert.equal(
-            indirectInv.enclosingFunction?.handleId,
-            runFn.ref.handleId,
-          );
-          assert.equal(
-            indirectInv.cfgScope?.handleId,
-            unguardedWrite.cfgScope?.handleId,
-          );
+            assert.equal(indirectInv.parameterIndex, 0);
+            assert.equal(
+              indirectInv.helperDeclaration?.handleId,
+              helperDecl.handleId,
+            );
+            assert.equal(
+              indirectInv.targetDeclaration?.handleId,
+              unguardedWrite.receiverDeclaration?.handleId,
+            );
+            assert.equal(indirectInv.outerCallLocation.file, "src/queue.ts");
+            assert.equal(indirectInv.outerCallLocation.line, 27);
+            assert.equal(indirectInv.location.file, "src/helper.ts");
+            assert.equal(indirectInv.location.line, 3);
+            assert.equal(
+              indirectInv.enclosingFunction?.handleId,
+              runFn.ref.handleId,
+            );
+            assert.equal(
+              indirectInv.cfgScope?.handleId,
+              unguardedWrite.cfgScope?.handleId,
+            );
 
-          // Concrete callback targetDeclaration & resolvedTargets share canonical DeclarationRef identity
-          const concreteInv = concreteEff.callbackInvocations.find(
-            (inv) => inv.kind === "indirect",
-          );
-          assert.ok(concreteInv);
-          const [argDecl] = await ctx.resolveDeclarations([
-            concreteInv.callbackArgument,
-          ]);
-          assert.equal(
-            concreteInv.targetDeclaration?.handleId,
-            argDecl?.declaration?.handleId,
-          );
-          assert.equal(
-            concreteInv.resolvedTargets[0]?.handleId,
-            argDecl?.declaration?.handleId,
-          );
+            // Concrete callback targetDeclaration & resolvedTargets share canonical DeclarationRef identity
+            const concreteInv = concreteEff.callbackInvocations.find(
+              (inv) => inv.kind === "indirect",
+            );
+            assert.ok(concreteInv);
+            const [argDecl] = await ctx.resolveDeclarations([
+              concreteInv.callbackArgument,
+            ]);
+            assert.equal(
+              concreteInv.targetDeclaration?.handleId,
+              argDecl?.declaration?.handleId,
+            );
+            assert.equal(
+              concreteInv.resolvedTargets[0]?.handleId,
+              argDecl?.declaration?.handleId,
+            );
 
-          // Local CFG scope from cfgScope evaluates branchCoverage accurately inside try/for loops
-          assert.equal(
-            guardedWrite.cfgScope?.handleId,
-            directInv.cfgScope?.handleId,
-          );
-          const [branchGroup] = await ctx.listBranches([guardedWrite.cfgScope]);
-          const guardBranch = branchGroup!.branches.find(
-            (b) =>
-              b.conditionText.includes("cb.flags & 4") &&
-              b.direction === "true",
-          );
-          assert.ok(guardBranch);
-          const [guardedCov] = await ctx.branchCoverage({
-            scope: guardedWrite.cfgScope,
-            branches: [guardBranch.ref],
-            targets: [guardedWrite.syntax],
-          });
-          assert.equal(guardedCov?.status, "covered");
+            // Local CFG scope from cfgScope evaluates branchCoverage accurately inside try/for loops
+            assert.equal(
+              guardedWrite.cfgScope?.handleId,
+              directInv.cfgScope?.handleId,
+            );
+            const [branchGroup] = await ctx.listBranches([
+              guardedWrite.cfgScope,
+            ]);
+            const guardBranch = branchGroup!.branches.find(
+              (b) =>
+                b.conditionText.includes("cb.flags & 4") &&
+                b.direction === "true",
+            );
+            assert.ok(guardBranch);
+            const [guardedCov] = await ctx.branchCoverage({
+              scope: guardedWrite.cfgScope,
+              branches: [guardBranch.ref],
+              targets: [guardedWrite.syntax],
+            });
+            assert.equal(guardedCov?.status, "covered");
 
-          const [unguardedCov] = await ctx.branchCoverage({
-            scope: unguardedWrite.cfgScope!,
-            branches: [],
-            targets: [unguardedWrite.syntax],
-          });
-          assert.equal(unguardedCov?.status, "bypass");
+            const [unguardedCov] = await ctx.branchCoverage({
+              scope: unguardedWrite.cfgScope!,
+              branches: [],
+              targets: [unguardedWrite.syntax],
+            });
+            assert.equal(unguardedCov?.status, "bypass");
 
-          ctx.report({
-            at: unguardedWrite.location,
-            message: "Unguarded post-callback clear.",
-            basis: [indirectInv, unguardedWrite, unguardedCov],
-          });
-        },
-      });
+            ctx.report({
+              at: unguardedWrite.location,
+              message: "Unguarded post-callback clear.",
+              basis: [indirectInv, unguardedWrite, unguardedCov],
+            });
+          },
+        });
 
-      const report = await runCheck({
-        cwd: root,
-        config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
-      });
-      assert.equal(report.status, "findings");
-      assert.equal(report.diagnostics.length, 1);
-      const diag = report.diagnostics[0]!;
-      assert.ok(
-        diag.evidence.some(
-          (e) => e.at?.file === "src/queue.ts" && e.at.line === 27,
-        ),
-      );
-      assert.ok(
-        diag.evidence.some(
-          (e) => e.at?.file === "src/helper.ts" && e.at.line === 1,
-        ),
-      );
-      assert.ok(
-        diag.evidence.some(
-          (e) => e.at?.file === "src/helper.ts" && e.at.line === 3,
-        ),
-      );
-      assert.ok(
-        diag.evidence.some(
-          (e) => e.at?.file === "src/queue.ts" && e.at.line === 28,
-        ),
-      );
-      // Unrelated guarded write & queue.length = 0 must not leak
-      assert.equal(
-        diag.evidence.some(
-          (e) =>
-            e.at?.file === "src/queue.ts" &&
-            (e.at.line === 20 || e.at.line === 32),
-        ),
-        false,
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+        const report = await runCheck({
+          cwd: host.rootDir,
+          config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
+        });
+        assert.equal(report.status, "findings");
+        assert.equal(report.diagnostics.length, 1);
+        const diag = report.diagnostics[0]!;
+        assert.ok(
+          diag.evidence.some(
+            (e) => e.at?.file === "src/queue.ts" && e.at.line === 27,
+          ),
+        );
+        assert.ok(
+          diag.evidence.some(
+            (e) => e.at?.file === "src/helper.ts" && e.at.line === 1,
+          ),
+        );
+        assert.ok(
+          diag.evidence.some(
+            (e) => e.at?.file === "src/helper.ts" && e.at.line === 3,
+          ),
+        );
+        assert.ok(
+          diag.evidence.some(
+            (e) => e.at?.file === "src/queue.ts" && e.at.line === 28,
+          ),
+        );
+        // Unrelated guarded write & queue.length = 0 must not leak
+        assert.equal(
+          diag.evidence.some(
+            (e) =>
+              e.at?.file === "src/queue.ts" &&
+              (e.at.line === 20 || e.at.line === 32),
+          ),
+          false,
+        );
+      },
+    );
   });
 });
