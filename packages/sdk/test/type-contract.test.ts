@@ -1,18 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { withTempHost } from "@verule/test-hosts";
+import {
+  installPackedWorkspacePackages,
+  withTempHost,
+} from "@verule/test-hosts";
 
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const tscBin = join(sdkRoot, "node_modules", ".bin", "tsc");
@@ -20,56 +16,10 @@ const validConsumerFixturePath = fileURLToPath(
   new URL("./fixtures/type-contract/valid-consumer.ts", import.meta.url),
 );
 
-function prepareExternalConsumer(root: string): void {
-  const sdkPkgOut = join(root, "node_modules", "@verule", "sdk");
-  mkdirSync(sdkPkgOut, { recursive: true });
-
-  const sdkDist = join(sdkRoot, "dist");
-  const consumerDist = join(sdkPkgOut, "dist");
-  if (existsSync(join(sdkDist, "index.d.ts"))) {
-    cpSync(sdkDist, consumerDist, { recursive: true });
-  } else {
-    execFileSync(
-      tscBin,
-      [
-        "-p",
-        join(sdkRoot, "tsconfig.build.json"),
-        "--outDir",
-        consumerDist,
-        "--pretty",
-        "false",
-      ],
-      { cwd: sdkRoot, encoding: "utf8" },
-    );
-  }
-
-  const rawManifest = JSON.parse(
-    readFileSync(join(sdkRoot, "package.json"), "utf8"),
-  ) as {
-    readonly name: string;
-    readonly version: string;
-    readonly type: string;
-    readonly publishConfig?: { readonly exports?: unknown };
-  };
-  writeFileSync(
-    join(sdkPkgOut, "package.json"),
-    JSON.stringify(
-      {
-        name: rawManifest.name,
-        version: rawManifest.version,
-        type: rawManifest.type,
-        exports: rawManifest.publishConfig?.exports ?? {
-          ".": {
-            types: "./dist/index.d.ts",
-            default: "./dist/index.js",
-          },
-        },
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
+async function prepareExternalConsumer(root: string): Promise<void> {
+  await installPackedWorkspacePackages(root, ["@verule/sdk"], {
+    cwd: sdkRoot,
+  });
 
   writeFileSync(
     join(root, "tsconfig.json"),
@@ -124,8 +74,8 @@ function runConsumerTsc(
 
 void describe("@verule/sdk external TypeScript consumer contract", () => {
   void it("compiles valid call -> signature -> instantiated parameter composition against built .d.ts", async () => {
-    await withTempHost({}, (host) => {
-      prepareExternalConsumer(host.rootDir);
+    await withTempHost({}, async (host) => {
+      await prepareExternalConsumer(host.rootDir);
       const validCode = readFileSync(validConsumerFixturePath, "utf8");
       const result = runConsumerTsc(host.rootDir, validCode);
       assert.equal(result.ok, true, `Expected tsc to pass:\n${result.output}`);
@@ -133,8 +83,8 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
   });
 
   void it("rejects mismatched ProgramRef kinds and reads of unselected projection fields at compile time", async () => {
-    await withTempHost({}, (host) => {
-      prepareExternalConsumer(host.rootDir);
+    await withTempHost({}, async (host) => {
+      await prepareExternalConsumer(host.rootDir);
 
       const negativeCases: readonly {
         readonly name: string;

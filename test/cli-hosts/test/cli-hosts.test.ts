@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import {
   prepareCliTempHost,
   resolveCliHostDir,
+  spawnNdjsonProcess,
   withCliTempHost,
 } from "@verule/cli-hosts";
 import { withTempHost } from "@verule/test-hosts";
@@ -102,5 +103,45 @@ void describe("@verule/cli-hosts", () => {
     } finally {
       await unlinkedHost.dispose();
     }
+  });
+
+  void it("spawnNdjsonProcess resolves matching records and rejects immediately when child exits early", async () => {
+    await withCliTempHost({ linkSdk: false }, async (host) => {
+      host.writeText(
+        "emit-and-exit.mjs",
+        [
+          'console.log(JSON.stringify({ kind: "stream" }));',
+          'console.error("fatal startup error");',
+          "process.exit(2);",
+          "",
+        ].join("\n"),
+      );
+
+      using session = spawnNdjsonProcess(
+        host.resolvePath("emit-and-exit.mjs"),
+        [],
+        { cwd: host.rootDir, defaultTimeoutMs: 10_000 },
+      );
+
+      const streamRecord = await session.waitForRecord(
+        (item) => item.kind === "stream",
+      );
+      assert.equal(streamRecord.kind, "stream");
+
+      const start = Date.now();
+      await assert.rejects(
+        () => session.waitForRecord((item) => item.kind === "never-emitted"),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /exited early \(code=2/u);
+          assert.match(error.message, /fatal startup error/u);
+          return true;
+        },
+      );
+      assert.ok(
+        Date.now() - start < 2_000,
+        "Expected early exit to reject immediately without waiting for timeout",
+      );
+    });
   });
 });

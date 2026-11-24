@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, existsSync, readFileSync, renameSync } from "node:fs";
+import { readFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,13 +21,13 @@ import {
   type FactResult,
 } from "@verule/sdk";
 import {
+  installPackedWorkspacePackages,
   linkNodeModulesPackage,
   withTempHost,
   type PreparedTempHost,
 } from "@verule/test-hosts";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const sdkRoot = join(packageRoot, "node_modules", "@verule", "sdk");
 const zodRoot = join(packageRoot, "node_modules", "zod");
 const drizzleOrmRoot = join(packageRoot, "node_modules", "drizzle-orm");
 const drizzleZodRoot = join(packageRoot, "node_modules", "drizzle-zod");
@@ -504,48 +504,12 @@ void describe("@verule/adapter-zod", () => {
           ),
           "src/consumer.ts": externalConsumerSource,
         },
-        setup: (host) => {
-          for (const pkg of [
-            { name: "@verule/sdk", dir: sdkRoot },
-            { name: "@verule/adapter-zod", dir: packageRoot },
-          ]) {
-            const distSrc = join(pkg.dir, "dist");
-            assert.equal(
-              existsSync(join(distSrc, "index.d.ts")),
-              true,
-              `Missing built dist/index.d.ts for ${pkg.name}`,
-            );
-            const pkgOut = host.resolvePath(
-              join("node_modules", ...pkg.name.split("/")),
-            );
-            cpSync(distSrc, join(pkgOut, "dist"), { recursive: true });
-            const raw = JSON.parse(
-              readFileSync(join(pkg.dir, "package.json"), "utf8"),
-            ) as {
-              readonly name: string;
-              readonly version: string;
-              readonly type: string;
-              readonly publishConfig?: { readonly exports?: unknown };
-            };
-            host.writeText(
-              join("node_modules", ...pkg.name.split("/"), "package.json"),
-              JSON.stringify(
-                {
-                  name: raw.name,
-                  version: raw.version,
-                  type: raw.type,
-                  exports: raw.publishConfig?.exports ?? {
-                    ".": {
-                      types: "./dist/index.d.ts",
-                      default: "./dist/index.js",
-                    },
-                  },
-                },
-                null,
-                2,
-              ),
-            );
-          }
+        setup: async (host) => {
+          await installPackedWorkspacePackages(
+            host.rootDir,
+            ["@verule/sdk", "@verule/adapter-zod"],
+            { cwd: packageRoot },
+          );
         },
       },
       async (host) => {

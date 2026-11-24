@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -9,9 +11,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
+const execFileAsync = promisify(execFile);
+const maxPackBufferBytes = 64 * 1024 * 1024;
 const hostsRootDir = fileURLToPath(new URL("../hosts", import.meta.url));
 
 export type LineEnding = "lf" | "crlf";
@@ -112,8 +118,9 @@ function writeNormalizedCopiedFile(
 }
 
 /**
- * Copies all files from `sourceDir` into `targetDir`, skipping `.git` and
- * `node_modules` directories and optionally normalizing text line endings.
+ * Copies all files from `sourceDir` into `targetDir`, skipping `.git`,
+ * `node_modules`, `dist`, and `*.tsbuildinfo` files, and optionally
+ * normalizing text line endings.
  */
 export function copyDirectory(
   sourceDir: string,
@@ -122,7 +129,12 @@ export function copyDirectory(
 ): void {
   mkdirSync(targetDir, { recursive: true });
   for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
-    if (entry.name === ".git" || entry.name === "node_modules") {
+    if (
+      entry.name === ".git" ||
+      entry.name === "node_modules" ||
+      entry.name === "dist" ||
+      (entry.isFile() && entry.name.endsWith(".tsbuildinfo"))
+    ) {
       continue;
     }
     const sourcePath = join(sourceDir, entry.name);
@@ -223,6 +235,70 @@ export function writeSyntheticPackage(
     );
   }
   writeHostFiles(packageDir, spec.files, lineEnding);
+}
+
+export type InstallPackedWorkspacePackagesOptions = {
+  readonly cwd?: string;
+};
+
+function parsePackedFilename(stdout: string): string {
+  const parsed: unknown = JSON.parse(stdout);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("filename" in parsed) ||
+    typeof parsed.filename !== "string" ||
+    parsed.filename.length === 0
+  ) {
+    throw new Error(`Unexpected pnpm pack --json output: ${stdout}`);
+  }
+  return parsed.filename;
+}
+
+/**
+ * Packs each workspace package in `packageNames` via `pnpm pack` and extracts
+ * its published tarball contents into `<rootDir>/node_modules/<pkg>`.
+ */
+export async function installPackedWorkspacePackages(
+  rootDir: string,
+  packageNames: readonly string[],
+  options: InstallPackedWorkspacePackagesOptions = {},
+): Promise<void> {
+  if (packageNames.length === 0) {
+    return;
+  }
+  const cwd = options.cwd ?? process.cwd();
+  const packDir = mkdtempSync(join(tmpdir(), "verule-packed-packages-"));
+  try {
+    for (const packageName of packageNames) {
+      const targetDir = resolveNodeModulesPackagePath(rootDir, packageName);
+      const { stdout } = await execFileAsync(
+        "pnpm",
+        [
+          "--filter",
+          packageName,
+          "pack",
+          "--pack-destination",
+          packDir,
+          "--json",
+        ],
+        { cwd, encoding: "utf8", maxBuffer: maxPackBufferBytes },
+      );
+      const rawFilename = parsePackedFilename(stdout);
+      const tarballPath = isAbsolute(rawFilename)
+        ? rawFilename
+        : resolve(cwd, rawFilename);
+      rmSync(targetDir, { recursive: true, force: true });
+      mkdirSync(targetDir, { recursive: true });
+      await execFileAsync(
+        "tar",
+        ["-xzf", tarballPath, "--strip-components=1", "-C", targetDir],
+        { cwd, encoding: "utf8", maxBuffer: maxPackBufferBytes },
+      );
+    }
+  } finally {
+    rmSync(packDir, { recursive: true, force: true });
+  }
 }
 
 export type HostFileAccessors = {

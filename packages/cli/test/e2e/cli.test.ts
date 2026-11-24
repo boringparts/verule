@@ -1,121 +1,16 @@
 import assert from "node:assert/strict";
-import {
-  type ChildProcessByStdio,
-  execFileSync,
-  spawn,
-  spawnSync,
-} from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempDisposableSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { Readable, Writable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { withCliTempHost } from "@verule/cli-hosts";
+import { spawnNdjsonProcess, withCliTempHost } from "@verule/cli-hosts";
 import type { CheckReport, VeruleConfig } from "@verule/sdk";
 import { copyDirectory } from "@verule/test-hosts";
-
-type NdjsonRecord = Record<string, unknown>;
-
-type NdjsonSession = {
-  readonly records: NdjsonRecord[];
-  waitForRecord(
-    predicate: (item: NdjsonRecord) => boolean,
-  ): Promise<NdjsonRecord>;
-  stopWithSigint(): Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    stderr: string;
-  }>;
-  dispose(): void;
-};
-
-function spawnNdjsonProcess(
-  entry: string,
-  args: readonly string[],
-  cwd: string,
-): NdjsonSession {
-  const child: ChildProcessByStdio<Writable, Readable, Readable> = spawn(
-    process.execPath,
-    [entry, ...args],
-    {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  );
-
-  const records: NdjsonRecord[] = [];
-  let stderr = "";
-  let buffer = "";
-  let waiters: (() => void)[] = [];
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    buffer += chunk;
-    while (true) {
-      const idx = buffer.indexOf("\n");
-      if (idx === -1) break;
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (line.length > 0) {
-        records.push(JSON.parse(line) as NdjsonRecord);
-        const pending = waiters;
-        waiters = [];
-        for (const wake of pending) wake();
-      }
-    }
-  });
-
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  return {
-    records,
-    async waitForRecord(predicate) {
-      const deadline = Date.now() + 10_000;
-      let cursor = 0;
-      while (true) {
-        while (cursor < records.length) {
-          const item = records[cursor]!;
-          cursor += 1;
-          if (predicate(item)) return item;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(
-            `Timed out waiting for deployed CLI NDJSON record. Records=${JSON.stringify(records)} stderr=${stderr}`,
-          );
-        }
-        await new Promise<void>((resolveWait) => {
-          const timer = setTimeout(resolveWait, 100);
-          waiters.push(() => {
-            clearTimeout(timer);
-            resolveWait();
-          });
-        });
-      }
-    },
-    async stopWithSigint() {
-      child.kill("SIGINT");
-      const result = await new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolveExit) => {
-        child.once("exit", (code, signal) => resolveExit({ code, signal }));
-      });
-      return { ...result, stderr };
-    },
-    dispose() {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
-    },
-  };
-}
 
 async function importConfig(configPath: string): Promise<VeruleConfig> {
   const loaded = (await import(pathToFileURL(configPath).href)) as {

@@ -4,22 +4,24 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  copyDirectory,
   type LineEnding,
-  linkNodeModulesPackage,
   type PreparedTempHost,
   prepareTempHost,
   resolveCheckedHostDir,
   type SyntheticPackageSpec,
   withPreparedTempHost,
-  writeHostFiles,
-  writeSyntheticPackage,
 } from "@verule/test-hosts";
 
 const cliHostsRootDir = fileURLToPath(new URL("../hosts", import.meta.url));
 const require = createRequire(import.meta.url);
 
 export type { LineEnding, PreparedTempHost, SyntheticPackageSpec };
+export {
+  spawnNdjsonProcess,
+  type NdjsonProcessSession,
+  type NdjsonRecord,
+  type SpawnNdjsonProcessOptions,
+} from "./ndjson-process.ts";
 
 export type PrepareCliTempHostOptions = {
   readonly host?: string;
@@ -68,10 +70,10 @@ export function resolveCliHostDir(hostName: string): string {
 export function prepareCliTempHost(
   options: PrepareCliTempHostOptions = {},
 ): Promise<PreparedTempHost> {
-  const selectedHosts = [
+  const selectedHostDirs = [
     ...(options.host === undefined ? [] : [options.host]),
     ...(options.hosts ?? []),
-  ];
+  ].map(resolveCliHostDir);
   const packageLinks: Record<string, string> = {
     ...options.packageLinks,
   };
@@ -83,42 +85,18 @@ export function prepareCliTempHost(
   }
 
   return prepareTempHost({
+    ...(selectedHostDirs.length === 0 ? {} : { hostDirs: selectedHostDirs }),
+    ...(options.files === undefined ? {} : { files: options.files }),
+    ...(options.lineEnding === undefined
+      ? {}
+      : { lineEnding: options.lineEnding }),
+    packageLinks,
+    ...(options.syntheticPackages === undefined
+      ? {}
+      : { syntheticPackages: options.syntheticPackages }),
     ...(options.tempRoot === undefined ? {} : { tempRoot: options.tempRoot }),
     prefix: options.prefix ?? "verule-cli-host-",
-    setup: async (host) => {
-      for (const hostName of selectedHosts) {
-        copyDirectory(
-          resolveCliHostDir(hostName),
-          host.rootDir,
-          options.lineEnding === undefined
-            ? {}
-            : { lineEnding: options.lineEnding },
-        );
-      }
-
-      if (options.files !== undefined) {
-        writeHostFiles(host.rootDir, options.files, options.lineEnding);
-      }
-
-      for (const [packageName, targetDir] of Object.entries(packageLinks)) {
-        linkNodeModulesPackage(host.rootDir, packageName, targetDir);
-      }
-
-      for (const [packageName, spec] of Object.entries(
-        options.syntheticPackages ?? {},
-      )) {
-        writeSyntheticPackage(
-          host.rootDir,
-          packageName,
-          spec,
-          options.lineEnding,
-        );
-      }
-
-      if (options.setup !== undefined) {
-        await options.setup(host);
-      }
-    },
+    ...(options.setup === undefined ? {} : { setup: options.setup }),
   });
 }
 

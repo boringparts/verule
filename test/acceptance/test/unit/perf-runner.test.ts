@@ -6,6 +6,7 @@ import {
   deduplicateTiers,
   formatPerfMarkdownReport,
   formatPerfSummaryTable,
+  generatePoolOwnershipProject,
   type PackedArtifactBundle,
   parsePerfCliArgs,
   parseScaleTier,
@@ -310,4 +311,50 @@ void test("runPoolOwnershipPerfBaseline records retries, failure reasons, not_ru
   const md = formatPerfMarkdownReport(report);
   assert.match(md, /五档中位数汇总/u);
   assert.match(md, /各轮原始采样与状态/u);
+});
+
+void test("runPoolOwnershipPerfBaseline marks a tier whose setup throws as failed while leaving subsequent unattempted tiers as not_run", async () => {
+  const cliOptions = parsePerfCliArgs([
+    "--tier",
+    "5/3",
+    "--tier",
+    "64/8",
+    "--samples",
+    "2",
+  ]);
+  const seenTiers: string[] = [];
+
+  const report = await runPoolOwnershipPerfBaseline({
+    scenario: cliOptions.scenario,
+    tiers: cliOptions.tiers,
+    samples: cliOptions.samples,
+    retries: cliOptions.retries,
+    bundle: createDummyBundle(),
+    executeTier: async ({ tier }) => {
+      seenTiers.push(
+        `${String(tier.fileCount)}/${String(tier.candidateFactoryCount)}`,
+      );
+      generatePoolOwnershipProject(tier);
+      throw new Error("Should not reach execution after invalid 5/3 tier");
+    },
+  });
+
+  assert.deepEqual(seenTiers, ["5/3"]);
+  assert.equal(report.status, "failed");
+  assert.equal(report.tiers.length, 2);
+
+  const [failedTier, unattemptedTier] = report.tiers;
+  assert.equal(failedTier?.tierLabel, "5/3");
+  assert.equal(failedTier?.status, "failed");
+  assert.equal(failedTier?.preflight.status, "failed");
+  assert.equal(failedTier?.notRunRounds, 2);
+  assert.match(
+    failedTier?.failureReason ?? "",
+    /Unrecoverable setup error in tier 5\/3: Cannot fit \d+ base files into fileCount=5/u,
+  );
+
+  assert.equal(unattemptedTier?.tierLabel, "64/8");
+  assert.equal(unattemptedTier?.status, "not_run");
+  assert.equal(unattemptedTier?.preflight.status, "not_run");
+  assert.equal(unattemptedTier?.notRunRounds, 2);
 });

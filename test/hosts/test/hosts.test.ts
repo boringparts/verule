@@ -3,7 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import {
+  copyDirectory,
   discoverHostTsconfigs,
+  installPackedWorkspacePackages,
   prepareTempHost,
   resolveHostDir,
   typecheckHostProjects,
@@ -233,6 +235,46 @@ void describe("@verule/test-hosts", () => {
       assert.deepEqual(
         await typecheckHostProjects(emptyHost.rootDir, { allowEmpty: true }),
         [],
+      );
+    });
+  });
+
+  void it("copyDirectory skips .git, node_modules, dist, and *.tsbuildinfo artifacts", async () => {
+    await withTempHost({}, async (sourceHost) => {
+      sourceHost.writeText("src/keep.ts", "export const kept = true;\n");
+      sourceHost.writeText(".git/HEAD", "ref: refs/heads/main\n");
+      sourceHost.writeText("node_modules/pkg/index.js", "export {};\n");
+      sourceHost.writeText("dist/out.js", "export {};\n");
+      sourceHost.writeText(".tsbuildinfo", "{}");
+      sourceHost.writeText("nested/app.tsbuildinfo", "{}");
+
+      await withTempHost({}, (targetHost) => {
+        copyDirectory(sourceHost.rootDir, targetHost.rootDir);
+        assert.equal(existsSync(targetHost.resolvePath("src/keep.ts")), true);
+        assert.equal(existsSync(targetHost.resolvePath(".git")), false);
+        assert.equal(existsSync(targetHost.resolvePath("node_modules")), false);
+        assert.equal(existsSync(targetHost.resolvePath("dist")), false);
+        assert.equal(existsSync(targetHost.resolvePath(".tsbuildinfo")), false);
+        assert.equal(
+          existsSync(targetHost.resolvePath("nested/app.tsbuildinfo")),
+          false,
+        );
+      });
+    });
+  });
+
+  void it("installPackedWorkspacePackages packs and extracts workspace artifacts into node_modules", async () => {
+    await withTempHost({}, async (consumerHost) => {
+      await installPackedWorkspacePackages(consumerHost.rootDir, [
+        "@verule/test-hosts",
+      ]);
+      assert.equal(
+        existsSync(
+          consumerHost.resolvePath(
+            "node_modules/@verule/test-hosts/dist/index.d.ts",
+          ),
+        ),
+        true,
       );
     });
   });

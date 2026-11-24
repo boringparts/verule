@@ -6,6 +6,7 @@ export {
 export {
   copyDirectory,
   createHostFileAccessors,
+  installPackedWorkspacePackages,
   linkNodeModulesPackage,
   normalizeLineEndings,
   resolveCheckedHostDir,
@@ -15,6 +16,7 @@ export {
   writeSyntheticPackage,
   type CopyDirectoryOptions,
   type HostFileAccessors,
+  type InstallPackedWorkspacePackagesOptions,
   type LineEnding,
   type SyntheticPackageSpec,
 } from "./materials.ts";

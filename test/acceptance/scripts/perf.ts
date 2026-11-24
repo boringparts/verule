@@ -26,7 +26,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const invocationCwd = process.env.INIT_CWD ?? process.cwd();
+  const invocationCwd =
+    process.env.VERULE_PERF_CWD ?? process.env.INIT_CWD ?? process.cwd();
   const report = await runPoolOwnershipPerfBaseline({
     scenario: options.scenario,
     tiers: options.tiers,

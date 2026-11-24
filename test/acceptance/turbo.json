@@ -45,13 +45,14 @@
     },
     "perf": {
       "dependsOn": ["build"],
+      "passThroughEnv": ["INIT_CWD", "VERULE_PERF_CWD"],
       "inputs": [],
       "outputs": [],
       "cache": false,
       "tags": ["work:on-demand"]
     },
     "test": {
-      "dependsOn": [],
+      "dependsOn": ["@verule/test-hosts#build", "^typecheck"],
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]

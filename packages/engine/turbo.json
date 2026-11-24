@@ -23,7 +23,11 @@
       "tags": ["work:repair"]
     },
     "lint": {
-      "dependsOn": ["//#toolchain:prepare"],
+      "dependsOn": [
+        "//#toolchain:prepare",
+        "^lint",
+        "@verule/test-hosts#typecheck"
+      ],
       "inputs": ["$TURBO_DEFAULT$", "!target/**"],
       "outputs": [],
       "tags": ["quality:light"]
