@@ -614,6 +614,215 @@ fn find_provenance_for_expr(
     None
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeclarationProvenance {
+    pub package_name: Option<String>,
+    pub export_name: Option<String>,
+}
+
+fn export_name_from_alias_decl(decl: P<Node>) -> Option<String> {
+    match decl.kind() {
+        Kind::ImportSpecifier => {
+            let spec = decl.as_import_specifier();
+            spec.property_name()
+                .and_then(node_text)
+                .or_else(|| node_text(spec.name()))
+        }
+        Kind::ExportSpecifier => {
+            let spec = decl.as_export_specifier();
+            spec.property_name()
+                .and_then(node_text)
+                .or_else(|| node_text(spec.name()))
+        }
+        _ => None,
+    }
+}
+
+fn trace_symbol_deepest_package_provenance(
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    start_sym: P<Symbol>,
+    preferred_export: Option<String>,
+) -> Option<ProvenanceSpec> {
+    let mut current = start_sym;
+    let mut export_override = preferred_export;
+    let mut deepest: Option<ProvenanceSpec> = None;
+    let mut visited = Vec::new();
+
+    for _ in 0..MAX_ALIAS_HOPS {
+        if visited.contains(&current) {
+            break;
+        }
+        visited.push(current);
+
+        for &decl in current.declarations() {
+            if let Some(prov) = spec_from_import_decl_node(program, decl, export_override.clone())
+                && prov
+                    .specifier_text
+                    .as_deref()
+                    .is_some_and(is_bare_package_specifier)
+            {
+                deepest = Some(prov);
+            }
+            if let Some(prov) = spec_from_require_binding_decl(decl, export_override.clone())
+                && prov
+                    .specifier_text
+                    .as_deref()
+                    .is_some_and(is_bare_package_specifier)
+            {
+                deepest = Some(prov);
+            }
+        }
+
+        if let Some(vd) = current.value_declaration() {
+            if let Some(prov) = spec_from_import_decl_node(program, vd, export_override.clone())
+                && prov
+                    .specifier_text
+                    .as_deref()
+                    .is_some_and(is_bare_package_specifier)
+            {
+                deepest = Some(prov);
+            }
+            if let Some(prov) = spec_from_require_binding_decl(vd, export_override.clone())
+                && prov
+                    .specifier_text
+                    .as_deref()
+                    .is_some_and(is_bare_package_specifier)
+            {
+                deepest = Some(prov);
+            }
+        }
+
+        for &decl in current.declarations() {
+            if let Some(orig) = export_name_from_alias_decl(decl) {
+                export_override = Some(orig);
+            }
+        }
+
+        if !current.flags().intersects(SymbolFlags::Alias) {
+            break;
+        }
+        let next = checker.get_aliased_symbol(current);
+        if next == current || next == checker.get_unknown_symbol() {
+            break;
+        }
+        current = next;
+    }
+
+    deepest
+}
+
+fn deepest_provenance_for_expr(
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    expr: P<Node>,
+) -> Option<ProvenanceSpec> {
+    let unwrapped = unwrap_expr_wrappers(expr);
+    if let Some(spec_node) = extract_require_specifier_node(unwrapped) {
+        let sf = get_source_file_of_node(spec_node)?;
+        return Some(ProvenanceSpec {
+            containing_sf: sf,
+            specifier_node: Some(spec_node),
+            specifier_text: string_literal_text(spec_node),
+            export_name: Some("default".to_string()),
+            container_name: None,
+            resolution_mode: PackageResolutionMode::Require,
+        });
+    }
+
+    if unwrapped.kind() == Kind::PropertyAccessExpression {
+        let pa = unwrapped.as_property_access_expression();
+        let prop_name = node_text(pa.name());
+        if let Some(spec_node) = extract_require_specifier_node(pa.expression()) {
+            let sf = get_source_file_of_node(spec_node)?;
+            return Some(ProvenanceSpec {
+                containing_sf: sf,
+                specifier_node: Some(spec_node),
+                specifier_text: string_literal_text(spec_node),
+                export_name: prop_name,
+                container_name: None,
+                resolution_mode: PackageResolutionMode::Require,
+            });
+        }
+        if let Some(recv_sym) = checker.get_symbol_at_location_exported(pa.expression())
+            && let Some(prov) =
+                trace_symbol_deepest_package_provenance(program, checker, recv_sym, prop_name)
+        {
+            return Some(prov);
+        }
+    }
+
+    if let Some(raw_sym) = checker.get_symbol_at_location_exported(unwrapped)
+        && let Some(prov) = trace_symbol_deepest_package_provenance(program, checker, raw_sym, None)
+    {
+        return Some(prov);
+    }
+
+    None
+}
+
+pub fn resolve_declaration_provenance(
+    program: &'static Program,
+    checker: &mut CheckerHandle,
+    node: P<Node>,
+    declaration: P<Node>,
+) -> DeclarationProvenance {
+    let Some(decl_sf) = get_source_file_of_node(declaration) else {
+        return DeclarationProvenance::default();
+    };
+    if program.is_source_file_default_library(decl_sf.path()) {
+        return DeclarationProvenance::default();
+    }
+
+    let expr = if matches!(node.kind(), Kind::CallExpression | Kind::NewExpression) {
+        let Some(callee) = node.expression() else {
+            return DeclarationProvenance::default();
+        };
+        unwrap_expr_wrappers(callee)
+    } else {
+        unwrap_expr_wrappers(node)
+    };
+
+    let Some(prov) = deepest_provenance_for_expr(program, checker, expr) else {
+        return DeclarationProvenance::default();
+    };
+    let Some(spec_text) = prov.specifier_text.as_deref() else {
+        return DeclarationProvenance::default();
+    };
+    if !is_bare_package_specifier(spec_text) {
+        return DeclarationProvenance::default();
+    }
+
+    let (spec_pkg_name, _) = split_package_specifier(spec_text);
+    let decl_pkg_name = find_package_dir_and_info(program, decl_sf.file_name(), None)
+        .and_then(|(_, info)| info)
+        .and_then(|entry| entry.contents)
+        .and_then(|contents| contents.get().fields.name.get_value().cloned());
+
+    let resolved_module = prov.specifier_node.is_some_and(|spec_node| {
+        program
+            .get_resolved_module_from_module_specifier(prov.containing_sf, spec_node)
+            .is_some_and(|resolved| resolved.is_resolved())
+    });
+    if !resolved_module {
+        return DeclarationProvenance::default();
+    }
+
+    let same_package = decl_pkg_name.as_deref() == Some(spec_pkg_name.as_str());
+    let package_name = decl_pkg_name.or(Some(spec_pkg_name));
+    let export_name = if same_package {
+        prov.export_name
+            .or_else(|| declaration.name().and_then(node_text))
+    } else {
+        declaration.name().and_then(node_text).or(prov.export_name)
+    };
+
+    DeclarationProvenance {
+        package_name,
+        export_name,
+    }
+}
+
 fn find_package_dir_and_info(
     program: &'static Program,
     file_path: &str,

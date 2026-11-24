@@ -1,7 +1,7 @@
 use serde_json::json;
 use verule_adapter_api::{
-    Evidence, FactQuery, Gap, HostFactQuery, HostQueriedFact, NativeAdapterInputAttribution,
-    NativeAdapterOutput, QueriedFact,
+    DeclarationInfo, Evidence, FactQuery, Gap, HostFactQuery, HostQueriedFact,
+    NativeAdapterInputAttribution, NativeAdapterOutput, QueriedFact,
 };
 
 #[test]
@@ -44,4 +44,31 @@ fn serializes_host_queried_facts_and_adapter_input_attributions() {
     let _ = std::mem::size_of::<FactQuery<'_>>();
     let _ = std::mem::size_of::<QueriedFact<'_>>();
     let _ = std::mem::size_of::<HostFactQuery>();
+}
+
+#[test]
+fn serializes_declaration_info_package_provenance() {
+    let info = DeclarationInfo {
+        name: Some("createSelectSchema".to_string()),
+        kind: Some("VariableDeclaration".to_string()),
+        location: None,
+        syntax: None,
+        is_external: true,
+        package_name: Some("drizzle-zod".to_string()),
+        export_name: Some("createSelectSchema".to_string()),
+    };
+    let encoded = serde_json::to_value(&info).expect("serialize DeclarationInfo");
+    assert_eq!(encoded["packageName"], json!("drizzle-zod"));
+    assert_eq!(encoded["exportName"], json!("createSelectSchema"));
+
+    let legacy: DeclarationInfo = serde_json::from_value(json!({
+        "name": "localFn",
+        "kind": "FunctionDeclaration",
+        "location": null,
+        "syntax": null,
+        "isExternal": false
+    }))
+    .expect("deserialize legacy DeclarationInfo");
+    assert_eq!(legacy.package_name, None);
+    assert_eq!(legacy.export_name, None);
 }

@@ -17,16 +17,17 @@ impl Adapter for ZodAdapter {
             fact_type_ids: vec![
                 "verule.validator.input-fields".to_string(),
                 "verule.validator.output-fields".to_string(),
+                "verule.validator.field".to_string(),
             ],
         }
     }
 
     fn extract<'a>(
         &self,
-        _context: &'a Context<'_>,
+        context: &'a Context<'_>,
         request: &FactRequest<'a>,
     ) -> Result<Vec<FactContribution<'a>>, AdapterError> {
-        extractor::extract(request)
+        extractor::extract(context, request)
     }
 }
 

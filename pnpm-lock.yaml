@@ -266,6 +266,9 @@ importers:
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.3
+      drizzle-zod:
+        specifier: 'catalog:'
+        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
       oxfmt:
         specifier: 'catalog:'
         version: 0.79.0
@@ -275,6 +278,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   adapters/zod:
     dependencies:
@@ -291,6 +297,12 @@ importers:
       '@verule/tooling-config':
         specifier: workspace:*
         version: link:../../packages/tooling-config
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+      drizzle-zod:
+        specifier: 'catalog:'
+        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
       oxfmt:
         specifier: 'catalog:'
         version: 0.79.0
@@ -300,6 +312,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
   packages/adapter-api: {}
 
@@ -666,6 +681,12 @@ importers:
       '@verule/tooling-config':
         specifier: workspace:*
         version: link:../../packages/tooling-config
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+      drizzle-zod:
+        specifier: 'catalog:'
+        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
       oxfmt:
         specifier: 'catalog:'
         version: 0.79.0
@@ -675,6 +696,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
 
 packages:
 

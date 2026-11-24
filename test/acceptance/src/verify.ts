@@ -387,7 +387,7 @@ export function verifyInstalledNativeLibrary(
         options.artifact.filename,
         `package/${archiveLibraryPath.replace(/^\.\//u, "")}`,
       ],
-      { encoding: "buffer" },
+      { encoding: "buffer", maxBuffer: 32 * 1024 * 1024 },
     );
     const packedSha256 = createHash("sha256").update(packedBytes).digest("hex");
     if (installedSha256 !== packedSha256) {

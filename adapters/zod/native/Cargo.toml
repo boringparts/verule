@@ -23,3 +23,8 @@ nursery = "deny"
 
 [lints]
 workspace = true
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

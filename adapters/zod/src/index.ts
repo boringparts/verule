@@ -1,6 +1,9 @@
 export {
+  ValidatorFieldFact,
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
+  type ValidatorFieldFactValue,
+  type ValidatorFieldMode,
   type ValidatorFieldsCondition,
   type ValidatorInputFieldInfo,
   type ValidatorInputFieldRequirement,
