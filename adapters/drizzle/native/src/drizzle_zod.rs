@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use rustc_hash::FxHashSet;
 use serde_json::{Map, Value, json};
 use verule_adapter_api::{
-    AdapterError, Context, Evidence, FactContribution, FactQuery, FactRequest, Gap, NodeKind,
-    NodeRef, QueriedFact, SourceLocation,
+    AdapterError, Context, Evidence, ExplainGapResolutionStatus, ExplainLocalGap, FactContribution,
+    FactExplainTrace, FactQuery, FactRequest, Gap, NodeKind, NodeRef, QueriedFact, SourceLocation,
 };
 
 const SCHEMA_FIELDS_FACT: &str = "verule.validator.schema-fields";
@@ -43,7 +43,7 @@ pub fn extract_schema_fields<'a>(
         if !is_verified_create_select_schema(call, &factory_bindings)? {
             continue;
         }
-        contributions.push(build_schema_contribution(context, call)?);
+        contributions.push(build_schema_contribution(context, call, request.explain)?);
     }
     Ok(contributions)
 }
@@ -241,6 +241,7 @@ fn is_verified_create_schema_factory_expr<'a>(
 fn build_schema_contribution<'a>(
     context: &'a Context<'_>,
     call: NodeRef<'a>,
+    explain: bool,
 ) -> Result<FactContribution<'a>, AdapterError> {
     let call_loc = call.location()?;
     let args = call.arguments()?;
@@ -297,7 +298,7 @@ fn build_schema_contribution<'a>(
         apply_refinements(
             context,
             refine_arg,
-            call_loc,
+            call_loc.clone(),
             &mut fields,
             &mut shape_gaps,
             &mut schema_evidence,
@@ -306,10 +307,25 @@ fn build_schema_contribution<'a>(
     }
 
     let mut all_gaps = shape_gaps.clone();
+    let mut local_gaps = Vec::new();
     let mut fields_json = Map::new();
     for (name, field) in fields {
         if !field.resolved {
             has_dynamic_fields = true;
+            if explain && let Some(first_gap) = field.gaps.first() {
+                local_gaps.push(ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
+                    provider_id: "drizzle".to_string(),
+                    field: Some(name.clone()),
+                    gap: first_gap.clone(),
+                    subject_location: call_loc.clone(),
+                    resolved_by: None,
+                    impact: Some(format!(
+                        "Field \"{name}\" in createSelectSchema() could not be statically resolved."
+                    )),
+                });
+            }
         }
         all_gaps.extend(field.gaps.clone());
         schema_evidence.extend(field.evidence.clone());
@@ -342,6 +358,20 @@ fn build_schema_contribution<'a>(
     let deduped_shape_gaps = dedupe(shape_gaps);
     if !deduped_shape_gaps.is_empty() {
         has_dynamic_fields = true;
+        if explain {
+            for shape_gap in &deduped_shape_gaps {
+                local_gaps.push(ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
+                    provider_id: "drizzle".to_string(),
+                    field: None,
+                    gap: shape_gap.clone(),
+                    subject_location: call_loc.clone(),
+                    resolved_by: None,
+                    impact: Some(shape_gap.message.clone()),
+                });
+            }
+        }
     }
 
     let mut value = json!({
@@ -356,6 +386,9 @@ fn build_schema_contribution<'a>(
     let mut contribution = FactContribution::new(call, value);
     contribution.evidence = dedupe(schema_evidence);
     contribution.gaps = dedupe(all_gaps);
+    if explain && !local_gaps.is_empty() {
+        contribution.explain_trace = Some(FactExplainTrace { local_gaps });
+    }
     Ok(contribution)
 }
 

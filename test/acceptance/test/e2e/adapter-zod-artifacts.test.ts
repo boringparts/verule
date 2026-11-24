@@ -9,7 +9,7 @@ import {
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
-import type { CallRef, NormalizedVeruleConfig } from "@verule/sdk";
+import type { CallRef } from "@verule/sdk";
 
 const adapterPackageName = "@verule/adapter-zod";
 const configPath = "packages/app/verule.zod.native.config.ts";

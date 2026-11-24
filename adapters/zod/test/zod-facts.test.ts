@@ -1264,6 +1264,50 @@ void describe("@verule/adapter-zod", () => {
             f.value.nullabilityExplicit === true,
         ),
       );
+
+      // Same-snapshot targeted explain locates unresolved field on partialUnknownSchema
+      // and resolved_by_override on overriddenSchema.
+      const explainSession = await openSession({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: ["@verule/adapter-zod"],
+          rules: [rule],
+        }),
+      });
+      try {
+        await explainSession.check();
+        const partialExplain = await explainSession.explain({
+          ruleId: "inspect-runtime-unknowns-and-field-facts",
+          at: "src/runtime.ts:30:14",
+        });
+        assert.ok(
+          partialExplain.explanation.localGaps.some(
+            (lg) =>
+              lg.status === "unresolved" &&
+              lg.field === "age" &&
+              lg.gap.kind === "unresolved-schema-field",
+          ),
+          JSON.stringify(partialExplain.explanation.localGaps),
+        );
+
+        const overriddenExplain = await explainSession.explain({
+          ruleId: "inspect-runtime-unknowns-and-field-facts",
+          at: "src/runtime.ts:31:17",
+        });
+        assert.ok(
+          overriddenExplain.explanation.localGaps.some(
+            (lg) =>
+              lg.status === "resolved_by_override" &&
+              lg.field === "age" &&
+              lg.resolvedBy?.operation === ".extend()" &&
+              lg.resolvedBy.providerId === "zod",
+          ),
+          JSON.stringify(overriddenExplain.explanation.localGaps),
+        );
+      } finally {
+        await explainSession.close();
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

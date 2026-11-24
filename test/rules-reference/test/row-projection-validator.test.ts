@@ -641,6 +641,124 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     }
   });
 
+  void it("resolves createSelectSchema(table, refine) + .extend() override and traces local unknowns via targeted explain", async () => {
+    const root = createMonorepoFixture({
+      "packages/db/src/schema.ts": [
+        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
+        "",
+        'export const users = sqliteTable("users", {',
+        '  id: integer("id").primaryKey(),',
+        '  name: text("name").notNull(),',
+        '  age: integer("age").notNull(),',
+        "});",
+        "export const _r = relations;",
+        "",
+      ].join("\n"),
+      "packages/db/src/queries.ts": [
+        'import { db, eq } from "./drizzle.js";',
+        'import { users } from "./schema.js";',
+        "",
+        "export async function fetchUserBrief(userId: number) {",
+        "  return await db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)).get();",
+        "}",
+        "",
+      ].join("\n"),
+      "packages/db/src/validation.ts": [
+        'import { createSelectSchema } from "drizzle-zod";',
+        'import { z } from "zod";',
+        'import { users } from "./schema.js";',
+        "",
+        "declare function runtimeAgeValidator(): z.ZodType<number>;",
+        "",
+        "export const unknownAgeSchema = createSelectSchema(users, {",
+        "  age: runtimeAgeValidator(),",
+        "});",
+        "",
+        "export const defaultedAgeSchema = createSelectSchema(users, {",
+        "  age: runtimeAgeValidator(),",
+        "}).extend({",
+        "  age: z.number().default(18),",
+        "});",
+        "",
+      ].join("\n"),
+      "packages/db/src/index.ts": [
+        'export { users } from "./schema.js";',
+        'export { fetchUserBrief } from "./queries.js";',
+        'export { defaultedAgeSchema, unknownAgeSchema } from "./validation.js";',
+        "",
+      ].join("\n"),
+      "packages/api/src/routes.ts": [
+        'import { defaultedAgeSchema, fetchUserBrief, unknownAgeSchema } from "@fixture/db";',
+        "",
+        "export async function checkRefined(userId: number) {",
+        "  const brief = await fetchUserBrief(userId);",
+        "  if (!brief) return null;",
+        "  const withGap = unknownAgeSchema.parse(brief);",
+        "  const resolved = defaultedAgeSchema.parse(brief);",
+        "  return { withGap, resolved };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    const session = await openSession({
+      cwd: root,
+      adapterResolutionRoot: packageRoot,
+      config: defineConfig({
+        projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
+        adapters: [drizzleAdapter, zodAdapter],
+        rules: [rowProjectionSatisfiesValidatorRule],
+      }),
+    });
+
+    try {
+      const report = await session.check();
+      assert.equal(report.status, "clean");
+      // unknownAgeSchema keeps its active unresolved-schema-field gap,
+      // while defaultedAgeSchema cleared its superseded gap!
+      const schemaGaps = report.gaps.filter(
+        (g) => g.kind === "unresolved-schema-field",
+      );
+      assert.equal(schemaGaps.length, 1, JSON.stringify(schemaGaps));
+      assert.equal(schemaGaps[0]?.at?.file, "packages/db/src/validation.ts");
+      assert.equal(schemaGaps[0]?.at?.line, 8);
+
+      const gapExplain = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:6:19",
+      });
+      assert.ok(
+        gapExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.providerId === "drizzle" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field",
+        ),
+        JSON.stringify(gapExplain.explanation.localGaps),
+      );
+
+      const resolvedExplain = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:7:20",
+      });
+      assert.ok(
+        resolvedExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.providerId === "drizzle" &&
+            lg.field === "age" &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".extend()",
+        ),
+        JSON.stringify(resolvedExplain.explanation.localGaps),
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @verule/sdk .d.ts", () => {
     const root = mkdtempSync(join(tmpdir(), "verule-rules-ref-typecheck-"));
     try {

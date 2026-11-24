@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 use verule_adapter_api::{
-    AdapterError, Context, Evidence, FactContribution, FactQuery, FactRequest, Gap, NodeKind,
+    AdapterError, Context, Evidence, ExplainGapResolution, ExplainGapResolutionStatus,
+    ExplainLocalGap, FactContribution, FactExplainTrace, FactQuery, FactRequest, Gap, NodeKind,
     NodeRef, QueriedFact, SourceLocation,
 };
 
@@ -104,6 +105,9 @@ struct Schema {
     recognized: bool,
     fields: BTreeMap<String, Field>,
     field_gaps: BTreeMap<String, Vec<Gap>>,
+    field_gap_origins: BTreeMap<String, ExplainLocalGap>,
+    shape_local_gaps: Vec<ExplainLocalGap>,
+    resolved_local_gaps: Vec<ExplainLocalGap>,
     explicit_dynamic: bool,
     has_dynamic_fields: bool,
     gaps: Vec<Gap>,
@@ -116,14 +120,25 @@ impl Schema {
     }
 
     fn unresolved(message: String, at: Option<SourceLocation>) -> Self {
+        let gap = Gap {
+            kind: "unresolved-schema".to_string(),
+            message: message.clone(),
+            at: at.clone(),
+        };
         Self {
             recognized: true,
             has_dynamic_fields: true,
-            gaps: vec![Gap {
-                kind: "unresolved-schema".to_string(),
-                message,
-                at: at.clone(),
+            shape_local_gaps: vec![ExplainLocalGap {
+                status: ExplainGapResolutionStatus::Unresolved,
+                fact_type_id: String::new(),
+                provider_id: "zod".to_string(),
+                field: None,
+                gap: gap.clone(),
+                subject_location: at.clone(),
+                resolved_by: None,
+                impact: Some(message),
             }],
+            gaps: vec![gap],
             evidence: vec![source_evidence("Unresolved Zod schema".to_string(), at)],
             ..Self::default()
         }
@@ -142,6 +157,7 @@ impl Schema {
         if let Some(field) = result.field {
             self.evidence.extend(field.evidence.clone());
             self.fields.insert(name.clone(), field);
+            self.field_gap_origins.remove(&name);
             if result.gaps.is_empty() {
                 self.field_gaps.remove(&name);
             } else {
@@ -149,6 +165,23 @@ impl Schema {
             }
         } else {
             self.fields.remove(&name);
+            if let Some(first_gap) = result.gaps.first() {
+                self.field_gap_origins.insert(
+                    name.clone(),
+                    ExplainLocalGap {
+                        status: ExplainGapResolutionStatus::Unresolved,
+                        fact_type_id: String::new(),
+                        provider_id: "zod".to_string(),
+                        field: Some(name.clone()),
+                        gap: first_gap.clone(),
+                        subject_location: None,
+                        resolved_by: None,
+                        impact: Some(format!(
+                            "Field \"{name}\" remained unknown because its validator could not be statically resolved."
+                        )),
+                    },
+                );
+            }
             if !result.gaps.is_empty() {
                 self.field_gaps.insert(name, result.gaps);
             }
@@ -169,6 +202,28 @@ impl Schema {
             combined.extend(gaps.clone());
         }
         dedupe_gaps(combined)
+    }
+
+    fn take_explain_trace(
+        &mut self,
+        fact_type_id: &str,
+        subject_location: Option<&SourceLocation>,
+    ) -> Option<FactExplainTrace> {
+        let mut local_gaps = std::mem::take(&mut self.resolved_local_gaps);
+        local_gaps.extend(std::mem::take(&mut self.field_gap_origins).into_values());
+        local_gaps.extend(std::mem::take(&mut self.shape_local_gaps));
+        if local_gaps.is_empty() {
+            return None;
+        }
+        for entry in &mut local_gaps {
+            if entry.fact_type_id.is_empty() {
+                entry.fact_type_id = fact_type_id.to_string();
+            }
+            if entry.subject_location.is_none() {
+                entry.subject_location = subject_location.cloned();
+            }
+        }
+        Some(FactExplainTrace { local_gaps })
     }
 }
 
@@ -213,7 +268,7 @@ pub fn extract<'a>(
     }
 
     let mut contributions = Vec::with_capacity(sites.len());
-    for site in sites {
+    for mut site in sites {
         let value = match request.fact_type_id {
             INPUT_FACT => input_value(&site),
             OUTPUT_FACT => output_value(&site),
@@ -224,9 +279,19 @@ pub fn extract<'a>(
                 });
             }
         };
+        let subject_location = if request.explain {
+            site.subject.location()?
+        } else {
+            None
+        };
         let mut contribution = FactContribution::new(site.subject, value);
         contribution.evidence = dedupe_evidence(site.schema.evidence.clone());
         contribution.gaps = site.schema.all_gaps();
+        if request.explain {
+            contribution.explain_trace = site
+                .schema
+                .take_explain_trace(request.fact_type_id, subject_location.as_ref());
+        }
         contributions.push(contribution);
     }
     Ok(contributions)
@@ -748,14 +813,14 @@ impl ZodEvaluator {
             "extend" => {
                 if let Some(shape) = arguments.first() {
                     let extension = Self::evaluate_shape(context, *shape, visited)?;
-                    merge_schema(&mut result, extension);
+                    merge_schema(&mut result, extension, ".extend()", location.as_ref());
                 }
             }
             "merge" => {
                 if let Some(other) = arguments.first() {
                     let other = Self::evaluate_schema(context, *other, visited)?;
                     if other.recognized {
-                        merge_schema(&mut result, other);
+                        merge_schema(&mut result, other, ".merge()", location.as_ref());
                     } else {
                         result.add_gap(Gap {
                             kind: "unresolved-schema".to_string(),
@@ -784,6 +849,10 @@ impl ZodEvaluator {
                         }
                     }
                     result.field_gaps = selected_gaps;
+                    result.field_gap_origins.retain(|name, _| {
+                        let included = mask.keys.contains(name);
+                        (method == "pick" && included) || (method == "omit" && !included)
+                    });
                     result.explicit_dynamic |= mask.has_dynamic_fields && mask.gaps.is_empty();
                     result.gaps.extend(mask.gaps);
                     result.recompute_dynamic();
@@ -1004,7 +1073,8 @@ impl ZodEvaluator {
                             ));
                             schema.evidence.extend(spread.evidence);
                         } else if spread.recognized {
-                            merge_schema(&mut schema, spread);
+                            let spread_loc = property.location()?;
+                            merge_schema(&mut schema, spread, "spread", spread_loc.as_ref());
                         } else {
                             schema.add_gap(dynamic_gap(
                                 "dynamic-schema-spread",
@@ -1450,7 +1520,84 @@ fn extract_single_return_expr(block: NodeRef<'_>) -> Result<Option<NodeRef<'_>>,
     Ok(found)
 }
 
+fn ingest_external_field(schema: &mut Schema, name: &str, entry: &Value, external_provider: &str) {
+    let entry_gaps = entry
+        .get("gaps")
+        .and_then(|val| serde_json::from_value::<Vec<Gap>>(val.clone()).ok())
+        .unwrap_or_default();
+    if entry.get("resolved").and_then(Value::as_bool) == Some(true) {
+        let requirement = match entry.get("requirement").and_then(Value::as_str) {
+            Some("optional") => InputRequirement::Optional,
+            Some("defaulted") => InputRequirement::Defaulted,
+            _ => InputRequirement::Required,
+        };
+        let presence = match entry.get("presence").and_then(Value::as_str) {
+            Some("optional") => OutputPresence::Optional,
+            _ => OutputPresence::Required,
+        };
+        let nullable = entry
+            .get("nullable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let from_default = entry
+            .get("fromDefault")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let evidence = entry
+            .get("evidence")
+            .and_then(|val| serde_json::from_value::<Vec<Evidence>>(val.clone()).ok())
+            .unwrap_or_default();
+        schema.fields.insert(
+            name.to_string(),
+            Field {
+                requirement,
+                presence,
+                nullable,
+                from_default,
+                evidence,
+            },
+        );
+        if !entry_gaps.is_empty() {
+            schema.field_gaps.insert(name.to_string(), entry_gaps);
+        }
+        return;
+    }
+
+    let gaps = if entry_gaps.is_empty() {
+        vec![Gap {
+            kind: "unresolved-schema-field".to_string(),
+            message: format!("Field \"{name}\" could not be statically resolved."),
+            at: None,
+        }]
+    } else {
+        entry_gaps
+    };
+    if let Some(first_gap) = gaps.first() {
+        schema.field_gap_origins.insert(
+            name.to_string(),
+            ExplainLocalGap {
+                status: ExplainGapResolutionStatus::Unresolved,
+                fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
+                provider_id: external_provider.to_string(),
+                field: Some(name.to_string()),
+                gap: first_gap.clone(),
+                subject_location: None,
+                resolved_by: None,
+                impact: Some(format!(
+                    "Field \"{name}\" in external schema could not be statically resolved."
+                )),
+            },
+        );
+    }
+    schema.field_gaps.insert(name.to_string(), gaps);
+}
+
 fn schema_from_external_fact(fact: QueriedFact<'_>) -> Schema {
+    let external_provider = fact
+        .providers
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "drizzle".to_string());
     let mut schema = Schema {
         recognized: true,
         evidence: fact.evidence,
@@ -1459,56 +1606,16 @@ fn schema_from_external_fact(fact: QueriedFact<'_>) -> Schema {
 
     if let Some(fields_obj) = fact.value.get("fields").and_then(Value::as_object) {
         for (name, entry) in fields_obj {
-            let entry_gaps = entry
-                .get("gaps")
-                .and_then(|val| serde_json::from_value::<Vec<Gap>>(val.clone()).ok())
-                .unwrap_or_default();
-            if entry.get("resolved").and_then(Value::as_bool) == Some(true) {
-                let requirement = match entry.get("requirement").and_then(Value::as_str) {
-                    Some("optional") => InputRequirement::Optional,
-                    Some("defaulted") => InputRequirement::Defaulted,
-                    _ => InputRequirement::Required,
-                };
-                let presence = match entry.get("presence").and_then(Value::as_str) {
-                    Some("optional") => OutputPresence::Optional,
-                    _ => OutputPresence::Required,
-                };
-                let nullable = entry
-                    .get("nullable")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let from_default = entry
-                    .get("fromDefault")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let evidence = entry
-                    .get("evidence")
-                    .and_then(|val| serde_json::from_value::<Vec<Evidence>>(val.clone()).ok())
-                    .unwrap_or_default();
-                schema.fields.insert(
-                    name.clone(),
-                    Field {
-                        requirement,
-                        presence,
-                        nullable,
-                        from_default,
-                        evidence,
-                    },
-                );
-                if !entry_gaps.is_empty() {
-                    schema.field_gaps.insert(name.clone(), entry_gaps);
-                }
+            ingest_external_field(&mut schema, name, entry, &external_provider);
+        }
+    }
+
+    if let Some(trace) = fact.explain_trace {
+        for local_gap in trace.local_gaps {
+            if let Some(field_name) = local_gap.field.clone() {
+                schema.field_gap_origins.insert(field_name, local_gap);
             } else {
-                let gaps = if entry_gaps.is_empty() {
-                    vec![Gap {
-                        kind: "unresolved-schema-field".to_string(),
-                        message: format!("Field \"{name}\" could not be statically resolved."),
-                        at: None,
-                    }]
-                } else {
-                    entry_gaps
-                };
-                schema.field_gaps.insert(name.clone(), gaps);
+                schema.shape_local_gaps.push(local_gap);
             }
         }
     }
@@ -1667,7 +1774,7 @@ fn intersection_schema(
         field_gaps: left.field_gaps.clone(),
         gaps: [left.gaps.clone(), right.gaps.clone()].concat(),
         evidence: [left.evidence, right.evidence.clone()].concat(),
-        has_dynamic_fields: false,
+        ..Schema::default()
     };
     for (name, fgaps) in right.field_gaps {
         if !output.fields.contains_key(&name) {
@@ -1755,13 +1862,46 @@ fn pipe_schema(location: Option<SourceLocation>, input: &Schema, output: &Schema
     schema
 }
 
-fn merge_schema(target: &mut Schema, incoming: Schema) {
+fn merge_schema(
+    target: &mut Schema,
+    incoming: Schema,
+    operation: &str,
+    operation_at: Option<&SourceLocation>,
+) {
+    target
+        .resolved_local_gaps
+        .extend(incoming.resolved_local_gaps);
+    target.shape_local_gaps.extend(incoming.shape_local_gaps);
     for (name, field) in incoming.fields {
+        if let Some(mut origin) = target.field_gap_origins.remove(&name) {
+            let override_at = field
+                .evidence
+                .first()
+                .and_then(|ev| ev.at.clone())
+                .or_else(|| operation_at.cloned());
+            origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+            origin.resolved_by = Some(ExplainGapResolution {
+                provider_id: "zod".to_string(),
+                operation: operation.to_string(),
+                conclusion: format!(
+                    "field \"{name}\": {} (nullable={})",
+                    field.requirement.as_str(),
+                    field.nullable
+                ),
+                at: override_at,
+            });
+            target.resolved_local_gaps.push(origin);
+        }
         target.fields.insert(name.clone(), field);
         if let Some(fgaps) = incoming.field_gaps.get(&name) {
             target.field_gaps.insert(name, fgaps.clone());
         } else {
             target.field_gaps.remove(&name);
+        }
+    }
+    for (name, origin) in incoming.field_gap_origins {
+        if !target.fields.contains_key(&name) {
+            target.field_gap_origins.insert(name, origin);
         }
     }
     for (name, fgaps) in incoming.field_gaps {

@@ -15,11 +15,7 @@ import {
   type ValidatorOutputFieldsFactValue,
   type ValidatorSubjectKind,
 } from "@verule/adapter-zod";
-import type {
-  CheckReport,
-  FactResult,
-  NormalizedVeruleConfig,
-} from "@verule/sdk";
+import type { CheckReport, FactResult } from "@verule/sdk";
 
 const adapterPackageNames = [
   "@verule/adapter-drizzle",
