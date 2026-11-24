@@ -1,0 +1,31 @@
+{
+  "name": "@verule/acceptance-host-zod-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./host-materials": "./host-materials.json",
+    "./host-materials/*": "./*"
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@verule/acceptance-host-zod-data": "workspace:*",
+    "@verule/adapter-zod": "catalog:",
+    "@verule/sdk": "catalog:",
+    "drizzle-orm": "catalog:",
+    "drizzle-zod": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  },
+  "engines": {
+    "node": "^26.13.1"
+  }
+}

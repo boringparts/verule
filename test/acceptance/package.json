@@ -1,0 +1,52 @@
+{
+  "name": "@verule/acceptance",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "test": "node --conditions=source --test --test-reporter=spec 'test/unit/**/*.test.ts'",
+    "test:e2e": "node --test --test-reporter=spec 'test/e2e/**/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@verule/acceptance-host-app": "workspace:*",
+    "@verule/acceptance-host-data": "workspace:*",
+    "@verule/acceptance-host-drizzle-app": "workspace:*",
+    "@verule/acceptance-host-drizzle-data": "workspace:*",
+    "@verule/acceptance-host-drizzle-zod-app": "workspace:*",
+    "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
+    "@verule/acceptance-host-provider-session-data": "workspace:*",
+    "@verule/acceptance-host-zod-app": "workspace:*",
+    "@verule/acceptance-host-zod-data": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@verule/adapter-drizzle": "workspace:*",
+    "@verule/adapter-fixture": "workspace:*",
+    "@verule/adapter-fixture-complement": "workspace:*",
+    "@verule/adapter-zod": "workspace:*",
+    "@verule/cli": "workspace:*",
+    "@verule/engine": "workspace:*",
+    "@verule/rules-reference": "workspace:*",
+    "@verule/sdk": "workspace:*",
+    "@verule/tooling-config": "workspace:*",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "^26.13.1"
+  }
+}
