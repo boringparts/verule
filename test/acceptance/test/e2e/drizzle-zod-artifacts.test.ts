@@ -317,6 +317,94 @@ void test("loads both installed native adapters from the neutral static host and
         await watch.close();
       }
 
+      // Restore schemaRelPath before verifying argument-switching, nested relation, and rest-destructuring checks.
+      host.replaceText(
+        schemaRelPath,
+        '  status: text("status").notNull(),\n  tenantId: integer("tenant_id").notNull(),\n',
+        '  status: text("status").notNull(),\n',
+      );
+      const rowProjectionRelPath = "packages/app/src/row-projection.ts";
+      const originalRowProjection = host.readText(rowProjectionRelPath);
+
+      // 1. Passing missing-column `brief` to `strictUserSchema.parse` alerts at the validator call.
+      host.replaceText(
+        rowProjectionRelPath,
+        "    defaulted: brief === undefined ? undefined : userSchema.parse(brief),\n",
+        "    defaulted: brief === undefined ? undefined : strictUserSchema.parse(brief),\n",
+      );
+      const missingBriefCheck = await host.check({ config: mainConfigPath });
+      assert.equal(missingBriefCheck.status, 1);
+      assert.equal(missingBriefCheck.report.diagnostics.length, 1);
+      const briefDiag = missingBriefCheck.report.diagnostics[0]!;
+      assert.equal(briefDiag.at.file, rowProjectionRelPath);
+      assert.match(briefDiag.message, /\bage\b/u);
+      assert.ok(
+        briefDiag.evidence.some((e) => e.at?.file === projectionsRelPath),
+      );
+      assert.ok(
+        briefDiag.evidence.some((e) => e.at?.file === rowProjectionRelPath),
+      );
+      assert.ok(briefDiag.evidence.some((e) => e.at?.file === schemaRelPath));
+
+      // 2. Switching the passed argument from `brief` to complete-fields `complete` retracts the alert.
+      host.replaceText(
+        rowProjectionRelPath,
+        "    defaulted: brief === undefined ? undefined : strictUserSchema.parse(brief),\n",
+        "    defaulted: complete === undefined ? undefined : strictUserSchema.parse(complete),\n",
+      );
+      const switchedCompleteCheck = await host.check({
+        config: mainConfigPath,
+      });
+      assert.equal(switchedCompleteCheck.status, 0);
+      assert.equal(switchedCompleteCheck.report.diagnostics.length, 0);
+      host.writeText(rowProjectionRelPath, originalRowProjection);
+
+      // 3. Omitting `slug: true` from relational query alerts only on `gateFieldsSchema.parse(restPage)`.
+      host.replaceText(projectionsRelPath, "      slug: true,\n", "");
+      const missingRestSlug = await host.check({ config: mainConfigPath });
+      assert.equal(missingRestSlug.status, 1);
+      assert.equal(missingRestSlug.report.diagnostics.length, 1);
+      const restDiag = missingRestSlug.report.diagnostics[0]!;
+      assert.equal(restDiag.at.file, rowProjectionRelPath);
+      assert.match(restDiag.message, /\bslug\b/u);
+      assert.ok(
+        restDiag.evidence.some((e) => e.at?.file === projectionsRelPath),
+      );
+      assert.ok(
+        restDiag.evidence.some((e) => e.at?.file === rowProjectionRelPath),
+      );
+      assert.ok(restDiag.evidence.some((e) => e.at?.file === schemaRelPath));
+      host.replaceText(
+        projectionsRelPath,
+        "    columns: {\n      customDomain: true,\n",
+        "    columns: {\n      slug: true,\n      customDomain: true,\n",
+      );
+
+      // 4. Restricting nested `workspace` columns alerts on `selectWorkspaceSchema.safeParse(pageRow.workspace)`.
+      host.replaceText(
+        projectionsRelPath,
+        "      workspace: true,\n",
+        "      workspace: { columns: { id: true } },\n",
+      );
+      const missingNestedWs = await host.check({ config: mainConfigPath });
+      assert.equal(missingNestedWs.status, 1);
+      assert.equal(missingNestedWs.report.diagnostics.length, 1);
+      const nestedDiag = missingNestedWs.report.diagnostics[0]!;
+      assert.equal(nestedDiag.at.file, rowProjectionRelPath);
+      assert.match(nestedDiag.message, /\bslug\b/u);
+      assert.ok(
+        nestedDiag.evidence.some((e) => e.at?.file === projectionsRelPath),
+      );
+      assert.ok(
+        nestedDiag.evidence.some((e) => e.at?.file === rowProjectionRelPath),
+      );
+      assert.ok(nestedDiag.evidence.some((e) => e.at?.file === schemaRelPath));
+      host.replaceText(
+        projectionsRelPath,
+        "      workspace: { columns: { id: true } },\n",
+        "      workspace: true,\n",
+      );
+
       const multiConfig = await host.loadConfig<NormalizedVeruleConfig>(
         multiSourceConfigPath,
       );

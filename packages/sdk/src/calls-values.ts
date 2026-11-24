@@ -74,6 +74,8 @@ export type ValuePropagationStep = {
   readonly description: string;
   readonly fromLocation: DiagnosticLocation;
   readonly toLocation: DiagnosticLocation;
+  readonly property?: string;
+  readonly omittedProperties?: readonly string[];
 };
 
 export type ValuePropagationPath = {
@@ -81,6 +83,8 @@ export type ValuePropagationPath = {
   readonly to: ValueEndpoint;
   readonly steps: readonly ValuePropagationStep[];
   readonly evidence: readonly Evidence[];
+  readonly sourcePath: readonly string[];
+  readonly omittedProperties: readonly string[];
 };
 
 export type ValuePropagationTargetResult = {
@@ -94,9 +98,56 @@ export type ValuePropagationTargetResult = {
 
 export type ValuePropagationOptions = {
   readonly propagation?: ValuePropagationMode;
+  /**
+   * When true, property accesses (`row.prop`, `row["prop"]`) and non-rest destructuring
+   * (`const { prop } = row`) on an unwrapped object advance `ValuePropagationPath.sourcePath`
+   * instead of stopping propagation. Defaults to false.
+   */
+  readonly includeMemberAccess?: boolean;
   readonly from: ValueEndpoint | readonly ValueEndpoint[];
   readonly to: ValueEndpoint | readonly ValueEndpoint[];
 } & LookupFilesOptions;
+
+export type ObjectFieldShape = {
+  readonly fields: readonly string[];
+  readonly nested?: Readonly<Record<string, ObjectFieldShape>>;
+  readonly hasDynamicFields?: boolean;
+};
+
+export type RetainedObjectFields = {
+  readonly fields: readonly string[];
+  readonly omittedFields: readonly string[];
+  readonly hasDynamicFields: boolean;
+  readonly sourcePath: readonly string[];
+  readonly matchedNested: boolean;
+};
+
+/**
+ * Resolves the object fields retained along a `ValuePropagationPath` from an object shape,
+ * using only structured `sourcePath` and `omittedProperties` metadata (independent of step prose).
+ * Returns `null` when a nested segment in `sourcePath` is absent from `shape.nested`.
+ */
+export function resolveRetainedObjectFields(
+  shape: ObjectFieldShape,
+  path: Pick<ValuePropagationPath, "sourcePath" | "omittedProperties">,
+): RetainedObjectFields | null {
+  let current = shape;
+  for (const segment of path.sourcePath) {
+    const next = current.nested?.[segment];
+    if (!next) {
+      return null;
+    }
+    current = next;
+  }
+  const omittedSet = new Set(path.omittedProperties);
+  return {
+    fields: current.fields.filter((field) => !omittedSet.has(field)),
+    omittedFields: [...path.omittedProperties],
+    hasDynamicFields: current.hasDynamicFields === true,
+    sourcePath: [...path.sourcePath],
+    matchedNested: path.sourcePath.length > 0,
+  };
+}
 
 export type ValuePropagationResult = {
   readonly propagation: ValuePropagationMode;
@@ -162,6 +213,8 @@ type RawValuePropagationPath = {
   readonly to: string;
   readonly steps: readonly ValuePropagationStep[];
   readonly evidence: readonly Evidence[];
+  readonly sourcePath: readonly string[];
+  readonly omittedProperties: readonly string[];
 };
 
 type RawValuePropagationTargetRow = {
@@ -581,6 +634,7 @@ export function createCallsValuesQueries(deps: {
     ): Promise<ValuePropagationResult> => {
       assertOpen();
       const propagation: ValuePropagationMode = options.propagation ?? "value";
+      const includeMemberAccess = options.includeMemberAccess === true;
       const lookupFiles = normalizeLookupFiles(
         options.lookupFiles,
         cwd,
@@ -611,6 +665,7 @@ export function createCallsValuesQueries(deps: {
         projectId,
         lookupFiles ?? null,
         propagation,
+        includeMemberAccess,
         fromList.map((e) => e.handleId),
         toList.map((e) => e.handleId),
       ]);
@@ -635,6 +690,7 @@ export function createCallsValuesQueries(deps: {
                 {
                   op: "valuePropagation",
                   propagation,
+                  ...(includeMemberAccess ? { includeMemberAccess: true } : {}),
                   from: fromList.map((e) => e.handleId),
                   to: toList.map((e) => e.handleId),
                   ...(lookupFiles !== undefined ? { lookupFiles } : {}),
@@ -666,6 +722,8 @@ export function createCallsValuesQueries(deps: {
                         to: endpointByHandle.get(p.to) ?? toRef,
                         steps: p.steps,
                         evidence: p.evidence,
+                        sourcePath: p.sourcePath,
+                        omittedProperties: p.omittedProperties,
                       },
                       p.evidence,
                     ),

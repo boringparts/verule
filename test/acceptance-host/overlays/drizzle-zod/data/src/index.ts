@@ -2,8 +2,15 @@ export {
   getCompleteUser,
   getCompleteUserAgain,
   getDynamicUser,
+  getPageWithWorkspace,
   getUserBrief,
   getUserBriefAgain,
   getUserWithoutAge,
 } from "./drizzle-projections.ts";
-export { strictUserSchema, userSchema } from "./drizzle-schema.ts";
+export {
+  gateFieldsSchema,
+  selectPageSchema,
+  selectWorkspaceSchema,
+  strictUserSchema,
+  userSchema,
+} from "./drizzle-schema.ts";
