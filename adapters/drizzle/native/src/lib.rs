@@ -14,6 +14,7 @@ use verule_adapter_api::{
 };
 
 mod algorithm;
+mod drizzle_zod;
 
 type Kind = NodeKind;
 
@@ -173,18 +174,22 @@ impl Adapter for DrizzleAdapter {
             fact_type_ids: vec![
                 "verule.query.row-projection".to_string(),
                 "verule.drizzle.table-columns".to_string(),
+                drizzle_zod::fact_type_id().to_string(),
             ],
         }
     }
 
     fn extract<'a>(
         &self,
-        _context: &'a Context<'_>,
+        context: &'a Context<'_>,
         request: &FactRequest<'a>,
     ) -> Result<Vec<FactContribution<'a>>, AdapterError> {
         match request.fact_type_id {
             "verule.query.row-projection" => extract_row_projections(request),
             "verule.drizzle.table-columns" => extract_table_columns(request),
+            "verule.validator.schema-fields" => {
+                drizzle_zod::extract_schema_fields(context, request)
+            }
             _ => Err(AdapterError::UnsupportedFactType {
                 adapter_id: "drizzle".to_string(),
                 fact_type_id: request.fact_type_id.to_string(),

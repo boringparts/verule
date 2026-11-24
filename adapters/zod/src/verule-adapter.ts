@@ -1,6 +1,7 @@
 import { defineAdapter, defineFactProvider } from "@verule/sdk";
 
 import {
+  ValidatorFieldFact,
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
 } from "./facts.ts";
@@ -31,6 +32,14 @@ const zodAdapter = defineAdapter({
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+      }),
+    ),
+    defineFactProvider(ValidatorFieldFact, (ctx, request) =>
+      ctx.extractEngineFacts({
+        factTypeId: request.factType.id,
+        providerId: "zod",
+        reportProviderId: "zod",
+        ...(request.targets !== undefined ? { targets: request.targets } : {}),
       }),
     ),
   ],

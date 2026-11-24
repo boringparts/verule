@@ -106,33 +106,33 @@ void test("installs the native Zod adapter and queries real schemas from a stati
       ]);
 
       assert.equal(user.facts.input.validatorMethod, "parse");
-      assert.deepEqual(user.facts.input.requiredFields, [
-        "id",
-        "name",
-        "nickname",
-      ]);
+      // Single-Zod retains explicit .extend({ age: z.number().default(18) }) conclusions
+      // while surfacing unresolved-schema for base createSelectSchema(userTable) fields.
+      assert.deepEqual(user.facts.input.requiredFields, []);
+      assert.deepEqual(user.facts.input.optionalFields, ["age"]);
       assert.deepEqual(user.facts.input.defaultedFields, ["age"]);
-      assert.deepEqual(user.facts.output.presentFields, [
-        "age",
-        "id",
-        "name",
-        "nickname",
-      ]);
+      assert.equal(user.facts.input.hasDynamicFields, true);
+      assert.deepEqual(user.facts.output.presentFields, ["age"]);
       assert.deepEqual(user.facts.output.defaultedFields, ["age"]);
       assert.ok(
         user.diagnostic.evidence.some(
           (item) => item.at?.file === "packages/app/src/zod-fields.ts",
         ),
       );
-      assert.ok(
-        user.facts.input.fields.id?.evidence?.some(
+      assert.equal(
+        user.diagnostic.evidence.some(
           (item) => item.at?.file === "packages/data/src/user-table.ts",
         ),
+        false,
       );
       assert.ok(
-        user.facts.input.fields.id?.evidence?.some(
-          (item) => item.at?.file === "packages/app/src/zod-fields.ts",
+        result.report.gaps.some(
+          (gap) =>
+            gap.kind === "unresolved-schema" &&
+            gap.at?.file === "packages/app/src/zod-fields.ts" &&
+            gap.at.line === 21,
         ),
+        JSON.stringify(result.report.gaps),
       );
 
       assert.ok(
@@ -152,7 +152,7 @@ void test("installs the native Zod adapter and queries real schemas from a stati
 
       const sdk = await host.loadSdk();
       const resolvedConfigPath = host.resolvePath(configPath);
-      const config = await host.loadConfig<NormalizedVeruleConfig>(configPath);
+      const config = await host.loadConfig(configPath);
       assert.deepEqual(config.adapterPackages, [adapterPackageName]);
       assert.deepEqual(
         await sdk.runCheck({
@@ -268,11 +268,9 @@ void test("installs the native Zod adapter and queries real schemas from a stati
         assert.ok(targetCallSyntaxHandle);
         assert.equal(firstCallFacts.length, 1);
         assert.equal(firstCallFacts[0]!.subject.handleId, targetCallHandle);
-        assert.deepEqual(firstCallFacts[0]!.value.requiredFields, [
-          "id",
-          "name",
-          "nickname",
-        ]);
+        assert.deepEqual(firstCallFacts[0]!.value.requiredFields, []);
+        assert.deepEqual(firstCallFacts[0]!.value.defaultedFields, ["age"]);
+        assert.equal(firstCallFacts[0]!.value.hasDynamicFields, true);
         assert.deepEqual(repeatedCallFacts, firstCallFacts);
         assert.deepEqual(
           callAliasFacts.map((fact) => fact.subject.handleId).toSorted(),

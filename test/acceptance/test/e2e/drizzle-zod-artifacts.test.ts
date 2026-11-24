@@ -1,8 +1,25 @@
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import { test } from "node:test";
 
 import { withAcceptanceHost } from "@verule/acceptance";
-import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
+import {
+  ValidatorSchemaFieldsFact,
+  type ValidatorSchemaFieldsFactValue,
+  type ValidatorSchemaSubjectKind,
+} from "@verule/adapter-drizzle";
+import {
+  ValidatorInputFieldsFact,
+  ValidatorOutputFieldsFact,
+  type ValidatorInputFieldsFactValue,
+  type ValidatorOutputFieldsFactValue,
+  type ValidatorSubjectKind,
+} from "@verule/adapter-zod";
+import type {
+  CheckReport,
+  FactResult,
+  NormalizedVeruleConfig,
+} from "@verule/sdk";
 
 const adapterPackageNames = [
   "@verule/adapter-drizzle",
@@ -69,8 +86,7 @@ void test("loads both installed native adapters from the neutral static host and
       });
 
       const sdk = await host.loadSdk();
-      const mainConfig =
-        await host.loadConfig<NormalizedVeruleConfig>(mainConfigPath);
+      const mainConfig = await host.loadConfig(mainConfigPath);
       assert.deepEqual(mainConfig.adapterPackages, adapterPackageNames);
 
       const coldInitial = await host.check({
@@ -405,9 +421,7 @@ void test("loads both installed native adapters from the neutral static host and
         "      workspace: true,\n",
       );
 
-      const multiConfig = await host.loadConfig<NormalizedVeruleConfig>(
-        multiSourceConfigPath,
-      );
+      const multiConfig = await host.loadConfig(multiSourceConfigPath);
       const coldMultiple = await host.check({ config: multiSourceConfigPath });
       assert.equal(coldMultiple.status, 1);
       const multiDiagnostics = coldMultiple.report.diagnostics;
@@ -480,6 +494,161 @@ void test("loads both installed native adapters from the neutral static host and
           `Engine binary SHA-256 ${host.audit.engineBinarySha256}`,
         ].join("\n"),
       );
+
+      // Dual-adapter drizzle-zod provenance, non-null column default override,
+      // explicit refine (replace + callback), and local same-named function counterexample.
+      const originalSchema = host.readText(schemaRelPath);
+      const fakeSelectRelPath = "packages/app/src/fake-select.ts";
+      try {
+        host.writeText(
+          schemaRelPath,
+          [
+            originalSchema,
+            "",
+            "export const refinedWorkspaceSchema = createSelectSchema(workspace, {",
+            "  slug: (s) => s.optional(),",
+            '  name: (s) => s.default("Workspace"),',
+            "}).extend({",
+            '  plan: z.string().default("enterprise"),',
+            "});",
+            "",
+          ].join("\n"),
+        );
+        host.writeText(
+          fakeSelectRelPath,
+          [
+            'import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";',
+            'import { z } from "zod";',
+            "",
+            'const localUsers = sqliteTable("local_users", {',
+            '  id: integer("id").primaryKey(),',
+            '  secret: text("secret").notNull(),',
+            "});",
+            "",
+            "function createSelectSchema(_table: unknown) {",
+            "  return z.object({ localOnly: z.string() });",
+            "}",
+            "export const fakeLocalSelectSchema = createSelectSchema(localUsers);",
+            "",
+          ].join("\n"),
+        );
+
+        let schemaFieldsFacts: readonly FactResult<
+          ValidatorSchemaSubjectKind,
+          ValidatorSchemaFieldsFactValue
+        >[] = [];
+        let zodInputFacts: readonly FactResult<
+          ValidatorSubjectKind,
+          ValidatorInputFieldsFactValue
+        >[] = [];
+        let zodOutputFacts: readonly FactResult<
+          ValidatorSubjectKind,
+          ValidatorOutputFieldsFactValue
+        >[] = [];
+
+        const inspectRule = sdk.defineRule({
+          id: "inspect-dual-drizzle-zod",
+          run: async (ctx) => {
+            schemaFieldsFacts = await ctx.facts(ValidatorSchemaFieldsFact);
+            zodInputFacts = await ctx.facts(ValidatorInputFieldsFact, {
+              condition: { scope: "schemas" },
+            });
+            zodOutputFacts = await ctx.facts(ValidatorOutputFieldsFact, {
+              condition: { scope: "schemas" },
+            });
+          },
+        });
+
+        const dualReport = await sdk.runCheck({
+          cwd: host.hostDir,
+          adapterResolutionRoot: host.appDir,
+          config: {
+            ...mainConfig,
+            rules: [inspectRule],
+          },
+        });
+        assert.equal(dualReport.status, "clean");
+
+        // Local same-named createSelectSchema MUST NOT emit ValidatorSchemaFieldsFact or acquire Drizzle columns.
+        assert.equal(
+          schemaFieldsFacts.length,
+          4,
+          `Expected 4 real drizzle-zod calls (users, workspace, page, refinedWorkspaceSchema), got ${schemaFieldsFacts.length}`,
+        );
+
+        const fakeLocalIn = zodInputFacts.find(
+          (f) => f.value.schemaName === "fakeLocalSelectSchema",
+        );
+        assert.ok(fakeLocalIn);
+        assert.deepEqual(fakeLocalIn.value.requiredFields, []);
+        assert.equal(fakeLocalIn.value.hasDynamicFields, true);
+        assert.ok(fakeLocalIn.gaps.some((g) => g.kind === "unresolved-schema"));
+
+        const refinedIn = zodInputFacts.find(
+          (f) => f.value.schemaName === "refinedWorkspaceSchema",
+        );
+        const refinedOut = zodOutputFacts.find(
+          (f) => f.value.schemaName === "refinedWorkspaceSchema",
+        );
+        assert.ok(refinedIn && refinedOut);
+        assert.deepEqual(refinedIn.value.requiredFields, ["id"]);
+        assert.deepEqual(refinedIn.value.defaultedFields, ["name", "plan"]);
+        assert.deepEqual(refinedIn.value.optionalFields, [
+          "name",
+          "plan",
+          "slug",
+        ]);
+        assert.equal(refinedIn.value.fields.name?.nullable, true);
+        assert.equal(refinedIn.value.fields.slug?.nullable, false);
+        assert.deepEqual(refinedOut.value.presentFields, [
+          "id",
+          "name",
+          "plan",
+        ]);
+        assert.deepEqual(refinedOut.value.optionalFields, ["slug"]);
+
+        // Non-null column `users.age` overridden by `.extend({ age: z.number().default(18) })`
+        const userIn = zodInputFacts.find(
+          (f) => f.value.schemaName === "userSchema",
+        );
+        const userOut = zodOutputFacts.find(
+          (f) => f.value.schemaName === "userSchema",
+        );
+        assert.ok(userIn && userOut);
+        assert.deepEqual(userIn.value.requiredFields, [
+          "fullName",
+          "id",
+          "status",
+        ]);
+        assert.deepEqual(userIn.value.defaultedFields, ["age"]);
+        assert.deepEqual(userIn.value.optionalFields, ["age"]);
+        assert.deepEqual(userOut.value.presentFields, [
+          "age",
+          "fullName",
+          "id",
+          "status",
+        ]);
+        assert.deepEqual(userOut.value.defaultedFields, ["age"]);
+        // Evidence traces back to BOTH table column declaration (line 9) and .extend override (line 34)!
+        assert.ok(
+          userIn.evidence.some(
+            (ev) => ev.at?.file === schemaRelPath && ev.at.line === 9,
+          ),
+        );
+        assert.ok(
+          userIn.evidence.some(
+            (ev) => ev.at?.file === schemaRelPath && ev.at.line === 34,
+          ),
+        );
+        assert.ok(
+          userIn.value.fields.age?.evidence?.some(
+            (ev) => ev.at?.file === schemaRelPath && ev.at.line === 34,
+          ),
+        );
+      } finally {
+        rmSync(host.resolvePath(fakeSelectRelPath), { force: true });
+        host.writeText(schemaRelPath, originalSchema);
+      }
     },
   );
 });

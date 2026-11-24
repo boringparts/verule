@@ -373,6 +373,10 @@ pub struct DeclarationInfo {
     pub location: Option<SourceLocation>,
     pub syntax: Option<u64>,
     pub is_external: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_name: Option<String>,
 }
 
 /// A typed piece of evidence attached to a fact contribution.

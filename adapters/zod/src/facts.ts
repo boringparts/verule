@@ -9,6 +9,19 @@ export type ValidatorSubjectKind = "syntax" | "call" | "declaration";
 
 export type ValidatorSiteKind = "call" | "schema";
 
+export type ValidatorFieldMode = "replace" | "callback";
+
+export type ValidatorFieldFactValue = {
+  readonly resolved: boolean;
+  readonly mode: ValidatorFieldMode;
+  readonly requirement?: ValidatorInputFieldRequirement;
+  readonly presence?: ValidatorOutputFieldPresence;
+  readonly nullable?: boolean;
+  readonly nullabilityExplicit?: boolean;
+  readonly fromDefault?: boolean;
+  readonly evidence?: readonly Evidence[];
+};
+
 export type ValidatorMethodName =
   | "parse"
   | "safeParse"
@@ -396,4 +409,19 @@ export const ValidatorOutputFieldsFact = defineFactType<
     "Statically extracted output object field presence (including defaulted fields) for a validator schema or call.",
   subjectKind: ["syntax", "call", "declaration"],
   merge: mergeOutputFields,
+});
+
+/**
+ * Shared fact type describing a single field validator expression (direct or refinement callback)
+ * so external schema converters can compose field-level validator semantics.
+ */
+export const ValidatorFieldFact = defineFactType<
+  ValidatorSubjectKind,
+  undefined,
+  ValidatorFieldFactValue
+>({
+  id: "verule.validator.field",
+  description:
+    "Statically extracted validator field modifier and nullability semantics for a field expression.",
+  subjectKind: ["syntax", "call", "declaration"],
 });

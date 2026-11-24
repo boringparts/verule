@@ -16,8 +16,10 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  ValidatorFieldFact,
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
+  type ValidatorFieldFactValue,
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
@@ -957,7 +959,7 @@ void describe("@verule/adapter-zod", () => {
     }
   });
 
-  void it("extracts drizzle-zod createSelectSchema(table) with .extend/.pick/.transform and cross-package workspace imports", async () => {
+  void it("retains explicit .extend/.default/.pick conclusions on single-Zod drizzle-zod schemas while surfacing unresolved-schema for base table fields", async () => {
     const root = createTempProject({
       "packages/db/package.json": JSON.stringify({
         name: "@acme/db",
@@ -965,22 +967,8 @@ void describe("@verule/adapter-zod", () => {
         type: "module",
         exports: { ".": "./src/index.ts" },
       }),
-      "packages/db/src/drizzle-stub.ts": [
-        "export type Column<T = unknown> = {",
-        "  readonly _type: T;",
-        "  notNull: () => Column<T>;",
-        "  primaryKey: () => Column<T>;",
-        "  default: (v: T) => Column<T>;",
-        "};",
-        "declare const col: Column<any>;",
-        "export const integer = (_name?: string) => col;",
-        "export const text = (_name?: string) => col;",
-        "export function sqliteTable<T extends Record<string, unknown>>(_name: string, cols: T): T { return cols; }",
-        "export function createSelectSchema(_table: unknown, _refine?: Record<string, unknown>): any { return {}; }",
-        "",
-      ].join("\n"),
       "packages/db/src/page.ts": [
-        'import { integer, sqliteTable, text } from "./drizzle-stub.js";',
+        'import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";',
         "",
         'export const page = sqliteTable("page", {',
         '  id: integer("id").primaryKey(),',
@@ -992,8 +980,8 @@ void describe("@verule/adapter-zod", () => {
         "",
       ].join("\n"),
       "packages/db/src/validation.ts": [
+        'import { createSelectSchema } from "drizzle-zod";',
         'import { z } from "zod";',
-        'import { createSelectSchema } from "./drizzle-stub.js";',
         'import { page } from "./page.js";',
         "",
         "export const selectPageSchema = createSelectSchema(page)",
@@ -1033,6 +1021,16 @@ void describe("@verule/adapter-zod", () => {
       "dir",
     );
     symlinkSync(
+      join(packageRoot, "node_modules", "drizzle-orm"),
+      join(root, "node_modules", "drizzle-orm"),
+      "dir",
+    );
+    symlinkSync(
+      join(packageRoot, "node_modules", "drizzle-zod"),
+      join(root, "node_modules", "drizzle-zod"),
+      "dir",
+    );
+    symlinkSync(
       join(packageRoot, "node_modules", "zod"),
       join(root, "node_modules", "zod"),
       "dir",
@@ -1048,7 +1046,7 @@ void describe("@verule/adapter-zod", () => {
     >[] = [];
 
     const rule = defineRule({
-      id: "inspect-create-select-schema",
+      id: "inspect-create-select-schema-single-zod",
       run: async (ctx) => {
         inputResults = await ctx.facts(ValidatorInputFieldsFact, {
           condition: { scope: "calls" },
@@ -1073,16 +1071,23 @@ void describe("@verule/adapter-zod", () => {
 
       const gateIn = inputResults[0]!;
       assert.equal(gateIn.value.schemaName, "gateFieldsSchema");
-      assert.deepEqual(gateIn.value.requiredFields, ["customDomain", "slug"]);
+      // Without @verule/adapter-drizzle, base createSelectSchema(page) fields are unknown,
+      // while explicit .extend() defaults/prefaults and .pick() filtering are retained!
+      assert.deepEqual(gateIn.value.requiredFields, []);
       assert.deepEqual(gateIn.value.defaultedFields, [
         "accessType",
         "password",
       ]);
-      assert.equal(gateIn.value.fields.customDomain?.nullable, true);
-      assert.equal(gateIn.value.fields.slug?.nullable, false);
-
+      assert.deepEqual(gateIn.value.optionalFields, ["accessType", "password"]);
+      assert.equal(gateIn.value.hasDynamicFields, true);
       assert.ok(
-        gateIn.evidence.some((ev) => ev.at?.file === "packages/db/src/page.ts"),
+        gateIn.gaps.some(
+          (gap) =>
+            gap.kind === "unresolved-schema" &&
+            gap.at?.file === "packages/db/src/validation.ts" &&
+            gap.at.line === 5,
+        ),
+        JSON.stringify(gateIn.gaps),
       );
       assert.ok(
         gateIn.evidence.some(
@@ -1091,12 +1096,174 @@ void describe("@verule/adapter-zod", () => {
       );
 
       const gateOut = outputResults[0]!;
-      assert.deepEqual(gateOut.value.presentFields, [
+      assert.deepEqual(gateOut.value.presentFields, ["accessType", "password"]);
+      assert.deepEqual(gateOut.value.defaultedFields, [
         "accessType",
-        "customDomain",
         "password",
-        "slug",
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("tracks runtime field validators as field-scoped unknowns (not requiredFields), clears superseded gaps on .extend(), and extracts ValidatorFieldFact", async () => {
+    const root = createTempProject({
+      "src/runtime.ts": [
+        'import { z } from "zod";',
+        "",
+        "declare function runtimeAgeValidator(): z.ZodType<number>;",
+        "const helpers = {",
+        "  makeValidator: (): z.ZodType<string> => z.string(),",
+        "};",
+        "",
+        "export const partialUnknownSchema = z.object({",
+        "  id: z.string(),",
+        "  age: runtimeAgeValidator(),",
+        "  extra: helpers.makeValidator(),",
+        "});",
+        "",
+        "export const overriddenSchema = partialUnknownSchema.extend({",
+        "  age: z.number().default(18),",
+        "  extra: z.string().optional(),",
+        "});",
+        "",
+        "export const callbackProbe = {",
+        "  directReplace: z.number().default(18),",
+        "  nullableReplace: z.string().nullable(),",
+        "  unknownReplace: runtimeAgeValidator(),",
+        "  cbDefault: (s: z.ZodType<number>) => s.default(18),",
+        "  cbOptional: (s: z.ZodType<string>) => s.optional(),",
+        "  cbNullable: (s: z.ZodType<string>) => { return s.nullable(); },",
+        "};",
+        "",
+        "export function validate(input: unknown) {",
+        "  return {",
+        "    partial: partialUnknownSchema.parse(input),",
+        "    overridden: overriddenSchema.parse(input),",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    symlinkSync(
+      join(packageRoot, "node_modules", "zod"),
+      join(root, "node_modules", "zod"),
+      "dir",
+    );
+
+    let inputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorInputFieldsFactValue
+    >[] = [];
+    let outputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorOutputFieldsFactValue
+    >[] = [];
+    let fieldFacts: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorFieldFactValue
+    >[] = [];
+
+    const rule = defineRule({
+      id: "inspect-runtime-unknowns-and-field-facts",
+      run: async (ctx) => {
+        inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+        outputResults = await ctx.facts(ValidatorOutputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+        const props = await ctx.findSyntax({
+          files: ["src/runtime.ts"],
+          kinds: ["PropertyAssignment"],
+        });
+        const targetNames = [
+          "directReplace",
+          "nullableReplace",
+          "unknownReplace",
+          "cbDefault",
+          "cbOptional",
+          "cbNullable",
+        ];
+        const initRefs = props
+          .filter((p) =>
+            targetNames.some((name) => p.text.startsWith(`${name}:`)),
+          )
+          .map((p) => p.initializer!)
+          .filter(Boolean);
+        fieldFacts = await ctx.facts(ValidatorFieldFact, {
+          targets: initRefs,
+        });
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: ["@verule/adapter-zod"],
+          rules: [rule],
+        }),
+      });
+      assert.equal(report.status, "clean");
+
+      const partialIn = inputResults.find(
+        (f) => f.value.schemaName === "partialUnknownSchema",
+      );
+      assert.ok(partialIn);
+      assert.equal(partialIn.value.hasDynamicFields, true);
+      // Runtime validators MUST NOT become requiredFields!
+      assert.deepEqual(partialIn.value.requiredFields, ["id"]);
+      assert.equal(partialIn.value.fields.age, undefined);
+      assert.equal(partialIn.value.fields.extra, undefined);
+      assert.equal(partialIn.gaps.length, 2);
+      assert.ok(
+        partialIn.gaps.every((g) => g.kind === "unresolved-schema-field"),
+      );
+
+      const overriddenIn = inputResults.find(
+        (f) => f.value.schemaName === "overriddenSchema",
+      );
+      const overriddenOut = outputResults.find(
+        (f) => f.value.schemaName === "overriddenSchema",
+      );
+      assert.ok(overriddenIn && overriddenOut);
+      assert.equal(overriddenIn.value.hasDynamicFields, false);
+      assert.deepEqual(overriddenIn.gaps, []);
+      assert.deepEqual(overriddenIn.value.requiredFields, ["id"]);
+      assert.deepEqual(overriddenIn.value.defaultedFields, ["age"]);
+      assert.deepEqual(overriddenIn.value.optionalFields, ["age", "extra"]);
+      assert.deepEqual(overriddenOut.value.presentFields, ["age", "id"]);
+      assert.deepEqual(overriddenOut.value.optionalFields, ["extra"]);
+
+      assert.equal(fieldFacts.length, 6);
+      const syntaxItems = fieldFacts;
+      const byResolved = syntaxItems.filter((f) => f.value.resolved);
+      const byUnresolved = syntaxItems.filter((f) => !f.value.resolved);
+      assert.equal(byResolved.length, 5);
+      assert.equal(byUnresolved.length, 1);
+      assert.ok(
+        byUnresolved[0]!.gaps.some((g) => g.kind === "unresolved-schema-field"),
+      );
+      assert.ok(
+        byResolved.some(
+          (f) =>
+            f.value.mode === "callback" &&
+            f.value.requirement === "defaulted" &&
+            f.value.fromDefault === true &&
+            f.value.nullabilityExplicit === false,
+        ),
+      );
+      assert.ok(
+        byResolved.some(
+          (f) =>
+            f.value.mode === "callback" &&
+            f.value.requirement === "required" &&
+            f.value.nullable === true &&
+            f.value.nullabilityExplicit === true,
+        ),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

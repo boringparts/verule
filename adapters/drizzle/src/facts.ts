@@ -3,6 +3,7 @@ import {
   type Evidence,
   type FactMergeOutcome,
   type FactProviderContribution,
+  type Gap,
 } from "@verule/sdk";
 
 export type QueryRowSubjectKind = "syntax" | "call" | "declaration";
@@ -517,4 +518,47 @@ export const DrizzleTableColumnsFact = defineFactType<
     "Statically extracted Drizzle table column declarations, nullability, defaults, and source evidence.",
   subjectKind: ["syntax", "declaration", "call"],
   merge: mergeDrizzleTableColumns,
+});
+
+export type ValidatorSchemaSubjectKind = "syntax" | "declaration" | "call";
+
+export type ValidatorSchemaFieldRequirement =
+  | "required"
+  | "optional"
+  | "defaulted"
+  | "forbidden";
+
+export type ValidatorSchemaFieldPresence = "required" | "optional" | "absent";
+
+export type ValidatorSchemaFieldStatus = {
+  readonly name: string;
+  readonly resolved: boolean;
+  readonly requirement?: ValidatorSchemaFieldRequirement;
+  readonly presence?: ValidatorSchemaFieldPresence;
+  readonly nullable?: boolean;
+  readonly fromDefault?: boolean;
+  readonly evidence?: readonly Evidence[];
+  readonly gaps?: readonly Gap[];
+};
+
+export type ValidatorSchemaFieldsFactValue = {
+  readonly library: string;
+  readonly fields: Readonly<Record<string, ValidatorSchemaFieldStatus>>;
+  readonly hasDynamicFields: boolean;
+  readonly shapeGaps?: readonly Gap[];
+};
+
+/**
+ * Shared fact type describing object schema fields derived by a schema converter
+ * (such as `drizzle-zod`) before downstream validator chaining (`.extend()`, `.pick()`, etc.).
+ */
+export const ValidatorSchemaFieldsFact = defineFactType<
+  ValidatorSchemaSubjectKind,
+  undefined,
+  ValidatorSchemaFieldsFactValue
+>({
+  id: "verule.validator.schema-fields",
+  description:
+    "Statically extracted schema fields and per-field gaps produced by schema converters such as drizzle-zod.",
+  subjectKind: ["syntax", "declaration", "call"],
 });

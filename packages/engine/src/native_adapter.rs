@@ -843,8 +843,7 @@ fn can_follow_declaration(cwd: &str, declaration: P<Node>) -> bool {
     !is_declaration_file(&relative_path) && !is_node_modules_file(&relative_path)
 }
 
-fn resolve_decl_for_ref(
-    cwd: &str,
+fn resolve_decl_raw(
     checker: &mut CheckerHandle,
     node: P<Node>,
 ) -> Option<(Option<String>, P<Node>)> {
@@ -870,7 +869,7 @@ fn resolve_decl_for_ref(
             })
         })?;
         let name = callee_symbol.map(|symbol| symbol.name().to_string());
-        return can_follow_declaration(cwd, primary).then_some((name, primary));
+        return Some((name, primary));
     }
 
     let symbol = canonical_symbol_for_node(checker, node)?;
@@ -878,6 +877,15 @@ fn resolve_decl_for_ref(
         .value_declaration()
         .or_else(|| symbol.declarations().first().copied())?;
     let name = Some(symbol.name().to_string());
+    Some((name, primary))
+}
+
+fn resolve_decl_for_ref(
+    cwd: &str,
+    checker: &mut CheckerHandle,
+    node: P<Node>,
+) -> Option<(Option<String>, P<Node>)> {
+    let (name, primary) = resolve_decl_raw(checker, node)?;
     can_follow_declaration(cwd, primary).then_some((name, primary))
 }
 
@@ -987,6 +995,32 @@ struct SnapshotAdapterHost<'a> {
 }
 
 impl SnapshotAdapterHost<'_> {
+    fn read_declaration_info(&mut self, node: P<Node>) -> Option<DeclarationInfo> {
+        resolve_decl_raw(self.checker, node).map(|(name, declaration)| {
+            let source_file = get_source_file_of_node(declaration);
+            let provenance = crate::package_impl::resolve_declaration_provenance(
+                self.program,
+                self.checker,
+                node,
+                declaration,
+            );
+            let syntax = can_follow_declaration(&self.cwd, declaration)
+                .then(|| self.table.handle(declaration));
+            DeclarationInfo {
+                name,
+                kind: Some(format!("{:?}", declaration.kind())),
+                location: node_location_rel(&self.cwd, declaration).map(to_api_location),
+                syntax,
+                is_external: source_file.is_some_and(|file| {
+                    file.is_declaration_file()
+                        || !crate::projects::is_project_source_file(self.program, file)
+                }),
+                package_name: provenance.package_name,
+                export_name: provenance.export_name,
+            }
+        })
+    }
+
     fn program_reference(&mut self, node: P<Node>) -> HostValue {
         let handle = self
             .table
@@ -1042,25 +1076,7 @@ impl HostAccess for SnapshotAdapterHost<'_> {
             NodeOperation::Location => {
                 HostValue::Location(node_location_rel(&self.cwd, node).map(to_api_location))
             }
-            NodeOperation::Declaration => {
-                let declaration = resolve_decl_for_ref(&self.cwd, self.checker, node).map(
-                    |(name, declaration)| {
-                        let source_file = get_source_file_of_node(declaration);
-                        DeclarationInfo {
-                            name,
-                            kind: Some(format!("{:?}", declaration.kind())),
-                            location: node_location_rel(&self.cwd, declaration)
-                                .map(to_api_location),
-                            syntax: Some(self.table.handle(declaration)),
-                            is_external: source_file.is_some_and(|file| {
-                                file.is_declaration_file()
-                                    || !crate::projects::is_project_source_file(self.program, file)
-                            }),
-                        }
-                    },
-                );
-                HostValue::Declaration(declaration)
-            }
+            NodeOperation::Declaration => HostValue::Declaration(self.read_declaration_info(node)),
             NodeOperation::DeclarationNode => {
                 let declaration = resolve_decl_for_ref(&self.cwd, self.checker, node)
                     .map(|(_, declaration)| declaration);

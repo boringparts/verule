@@ -1,6 +1,7 @@
 export {
   DrizzleTableColumnsFact,
   QueryRowProjectionFact,
+  ValidatorSchemaFieldsFact,
   buildDrizzleTableColumnsValue,
   buildQueryRowProjectionValue,
   type DrizzleTableColumnInfo,
@@ -15,6 +16,11 @@ export {
   type QueryRowProjectionCondition,
   type QueryRowProjectionFactValue,
   type QueryRowSubjectKind,
+  type ValidatorSchemaFieldPresence,
+  type ValidatorSchemaFieldRequirement,
+  type ValidatorSchemaFieldStatus,
+  type ValidatorSchemaFieldsFactValue,
+  type ValidatorSchemaSubjectKind,
 } from "./facts.ts";
 
 /** Package-name alias retained for configs migrating to native package loading. */

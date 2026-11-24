@@ -34,6 +34,9 @@ const adapterDrizzleRoot = join(
   "@verule",
   "adapter-drizzle",
 );
+const drizzleOrmRoot = join(packageRoot, "node_modules", "drizzle-orm");
+const drizzleZodRoot = join(packageRoot, "node_modules", "drizzle-zod");
+const zodRoot = join(packageRoot, "node_modules", "zod");
 const tscBin = join(packageRoot, "node_modules", ".bin", "tsc");
 
 const DRIZZLE_AND_ZOD_STUBS = {
@@ -58,7 +61,6 @@ const DRIZZLE_AND_ZOD_STUBS = {
     "}",
     "export function relations<T>(_table: T, _cb: (h: { one: any; many: any }) => Record<string, unknown>) { return {}; }",
     "export function eq(_a: unknown, _b: unknown) { return {}; }",
-    "export function createSelectSchema(_table: unknown): any { return {}; }",
     "export type SelectChain = {",
     "  from: (t: unknown) => SelectChain;",
     "  where: (c: unknown) => SelectChain;",
@@ -179,6 +181,9 @@ function createMonorepoFixture(files: Record<string, string>): string {
     join(root, "node_modules/@fixture/validators"),
     "dir",
   );
+  symlinkSync(drizzleOrmRoot, join(root, "node_modules/drizzle-orm"), "dir");
+  symlinkSync(drizzleZodRoot, join(root, "node_modules/drizzle-zod"), "dir");
+  symlinkSync(zodRoot, join(root, "node_modules/zod"), "dir");
 
   return root;
 }
@@ -330,9 +335,10 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
         "",
       ].join("\n"),
       "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "./drizzle.js";',
+        'import { createSelectSchema } from "drizzle-zod";',
+        'import { z } from "zod";',
         'import { page, workspace } from "./schema.js";',
-        'import { z } from "../../validators/src/zod.js";',
+
         "",
         "export const selectWorkspaceSchema = createSelectSchema(workspace)",
         "  .extend({",
@@ -488,7 +494,7 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
         "",
       ].join("\n"),
       "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "./drizzle.js";',
+        'import { createSelectSchema } from "drizzle-zod";',
         'import { page, workspace } from "./schema.js";',
         "",
         "export const selectWorkspaceSchema = createSelectSchema(workspace);",
