@@ -845,9 +845,13 @@ export class ObservationCollector {
       project.sourceFiles.includes(target.file),
     );
 
-    const excludedCheckpoint = relevantCheckpoints.find(
-      (cp) => cp.outcome === "exclude",
-    );
+    const excludedCheckpoint =
+      relevantCheckpoints.find(
+        (cp) =>
+          cp.outcome === "exclude" &&
+          cp.at !== undefined &&
+          locationMatchesTarget(cp.at, target),
+      ) ?? relevantCheckpoints.find((cp) => cp.outcome === "exclude");
     const firstNonMatchingFindSyntax = querySteps.find(
       (step) => step.op === "findSyntax" && !step.matchedTarget,
     );

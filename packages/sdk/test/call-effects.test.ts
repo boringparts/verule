@@ -1157,4 +1157,250 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("exposes canonical receiver/helper/target DeclarationRefs, direct & indirect CallbackInvocationInfo, cfgScope, and per-item basis provenance", async () => {
+    const root = createTempProject({
+      "src/helper.ts": [
+        "export function invokeSafely(fn: () => void): void {",
+        "  try {",
+        "    fn();",
+        "  } catch {",
+        "    // handled",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      "src/queue.ts": [
+        "import { invokeSafely } from './helper.js';",
+        "",
+        "export interface Job {",
+        "  (): void;",
+        "  flags: number;",
+        "}",
+        "",
+        "const queue: Job[] = [];",
+        "",
+        "export function runDirectAndIndirect(skip: boolean): void {",
+        "  try {",
+        "    for (let i = 0; i < queue.length; i++) {",
+        "      const cb = queue[i];",
+        "      if (cb) {",
+        "        if (skip) {",
+        "          continue;",
+        "        }",
+        "        cb();",
+        "        if (!(cb.flags & 4)) {",
+        "          cb.flags &= ~1;",
+        "        }",
+        "      }",
+        "    }",
+        "    for (let j = 0; j < queue.length; j++) {",
+        "      const job = queue[j];",
+        "      if (job) {",
+        "        invokeSafely(job);",
+        "        job.flags &= ~1;",
+        "      }",
+        "    }",
+        "  } finally {",
+        "    queue.length = 0;",
+        "  }",
+        "}",
+        "",
+        "export function runWithConcreteCallback(job: Job): void {",
+        "  const onDone = (): void => {",
+        "    job.flags |= 1;",
+        "  };",
+        "  invokeSafely(onDone);",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    try {
+      const rule = defineRule({
+        id: "canonical-call-effects-check",
+        run: async (ctx) => {
+          const fns = await ctx.findSyntax({
+            files: ["src/queue.ts"],
+            kinds: ["FunctionDeclaration"],
+          });
+          const helperFns = await ctx.findSyntax({
+            files: ["src/helper.ts"],
+            kinds: ["FunctionDeclaration"],
+          });
+          const helperDecl = (
+            await ctx.resolveDeclarations([helperFns[0]!.ref])
+          )[0]!.declaration!;
+
+          const runFn = fns.find((f) =>
+            f.text.includes("function runDirectAndIndirect"),
+          )!;
+          const concreteFn = fns.find((f) =>
+            f.text.includes("function runWithConcreteCallback"),
+          )!;
+
+          const [runEff, concreteEff] = await ctx.callEffects({
+            targets: [runFn.ref, concreteFn.ref],
+            followCallbacks: true,
+          });
+          assert.ok(runEff && concreteEff);
+
+          const clearWrites = runEff.fieldWrites.filter(
+            (w) => w.propertyName === "flags" && w.operator === "&=",
+          );
+          assert.equal(clearWrites.length, 2);
+          const guardedWrite = clearWrites[0]!;
+          const unguardedWrite = clearWrites[1]!;
+
+          const resolvedReceivers = await ctx.resolveDeclarations([
+            guardedWrite.receiverSyntax,
+            unguardedWrite.receiverSyntax,
+          ]);
+          assert.equal(
+            guardedWrite.receiverDeclaration?.handleId,
+            resolvedReceivers[0]!.declaration?.handleId,
+          );
+          assert.equal(
+            unguardedWrite.receiverDeclaration?.handleId,
+            resolvedReceivers[1]!.declaration?.handleId,
+          );
+          assert.ok(guardedWrite.enclosingBlock !== null);
+          assert.ok(guardedWrite.cfgScope !== null);
+
+          const directInv = runEff.callbackInvocations.find(
+            (inv) => inv.kind === "direct",
+          );
+          const indirectInv = runEff.callbackInvocations.find(
+            (inv) => inv.kind === "indirect",
+          );
+          assert.ok(directInv);
+          assert.ok(indirectInv);
+
+          assert.equal(directInv.parameterIndex, null);
+          assert.equal(directInv.helperDeclaration, null);
+          assert.equal(
+            directInv.targetDeclaration?.handleId,
+            guardedWrite.receiverDeclaration?.handleId,
+          );
+          assert.equal(directInv.outerCall.handleId, directInv.call.handleId);
+          assert.equal(directInv.outerCallLocation.line, 18);
+          assert.equal(
+            directInv.enclosingFunction?.handleId,
+            runFn.ref.handleId,
+          );
+          assert.ok(directInv.cfgScope !== null);
+
+          assert.equal(indirectInv.parameterIndex, 0);
+          assert.equal(
+            indirectInv.helperDeclaration?.handleId,
+            helperDecl.handleId,
+          );
+          assert.equal(
+            indirectInv.targetDeclaration?.handleId,
+            unguardedWrite.receiverDeclaration?.handleId,
+          );
+          assert.equal(indirectInv.outerCallLocation.file, "src/queue.ts");
+          assert.equal(indirectInv.outerCallLocation.line, 27);
+          assert.equal(indirectInv.location.file, "src/helper.ts");
+          assert.equal(indirectInv.location.line, 3);
+          assert.equal(
+            indirectInv.enclosingFunction?.handleId,
+            runFn.ref.handleId,
+          );
+          assert.equal(
+            indirectInv.cfgScope?.handleId,
+            unguardedWrite.cfgScope?.handleId,
+          );
+
+          // Concrete callback targetDeclaration & resolvedTargets share canonical DeclarationRef identity
+          const concreteInv = concreteEff.callbackInvocations.find(
+            (inv) => inv.kind === "indirect",
+          );
+          assert.ok(concreteInv);
+          const [argDecl] = await ctx.resolveDeclarations([
+            concreteInv.callbackArgument,
+          ]);
+          assert.equal(
+            concreteInv.targetDeclaration?.handleId,
+            argDecl?.declaration?.handleId,
+          );
+          assert.equal(
+            concreteInv.resolvedTargets[0]?.handleId,
+            argDecl?.declaration?.handleId,
+          );
+
+          // Local CFG scope from cfgScope evaluates branchCoverage accurately inside try/for loops
+          assert.equal(
+            guardedWrite.cfgScope?.handleId,
+            directInv.cfgScope?.handleId,
+          );
+          const [branchGroup] = await ctx.listBranches([guardedWrite.cfgScope]);
+          const guardBranch = branchGroup!.branches.find(
+            (b) =>
+              b.conditionText.includes("cb.flags & 4") &&
+              b.direction === "true",
+          );
+          assert.ok(guardBranch);
+          const [guardedCov] = await ctx.branchCoverage({
+            scope: guardedWrite.cfgScope,
+            branches: [guardBranch.ref],
+            targets: [guardedWrite.syntax],
+          });
+          assert.equal(guardedCov?.status, "covered");
+
+          const [unguardedCov] = await ctx.branchCoverage({
+            scope: unguardedWrite.cfgScope!,
+            branches: [],
+            targets: [unguardedWrite.syntax],
+          });
+          assert.equal(unguardedCov?.status, "bypass");
+
+          ctx.report({
+            at: unguardedWrite.location,
+            message: "Unguarded post-callback clear.",
+            basis: [indirectInv, unguardedWrite, unguardedCov],
+          });
+        },
+      });
+
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
+      });
+      assert.equal(report.status, "findings");
+      assert.equal(report.diagnostics.length, 1);
+      const diag = report.diagnostics[0]!;
+      assert.ok(
+        diag.evidence.some(
+          (e) => e.at?.file === "src/queue.ts" && e.at.line === 27,
+        ),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (e) => e.at?.file === "src/helper.ts" && e.at.line === 1,
+        ),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (e) => e.at?.file === "src/helper.ts" && e.at.line === 3,
+        ),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (e) => e.at?.file === "src/queue.ts" && e.at.line === 28,
+        ),
+      );
+      // Unrelated guarded write & queue.length = 0 must not leak
+      assert.equal(
+        diag.evidence.some(
+          (e) =>
+            e.at?.file === "src/queue.ts" &&
+            (e.at.line === 20 || e.at.line === 32),
+        ),
+        false,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
