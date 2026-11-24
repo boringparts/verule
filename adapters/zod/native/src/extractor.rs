@@ -118,7 +118,7 @@ impl SideField for InputFieldState {
     }
 
     fn is_definitely_required(&self) -> bool {
-        self.requirement == InputRequirement::Required
+        self.requirement == InputRequirement::Required && !self.nullable
     }
 
     fn conclusion_summary(&self, name: &str) -> String {
@@ -181,7 +181,7 @@ impl SideField for OutputFieldState {
     }
 
     fn is_definitely_required(&self) -> bool {
-        self.presence == OutputPresence::Required
+        self.presence == OutputPresence::Required && !self.nullable
     }
 
     fn conclusion_summary(&self, name: &str) -> String {
@@ -467,6 +467,10 @@ impl Schema {
 
     fn is_empty_fields(&self) -> bool {
         self.input.fields.is_empty() && self.output.fields.is_empty()
+    }
+
+    fn has_field_gaps(&self) -> bool {
+        !self.input.field_gaps.is_empty() || !self.output.field_gaps.is_empty()
     }
 }
 
@@ -1064,13 +1068,12 @@ impl ZodEvaluator {
             return Ok(pipe_schema(location, &left, &right, "z.pipe()"));
         }
         if left.recognized {
-            let mut result = left;
-            result.output.gaps.push(Gap {
-                kind: "unresolved-schema".to_string(),
-                message: "z.pipe() output schema could not be statically resolved.".to_string(),
-                at: location,
-            });
-            return Ok(result);
+            return Ok(pipe_unresolved_output(
+                location,
+                second.location()?,
+                &left,
+                "z.pipe()",
+            ));
         }
         Ok(Schema::unresolved(
             "z.pipe() requires two statically resolvable schemas.".to_string(),
@@ -1191,13 +1194,15 @@ impl ZodEvaluator {
                     if output.recognized {
                         result = pipe_schema(location, &result, &output, ".pipe()");
                     } else {
-                        result.output.gaps.push(Gap {
-                            kind: "unresolved-schema".to_string(),
-                            message: ".pipe() output schema could not be statically resolved."
-                                .to_string(),
-                            at: location,
-                        });
+                        result = pipe_unresolved_output(
+                            location,
+                            output_expression.location()?,
+                            &result,
+                            ".pipe()",
+                        );
                     }
+                } else {
+                    result = pipe_unresolved_output(location, None, &result, ".pipe()");
                 }
             }
             "transform" | "refine" | "superRefine" | "check" | "openapi" | "describe" | "meta"
@@ -1346,6 +1351,7 @@ impl ZodEvaluator {
                         if spread.recognized
                             && spread.has_dynamic_fields()
                             && spread.is_empty_fields()
+                            && !spread.has_field_gaps()
                         {
                             schema.add_gap(dynamic_gap(
                                 "dynamic-schema-spread",
@@ -2419,6 +2425,20 @@ fn pipe_schema(
     }
 }
 
+fn pipe_unresolved_output(
+    location: Option<SourceLocation>,
+    target_location: Option<SourceLocation>,
+    input: &Schema,
+    label: &str,
+) -> Schema {
+    let target_at = target_location.or_else(|| location.clone());
+    let unresolved_output = Schema::unresolved(
+        format!("{label} output schema could not be statically resolved."),
+        target_at,
+    );
+    pipe_schema(location, input, &unresolved_output, label)
+}
+
 fn merge_side<F: SideField>(
     target: &mut SchemaSide<F>,
     incoming: SchemaSide<F>,
@@ -2429,7 +2449,9 @@ fn merge_side<F: SideField>(
         .resolved_local_gaps
         .extend(incoming.resolved_local_gaps);
     target.shape_local_gaps.extend(incoming.shape_local_gaps);
+    let mut incoming_known_fields = BTreeSet::new();
     for (name, field) in incoming.fields {
+        incoming_known_fields.insert(name.clone());
         if let Some(mut origin) = target.field_gap_origins.remove(&name) {
             let override_at = field
                 .first_evidence_location()
@@ -2451,12 +2473,15 @@ fn merge_side<F: SideField>(
         }
     }
     for (name, fgaps) in incoming.field_gaps {
-        if !target.fields.contains_key(&name) {
+        if !incoming_known_fields.contains(&name) {
+            target.fields.remove(&name);
+            target.field_gap_origins.remove(&name);
             target.field_gaps.insert(name, fgaps);
         }
     }
     for (name, origin) in incoming.field_gap_origins {
-        if !target.fields.contains_key(&name) {
+        if !incoming_known_fields.contains(&name) {
+            target.fields.remove(&name);
             target.field_gap_origins.insert(name, origin);
         }
     }
@@ -2538,10 +2563,17 @@ fn strip_quotes(value: &str) -> String {
 }
 
 fn is_zod_namespace(node: NodeRef<'_>) -> bool {
-    if let Ok(Some((name, Some(expr)))) = property_access(node)
+    let Ok(kind) = node.kind() else {
+        return false;
+    };
+    if kind == NodeKind::PropertyAccessExpression
+        && let Ok(Some((name, Some(expr)))) = property_access(node)
         && name == "coerce"
     {
         return is_zod_namespace(expr);
+    }
+    if kind != NodeKind::Identifier {
+        return false;
     }
     if node
         .text()

@@ -1620,4 +1620,382 @@ void describe("@verule/adapter-zod", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("replaces known base fields when overridden by unknown field validators in .extend(), .merge(), and object spread, and resolves chained overrides", async () => {
+    const root = createTempProject({
+      "src/overrides.ts": [
+        'import { z } from "zod";',
+        "",
+        "declare function runtimeFieldValidator(): z.ZodType<number>;",
+        "",
+        "const baseSchema = z.object({",
+        "  id: z.string(),",
+        "  age: z.number(),",
+        "});",
+        "",
+        "export const extendUnknownSchema = baseSchema.extend({",
+        "  age: runtimeFieldValidator(),",
+        "});",
+        "",
+        "export const extendReResolvedSchema = extendUnknownSchema.extend({",
+        "  age: z.number().default(21),",
+        "});",
+        "",
+        "export const mergeUnknownSchema = baseSchema.merge(",
+        "  z.object({ age: runtimeFieldValidator() }),",
+        ");",
+        "",
+        "const unknownAgeShape = {",
+        "  age: runtimeFieldValidator(),",
+        "};",
+        "",
+        "export const spreadUnknownSchema = z.object({",
+        "  id: z.string(),",
+        "  age: z.number(),",
+        "  ...unknownAgeShape,",
+        "});",
+        "",
+        "export const spreadReResolvedSchema = spreadUnknownSchema.extend({",
+        "  age: z.number().default(21),",
+        "});",
+        "",
+        "export function validateOverrides(input: unknown) {",
+        "  return {",
+        "    extendUnknown: extendUnknownSchema.parse(input),",
+        "    extendReResolved: extendReResolvedSchema.parse(input),",
+        "    mergeUnknown: mergeUnknownSchema.parse(input),",
+        "    spreadUnknown: spreadUnknownSchema.parse(input),",
+        "    spreadReResolved: spreadReResolvedSchema.parse(input),",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    symlinkSync(
+      join(packageRoot, "node_modules", "zod"),
+      join(root, "node_modules", "zod"),
+      "dir",
+    );
+
+    let inputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorInputFieldsFactValue
+    >[] = [];
+    let outputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorOutputFieldsFactValue
+    >[] = [];
+
+    const inputRule = defineRule({
+      id: "inspect-unknown-overrides-input",
+      run: async (ctx) => {
+        inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+    const outputRule = defineRule({
+      id: "inspect-unknown-overrides-output",
+      run: async (ctx) => {
+        outputResults = await ctx.facts(ValidatorOutputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: ["@verule/adapter-zod"],
+        rules: [inputRule, outputRule],
+      }),
+    });
+
+    try {
+      const report = await session.check();
+      assert.equal(report.status, "clean");
+
+      const inputByName = (name: string) =>
+        inputResults.find((f) => f.value.schemaName === name);
+      const outputByName = (name: string) =>
+        outputResults.find((f) => f.value.schemaName === name);
+
+      for (const [schemaName, expectedGapLine] of [
+        ["extendUnknownSchema", 11],
+        ["mergeUnknownSchema", 19],
+        ["spreadUnknownSchema", 23],
+      ] as const) {
+        const inFact = inputByName(schemaName)!;
+        const outFact = outputByName(schemaName)!;
+        assert.deepEqual(inFact.value.requiredFields, ["id"]);
+        assert.equal(inFact.value.fields.age, undefined);
+        assert.equal(inFact.value.hasDynamicFields, true);
+        assert.ok(
+          inFact.gaps.some(
+            (g) =>
+              g.kind === "unresolved-schema-field" &&
+              g.at?.line === expectedGapLine,
+          ),
+          `${schemaName} input gaps: ${JSON.stringify(inFact.gaps)}`,
+        );
+
+        assert.deepEqual(outFact.value.presentFields, ["id"]);
+        assert.equal(outFact.value.fields.age, undefined);
+        assert.equal(outFact.value.hasDynamicFields, true);
+        assert.ok(
+          outFact.gaps.some(
+            (g) =>
+              g.kind === "unresolved-schema-field" &&
+              g.at?.line === expectedGapLine,
+          ),
+          `${schemaName} output gaps: ${JSON.stringify(outFact.gaps)}`,
+        );
+      }
+
+      for (const schemaName of [
+        "extendReResolvedSchema",
+        "spreadReResolvedSchema",
+      ] as const) {
+        const inFact = inputByName(schemaName)!;
+        const outFact = outputByName(schemaName)!;
+        assert.deepEqual(inFact.gaps, []);
+        assert.deepEqual(inFact.value.requiredFields, ["id"]);
+        assert.deepEqual(inFact.value.optionalFields, ["age"]);
+        assert.deepEqual(inFact.value.defaultedFields, ["age"]);
+        assert.equal(inFact.value.hasDynamicFields, false);
+
+        assert.deepEqual(outFact.gaps, []);
+        assert.deepEqual(outFact.value.presentFields, ["age", "id"]);
+        assert.deepEqual(outFact.value.defaultedFields, ["age"]);
+        assert.equal(outFact.value.hasDynamicFields, false);
+      }
+
+      const extendUnresolvedExplain = await session.explain({
+        ruleId: "inspect-unknown-overrides-input",
+        at: "src/overrides.ts:38:20",
+      });
+      assert.ok(
+        extendUnresolvedExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === 11,
+        ),
+        JSON.stringify(extendUnresolvedExplain.explanation.localGaps),
+      );
+
+      const extendResolvedExplain = await session.explain({
+        ruleId: "inspect-unknown-overrides-input",
+        at: "src/overrides.ts:39:23",
+      });
+      assert.ok(
+        extendResolvedExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 11 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".extend()" &&
+            lg.resolvedBy.at?.line === 15,
+        ),
+        JSON.stringify(extendResolvedExplain.explanation.localGaps),
+      );
+
+      const spreadUnresolvedExplain = await session.explain({
+        ruleId: "inspect-unknown-overrides-input",
+        at: "src/overrides.ts:41:20",
+      });
+      assert.ok(
+        spreadUnresolvedExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === 23,
+        ),
+        JSON.stringify(spreadUnresolvedExplain.explanation.localGaps),
+      );
+
+      const spreadResolvedExplain = await session.explain({
+        ruleId: "inspect-unknown-overrides-input",
+        at: "src/overrides.ts:42:23",
+      });
+      assert.ok(
+        spreadResolvedExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 23 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".extend()" &&
+            lg.resolvedBy.at?.line === 33,
+        ),
+        JSON.stringify(spreadResolvedExplain.explanation.localGaps),
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("replaces output with an unresolved SchemaSide for unrecognized .pipe() / z.pipe() targets and avoids resolving nullable .and() over unknown fields", async () => {
+    const root = createTempProject({
+      "src/pipe-and-nullable.ts": [
+        'import { z } from "zod";',
+        "",
+        "declare function untypedFactory(): unknown;",
+        "declare function runtimeFieldValidator(): z.ZodType<number>;",
+        "",
+        "export const methodPipeUnrecognized = z",
+        "  .object({ rawId: z.string() })",
+        "  .pipe(untypedFactory() as never);",
+        "",
+        "export const staticPipeUnrecognized = z.pipe(",
+        "  z.object({ rawId: z.string() }),",
+        "  untypedFactory() as never,",
+        ");",
+        "",
+        "export const andNullableOverUnknown = z",
+        "  .object({ id: z.string(), age: runtimeFieldValidator() })",
+        "  .and(z.object({ age: z.number().nullable() }));",
+        "",
+        "export function validatePipeAndNullable(input: unknown) {",
+        "  return {",
+        "    methodPipe: methodPipeUnrecognized.parse(input),",
+        "    staticPipe: staticPipeUnrecognized.parse(input),",
+        "    andNullable: andNullableOverUnknown.parse(input),",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    symlinkSync(
+      join(packageRoot, "node_modules", "zod"),
+      join(root, "node_modules", "zod"),
+      "dir",
+    );
+
+    let inputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorInputFieldsFactValue
+    >[] = [];
+    let outputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorOutputFieldsFactValue
+    >[] = [];
+
+    const inputRule = defineRule({
+      id: "inspect-pipe-nullable-input",
+      run: async (ctx) => {
+        inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+    const outputRule = defineRule({
+      id: "inspect-pipe-nullable-output",
+      run: async (ctx) => {
+        outputResults = await ctx.facts(ValidatorOutputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: ["@verule/adapter-zod"],
+        rules: [inputRule, outputRule],
+      }),
+    });
+
+    try {
+      const report = await session.check();
+      assert.equal(report.status, "clean");
+
+      const inputByName = (name: string) =>
+        inputResults.find((f) => f.value.schemaName === name);
+      const outputByName = (name: string) =>
+        outputResults.find((f) => f.value.schemaName === name);
+
+      for (const [schemaName, targetLine, callLine, callCol] of [
+        ["methodPipeUnrecognized", 8, 21, 17],
+        ["staticPipeUnrecognized", 12, 22, 17],
+      ] as const) {
+        const inFact = inputByName(schemaName)!;
+        const outFact = outputByName(schemaName)!;
+        assert.deepEqual(inFact.gaps, []);
+        assert.deepEqual(inFact.value.requiredFields, ["rawId"]);
+        assert.equal(inFact.value.hasDynamicFields, false);
+
+        assert.deepEqual(outFact.value.presentFields, []);
+        assert.deepEqual(outFact.value.optionalFields, []);
+        assert.deepEqual(outFact.value.defaultedFields, []);
+        assert.deepEqual(outFact.value.fields, {});
+        assert.equal(outFact.value.hasDynamicFields, true);
+        assert.ok(
+          outFact.gaps.some(
+            (g) => g.kind === "unresolved-schema" && g.at?.line === targetLine,
+          ),
+          `${schemaName} output gaps: ${JSON.stringify(outFact.gaps)}`,
+        );
+
+        const outExplain = await session.explain({
+          ruleId: "inspect-pipe-nullable-output",
+          at: `src/pipe-and-nullable.ts:${callLine}:${callCol}`,
+        });
+        assert.ok(
+          outExplain.explanation.localGaps.some(
+            (lg) =>
+              lg.status === "unresolved" &&
+              lg.gap.kind === "unresolved-schema" &&
+              lg.gap.at?.line === targetLine,
+          ),
+          `${schemaName} localGaps: ${JSON.stringify(outExplain.explanation.localGaps)}`,
+        );
+      }
+
+      const andIn = inputByName("andNullableOverUnknown")!;
+      const andOut = outputByName("andNullableOverUnknown")!;
+      assert.deepEqual(andIn.value.requiredFields, ["id"]);
+      assert.equal(andIn.value.fields.age, undefined);
+      assert.equal(andIn.value.hasDynamicFields, true);
+      assert.ok(
+        andIn.gaps.some(
+          (g) => g.kind === "unresolved-schema-field" && g.at?.line === 16,
+        ),
+        JSON.stringify(andIn.gaps),
+      );
+      assert.deepEqual(andOut.value.presentFields, ["id"]);
+      assert.equal(andOut.value.fields.age, undefined);
+      assert.equal(andOut.value.hasDynamicFields, true);
+      assert.ok(
+        andOut.gaps.some(
+          (g) => g.kind === "unresolved-schema-field" && g.at?.line === 16,
+        ),
+        JSON.stringify(andOut.gaps),
+      );
+
+      const andExplain = await session.explain({
+        ruleId: "inspect-pipe-nullable-input",
+        at: "src/pipe-and-nullable.ts:23:18",
+      });
+      assert.ok(
+        andExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === 16,
+        ),
+        JSON.stringify(andExplain.explanation.localGaps),
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -762,6 +762,193 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
           `Expected output resolved_by_override for ${needle}: ${JSON.stringify(exp.localGaps)}`,
         );
       }
+
+      // Case E: `.extend({ age: runtimeFieldValidator() })` removes base `age` from `createSelectSchema(users)`
+      // and chained `.extend({ age: z.number().default(21) })` resolves `age` via `resolved_by_override`.
+      host.writeText(
+        dataIndexRelPath,
+        originalDataIndex
+          .replace(
+            '  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
+            '  getUserWithStatusNoAge,\n  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
+          )
+          .replace(
+            '  userSchema,\n} from "./drizzle-schema.ts";',
+            '  extendReResolvedSchema,\n  extendUnknownSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+          ),
+      );
+      host.writeText(
+        schemaRelPath,
+        [
+          originalSchema,
+          "",
+          "declare function runtimeFieldValidator(): z.ZodType<number>;",
+          "",
+          "export const extendUnknownSchema = createSelectSchema(users).extend({",
+          "  age: runtimeFieldValidator(),",
+          "});",
+          "",
+          "export const extendReResolvedSchema = extendUnknownSchema.extend({",
+          "  age: z.number().default(21),",
+          "});",
+          "",
+        ].join("\n"),
+      );
+      host.writeText(
+        rowProjectionRelPath,
+        [
+          "import {",
+          "  extendReResolvedSchema,",
+          "  extendUnknownSchema,",
+          "  getUserWithStatusNoAge,",
+          '} from "@verule/acceptance-host-drizzle-zod-data";',
+          "",
+          "export async function checkExtendUnknownOverrides() {",
+          "  const missingOnlyAge = await getUserWithStatusNoAge();",
+          "  if (missingOnlyAge === undefined) return undefined;",
+          "  return {",
+          "    unknownExtend: extendUnknownSchema.parse(missingOnlyAge),",
+          "    reResolvedExtend: extendReResolvedSchema.parse(missingOnlyAge),",
+          "  };",
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      const extendRuntimeLine = Number(
+        lineColOf(host, schemaRelPath, "age: runtimeFieldValidator()").split(
+          ":",
+        )[1],
+      );
+      const extendResolvedLine = Number(
+        lineColOf(host, schemaRelPath, "age: z.number().default(21)").split(
+          ":",
+        )[1],
+      );
+      const extendUnknownCallAt = lineColOf(
+        host,
+        rowProjectionRelPath,
+        "extendUnknownSchema.parse(missingOnlyAge)",
+      );
+      const extendResolvedCallAt = lineColOf(
+        host,
+        rowProjectionRelPath,
+        "extendReResolvedSchema.parse(missingOnlyAge)",
+      );
+
+      const caseEInputCheck = await host.check({
+        config: integratedExplainConfigPath,
+      });
+      assert.equal(
+        caseEInputCheck.status,
+        0,
+        caseEInputCheck.stderr + caseEInputCheck.stdout,
+      );
+      assert.deepEqual(caseEInputCheck.report.diagnostics, []);
+      assert.ok(
+        caseEInputCheck.report.gaps.some(
+          (g) =>
+            g.kind === "unresolved-schema-field" &&
+            g.at?.file === schemaRelPath &&
+            g.at.line === extendRuntimeLine,
+        ),
+        JSON.stringify(caseEInputCheck.report.gaps),
+      );
+
+      const extendUnknownExplain = await host.check({
+        config: integratedExplainConfigPath,
+        rule: "row-projection-satisfies-validator",
+        at: extendUnknownCallAt,
+      });
+      assert.equal(extendUnknownExplain.status, 0);
+      assert.equal(
+        extendUnknownExplain.report.explanation?.status,
+        "blocked_by_gap",
+      );
+      assert.ok(
+        extendUnknownExplain.report.explanation?.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === extendRuntimeLine,
+        ),
+        JSON.stringify(extendUnknownExplain.report.explanation?.localGaps),
+      );
+
+      const extendResolvedExplain = await host.check({
+        config: integratedExplainConfigPath,
+        rule: "row-projection-satisfies-validator",
+        at: extendResolvedCallAt,
+      });
+      assert.equal(extendResolvedExplain.status, 0);
+      assert.equal(
+        extendResolvedExplain.report.explanation?.gaps.some(
+          (g) =>
+            g.kind === "unresolved-schema-field" ||
+            g.at?.file === schemaRelPath,
+        ),
+        false,
+        JSON.stringify(extendResolvedExplain.report.explanation?.gaps),
+      );
+      assert.ok(
+        extendResolvedExplain.report.explanation?.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === extendRuntimeLine &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".extend()" &&
+            lg.resolvedBy.at?.line === extendResolvedLine,
+        ),
+        JSON.stringify(extendResolvedExplain.report.explanation?.localGaps),
+      );
+
+      const extendUnknownOutExplain = await host.check({
+        config: integratedOutputExplainConfigPath,
+        rule: "validator-output-fields-probe",
+        at: extendUnknownCallAt,
+      });
+      assert.equal(extendUnknownOutExplain.status, 1);
+      assert.equal(
+        extendUnknownOutExplain.report.explanation?.status,
+        "reported",
+      );
+      assert.ok(
+        extendUnknownOutExplain.report.explanation?.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === extendRuntimeLine,
+        ),
+        JSON.stringify(extendUnknownOutExplain.report.explanation?.localGaps),
+      );
+
+      const extendResolvedOutExplain = await host.check({
+        config: integratedOutputExplainConfigPath,
+        rule: "validator-output-fields-probe",
+        at: extendResolvedCallAt,
+      });
+      assert.equal(extendResolvedOutExplain.status, 1);
+      assert.equal(extendResolvedOutExplain.report.diagnostics.length, 1);
+      assert.match(
+        extendResolvedOutExplain.report.diagnostics[0]!.message,
+        /extendUnknownSchema/u,
+      );
+      assert.deepEqual(extendResolvedOutExplain.report.explanation?.gaps, []);
+      assert.ok(
+        extendResolvedOutExplain.report.explanation?.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === extendRuntimeLine &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".extend()" &&
+            lg.resolvedBy.at?.line === extendResolvedLine,
+        ),
+        JSON.stringify(extendResolvedOutExplain.report.explanation?.localGaps),
+      );
     },
   );
 });
