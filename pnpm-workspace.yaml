@@ -15,12 +15,13 @@ packages:
   - apps/*
   - packages/*
   - adapters/*
-  - fixtures/acceptance-host/data
-  - fixtures/acceptance-host/app
-  - fixtures/acceptance-host/overlays/drizzle/app
-  - fixtures/acceptance-host/overlays/drizzle-zod/app
-  - fixtures/acceptance-host/overlays/zod/app
-  - fixtures/acceptance-host/overlays/*/data
+  - test/*
+  - test/acceptance-host/data
+  - test/acceptance-host/app
+  - test/acceptance-host/overlays/drizzle/app
+  - test/acceptance-host/overlays/drizzle-zod/app
+  - test/acceptance-host/overlays/zod/app
+  - test/acceptance-host/overlays/*/data
 catalog:
   "@changesets/cli": 3.0.3
   "@types/node": ^26.0.0

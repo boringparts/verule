@@ -76,12 +76,12 @@
       },
       "tooling": {
         "dependencies": {
-          "deny": ["app", "library", "native"]
+          "deny": ["app", "library", "native", "verification"]
         }
       },
       "verification": {
         "dependencies": {
-          "allow": ["app", "library", "native", "tooling"]
+          "allow": ["app", "library", "native", "tooling", "verification"]
         }
       }
     }

@@ -298,248 +298,7 @@ importers:
         specifier: 'catalog:'
         version: typescript@7.0.2
 
-  fixtures/acceptance-host/app:
-    dependencies:
-      '@verule/acceptance-host-data':
-        specifier: workspace:*
-        version: link:../data
-      '@verule/sdk':
-        specifier: 'catalog:'
-        version: link:../../../packages/sdk
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/data: {}
-
-  fixtures/acceptance-host/overlays/drizzle-zod/app:
-    dependencies:
-      '@verule/acceptance-host-drizzle-zod-data':
-        specifier: workspace:*
-        version: link:../data
-      '@verule/adapter-drizzle':
-        specifier: 'catalog:'
-        version: link:../../../../../adapters/drizzle
-      '@verule/adapter-zod':
-        specifier: 'catalog:'
-        version: link:../../../../../adapters/zod
-      '@verule/rules-reference':
-        specifier: 'catalog:'
-        version: link:../../../../../packages/rules-reference
-      '@verule/sdk':
-        specifier: 'catalog:'
-        version: link:../../../../../packages/sdk
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-      zod:
-        specifier: 'catalog:'
-        version: 4.6.7
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/drizzle-zod/data:
-    dependencies:
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-      drizzle-zod:
-        specifier: 'catalog:'
-        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
-      zod:
-        specifier: 'catalog:'
-        version: 4.6.7
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/drizzle/app:
-    dependencies:
-      '@verule/acceptance-host-drizzle-data':
-        specifier: workspace:*
-        version: link:../data
-      '@verule/adapter-drizzle':
-        specifier: 'catalog:'
-        version: link:../../../../../adapters/drizzle
-      '@verule/sdk':
-        specifier: 'catalog:'
-        version: link:../../../../../packages/sdk
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/drizzle/data:
-    dependencies:
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/provider-session/data:
-    dependencies:
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/zod/app:
-    dependencies:
-      '@verule/acceptance-host-zod-data':
-        specifier: workspace:*
-        version: link:../data
-      '@verule/adapter-zod':
-        specifier: 'catalog:'
-        version: link:../../../../../adapters/zod
-      '@verule/sdk':
-        specifier: 'catalog:'
-        version: link:../../../../../packages/sdk
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-      drizzle-zod:
-        specifier: 'catalog:'
-        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
-      zod:
-        specifier: 'catalog:'
-        version: 4.6.7
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  fixtures/acceptance-host/overlays/zod/data:
-    dependencies:
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.3
-    devDependencies:
-      '@types/node':
-        specifier: ^26.0.0
-        version: 26.6.6
-
-  packages/acceptance:
-    dependencies:
-      '@verule/acceptance-host-app':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/app
-      '@verule/acceptance-host-data':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/data
-      '@verule/acceptance-host-drizzle-app':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/drizzle/app
-      '@verule/acceptance-host-drizzle-data':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/drizzle/data
-      '@verule/acceptance-host-drizzle-zod-app':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/drizzle-zod/app
-      '@verule/acceptance-host-drizzle-zod-data':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/drizzle-zod/data
-      '@verule/acceptance-host-provider-session-data':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/provider-session/data
-      '@verule/acceptance-host-zod-app':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/zod/app
-      '@verule/acceptance-host-zod-data':
-        specifier: workspace:*
-        version: link:../../fixtures/acceptance-host/overlays/zod/data
-      '@verule/adapter-drizzle':
-        specifier: workspace:*
-        version: link:../../adapters/drizzle
-      '@verule/adapter-zod':
-        specifier: workspace:*
-        version: link:../../adapters/zod
-      '@verule/cli':
-        specifier: workspace:*
-        version: link:../cli
-      '@verule/engine':
-        specifier: workspace:*
-        version: link:../engine
-      '@verule/rules-reference':
-        specifier: workspace:*
-        version: link:../rules-reference
-      '@verule/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-    devDependencies:
-      '@types/node':
-        specifier: 'catalog:'
-        version: 26.6.6
-      '@verule/tooling-config':
-        specifier: workspace:*
-        version: link:../tooling-config
-      oxfmt:
-        specifier: 'catalog:'
-        version: 0.79.0
-      oxlint:
-        specifier: 'catalog:'
-        version: 1.94.0
-      typescript-7:
-        specifier: 'catalog:'
-        version: typescript@7.0.2
-
   packages/adapter-api: {}
-
-  packages/adapter-fixture:
-    dependencies:
-      '@verule/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-    devDependencies:
-      '@types/node':
-        specifier: 'catalog:'
-        version: 26.6.6
-      '@verule/adapter-api':
-        specifier: workspace:*
-        version: link:../adapter-api
-      '@verule/tooling-config':
-        specifier: workspace:*
-        version: link:../tooling-config
-      oxfmt:
-        specifier: 'catalog:'
-        version: 0.79.0
-      oxlint:
-        specifier: 'catalog:'
-        version: 1.94.0
-      typescript-7:
-        specifier: 'catalog:'
-        version: typescript@7.0.2
-
-  packages/adapter-fixture-complement:
-    dependencies:
-      '@verule/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-    devDependencies:
-      '@verule/adapter-api':
-        specifier: workspace:*
-        version: link:../adapter-api
-      '@verule/tooling-config':
-        specifier: workspace:*
-        version: link:../tooling-config
-      oxfmt:
-        specifier: 'catalog:'
-        version: 0.79.0
-      oxlint:
-        specifier: 'catalog:'
-        version: 1.94.0
-      typescript-7:
-        specifier: 'catalog:'
-        version: typescript@7.0.2
 
   packages/cli:
     dependencies:
@@ -593,34 +352,6 @@ importers:
         specifier: 'catalog:'
         version: typescript@7.0.2
 
-  packages/rules-reference:
-    dependencies:
-      '@verule/adapter-drizzle':
-        specifier: workspace:*
-        version: link:../../adapters/drizzle
-      '@verule/adapter-zod':
-        specifier: workspace:*
-        version: link:../../adapters/zod
-      '@verule/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-    devDependencies:
-      '@types/node':
-        specifier: 'catalog:'
-        version: 26.6.6
-      '@verule/tooling-config':
-        specifier: workspace:*
-        version: link:../tooling-config
-      oxfmt:
-        specifier: 'catalog:'
-        version: 0.79.0
-      oxlint:
-        specifier: 'catalog:'
-        version: 1.94.0
-      typescript-7:
-        specifier: 'catalog:'
-        version: typescript@7.0.2
-
   packages/sdk:
     dependencies:
       '@verule/engine':
@@ -660,6 +391,284 @@ importers:
       tsrs:
         specifier: 'catalog:'
         version: 7.1.0-beta.tsrs4
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  test/acceptance:
+    dependencies:
+      '@verule/acceptance-host-app':
+        specifier: workspace:*
+        version: link:../acceptance-host/app
+      '@verule/acceptance-host-data':
+        specifier: workspace:*
+        version: link:../acceptance-host/data
+      '@verule/acceptance-host-drizzle-app':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/drizzle/app
+      '@verule/acceptance-host-drizzle-data':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/drizzle/data
+      '@verule/acceptance-host-drizzle-zod-app':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/drizzle-zod/app
+      '@verule/acceptance-host-drizzle-zod-data':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/drizzle-zod/data
+      '@verule/acceptance-host-provider-session-data':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/provider-session/data
+      '@verule/acceptance-host-zod-app':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/zod/app
+      '@verule/acceptance-host-zod-data':
+        specifier: workspace:*
+        version: link:../acceptance-host/overlays/zod/data
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/adapter-drizzle':
+        specifier: workspace:*
+        version: link:../../adapters/drizzle
+      '@verule/adapter-fixture':
+        specifier: workspace:*
+        version: link:../adapter-fixture
+      '@verule/adapter-fixture-complement':
+        specifier: workspace:*
+        version: link:../adapter-fixture-complement
+      '@verule/adapter-zod':
+        specifier: workspace:*
+        version: link:../../adapters/zod
+      '@verule/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@verule/engine':
+        specifier: workspace:*
+        version: link:../../packages/engine
+      '@verule/rules-reference':
+        specifier: workspace:*
+        version: link:../rules-reference
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  test/acceptance-host/app:
+    dependencies:
+      '@verule/acceptance-host-data':
+        specifier: workspace:*
+        version: link:../data
+      '@verule/sdk':
+        specifier: 'catalog:'
+        version: link:../../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/data: {}
+
+  test/acceptance-host/overlays/drizzle-zod/app:
+    dependencies:
+      '@verule/acceptance-host-drizzle-zod-data':
+        specifier: workspace:*
+        version: link:../data
+      '@verule/adapter-drizzle':
+        specifier: 'catalog:'
+        version: link:../../../../../adapters/drizzle
+      '@verule/adapter-zod':
+        specifier: 'catalog:'
+        version: link:../../../../../adapters/zod
+      '@verule/rules-reference':
+        specifier: 'catalog:'
+        version: link:../../../../rules-reference
+      '@verule/sdk':
+        specifier: 'catalog:'
+        version: link:../../../../../packages/sdk
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/drizzle-zod/data:
+    dependencies:
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+      drizzle-zod:
+        specifier: 'catalog:'
+        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/drizzle/app:
+    dependencies:
+      '@verule/acceptance-host-drizzle-data':
+        specifier: workspace:*
+        version: link:../data
+      '@verule/adapter-drizzle':
+        specifier: 'catalog:'
+        version: link:../../../../../adapters/drizzle
+      '@verule/sdk':
+        specifier: 'catalog:'
+        version: link:../../../../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/drizzle/data:
+    dependencies:
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/provider-session/data:
+    dependencies:
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/zod/app:
+    dependencies:
+      '@verule/acceptance-host-zod-data':
+        specifier: workspace:*
+        version: link:../data
+      '@verule/adapter-zod':
+        specifier: 'catalog:'
+        version: link:../../../../../adapters/zod
+      '@verule/sdk':
+        specifier: 'catalog:'
+        version: link:../../../../../packages/sdk
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+      drizzle-zod:
+        specifier: 'catalog:'
+        version: 0.8.3(drizzle-orm@0.45.3)(zod@4.6.7)
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/acceptance-host/overlays/zod/data:
+    dependencies:
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.6
+
+  test/adapter-fixture:
+    dependencies:
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/adapter-api':
+        specifier: workspace:*
+        version: link:../../packages/adapter-api
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  test/adapter-fixture-complement:
+    dependencies:
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/adapter-api':
+        specifier: workspace:*
+        version: link:../../packages/adapter-api
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  test/rules-reference:
+    dependencies:
+      '@verule/adapter-drizzle':
+        specifier: workspace:*
+        version: link:../../adapters/drizzle
+      '@verule/adapter-zod':
+        specifier: workspace:*
+        version: link:../../adapters/zod
+      '@verule/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
