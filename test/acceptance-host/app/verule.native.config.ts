@@ -40,7 +40,7 @@ const nativeFactRule = defineRule({
     ctx.report({
       at: evidence.at,
       message: `Native adapter read ${matchingFact.value.text} with ${matchingFact.value.input}.`,
-      evidence: matchingFact.evidence,
+      basis: [matchingFact],
     });
   },
 });

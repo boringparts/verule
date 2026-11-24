@@ -145,6 +145,11 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
     "minimumReleaseAge: 1440\npackages:\n  - '.'\n",
   );
 
+  const cacheHome = join(fixture.path, "pnpm-cache");
+  const storeDir = join(fixture.path, "pnpm-store");
+  mkdirSync(cacheHome, { recursive: true });
+  mkdirSync(storeDir, { recursive: true });
+
   const registry = await startArtifactRegistry([engineArtifact, sdkArtifact]);
   try {
     writeFileSync(
@@ -154,13 +159,21 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
     await execFileAsync(
       "pnpm",
       [
+        "--store-dir",
+        storeDir,
         "add",
         "--save-dev",
         "--workspace-root",
         "--ignore-scripts",
         "@verule/sdk@0.0.0",
       ],
-      { cwd: hostDir },
+      {
+        cwd: hostDir,
+        env: {
+          ...process.env,
+          XDG_CACHE_HOME: cacheHome,
+        },
+      },
     );
   } finally {
     await registry.close();

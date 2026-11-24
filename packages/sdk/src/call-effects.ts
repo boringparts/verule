@@ -894,10 +894,8 @@ export function createCallEffectsQueries(deps: {
                   `Engine omitted instanceCleanup result for "${scopeRef.handleId}".`,
                 );
               }
-              recordGaps(raw.gaps);
               const targetResults: TargetInstanceCleanupResult[] =
                 raw.targetResults.map((tr) => {
-                  recordGaps(tr.gaps);
                   return registerProvenance(
                     {
                       instance:
@@ -978,6 +976,12 @@ export function createCallEffectsQueries(deps: {
       }
 
       const results = await promise;
+      for (const scopeResult of results) {
+        recordGaps(scopeResult.gaps);
+        for (const tr of scopeResult.targetResults) {
+          recordGaps(tr.gaps);
+        }
+      }
       if (onCleanupCovered) {
         for (const scopeResult of results) {
           const scopeLoc = resolveSyntaxLocation?.(scopeResult.scope);
@@ -1107,7 +1111,6 @@ export function createCallEffectsQueries(deps: {
                   `Engine omitted callEffects result for "${targetRef.handleId}".`,
                 );
               }
-              recordGaps(raw.gaps);
               return {
                 target: targetRef,
                 fieldReads: raw.fieldReads.map((e) =>
@@ -1164,6 +1167,9 @@ export function createCallEffectsQueries(deps: {
       }
 
       const results = await promise;
+      for (const row of results) {
+        recordGaps(row.gaps);
+      }
       if (onQueryCompleted) {
         const count = results.reduce((sum, row) => sum + row.effects.length, 0);
         onQueryCompleted(

@@ -382,7 +382,6 @@ export function createCallsValuesQueries(deps: {
                 `Engine omitted callersOf result for "${decl.handleId}".`,
               );
             }
-            recordGaps(raw.gaps);
             return {
               declaration: decl,
               calls: raw.calls.map((id) =>
@@ -449,6 +448,9 @@ export function createCallsValuesQueries(deps: {
       const results = await Promise.all(
         declarations.map((decl) => cache.callersCache.get(cacheKeyFor(decl))!),
       );
+      for (const row of results) {
+        recordGaps(row.gaps);
+      }
 
       if (onQueryCompleted) {
         const count = results.reduce((sum, r) => sum + r.calls.length, 0);
@@ -509,7 +511,6 @@ export function createCallsValuesQueries(deps: {
                 `Engine omitted calleesOf result for "${call.handleId}".`,
               );
             }
-            recordGaps(raw.gaps);
             const result: CallTargetsResult = {
               call,
               targets: raw.targets.map((id) =>
@@ -615,6 +616,9 @@ export function createCallsValuesQueries(deps: {
           )!,
         ),
       );
+      for (const row of results) {
+        recordGaps(row.gaps);
+      }
 
       if (onQueryCompleted) {
         const count = results.reduce((sum, r) => sum + r.targets.length, 0);
@@ -706,7 +710,6 @@ export function createCallsValuesQueries(deps: {
             if (!raw) {
               throw new Error("Engine omitted valuePropagation result.");
             }
-            recordGaps(raw.gaps);
             const results: ValuePropagationTargetResult[] = raw.results.map(
               (row) => {
                 const fromRef = endpointByHandle.get(row.from)!;
@@ -751,6 +754,7 @@ export function createCallsValuesQueries(deps: {
       }
 
       const result = await promise;
+      recordGaps(result.gaps);
       if (onQueryCompleted) {
         onQueryCompleted(
           "valuePropagation",

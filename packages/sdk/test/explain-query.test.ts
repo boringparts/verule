@@ -305,4 +305,78 @@ void describe("@verule/sdk explain and observation", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("preserves query gaps when cached relation queries are reused across same-snapshot check and explain calls", async () => {
+    const root = createTempProject(
+      [
+        "interface ExternalParser {",
+        "  parse(value: unknown): unknown;",
+        "}",
+        "declare const parser: ExternalParser;",
+        "declare function makeInput(): { id: number };",
+        "",
+        "export function runFlow() {",
+        "  const row = makeInput();",
+        "  return parser.parse(row);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const propRule = defineRule({
+      id: "rule-prop-gap-cache",
+      run: async (ctx) => {
+        const calls = await ctx.findSyntax({
+          files: ["src/handlers.ts"],
+          kinds: ["CallExpression"],
+        });
+        const makeCall = calls.find((c) => c.text === "makeInput()");
+        const parseCall = calls.find((c) => c.text.startsWith("parser.parse("));
+        const argRef = parseCall?.arguments?.[0];
+        if (!makeCall || !parseCall || !argRef) return;
+        await ctx.valuePropagation({
+          propagation: "value",
+          from: makeCall.ref,
+          to: argRef,
+        });
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        rules: [propRule],
+      }),
+    });
+
+    try {
+      const first = await session.check();
+      assert.ok(
+        first.gaps.some((g) => g.kind === "dynamic-callee"),
+        JSON.stringify(first.gaps),
+      );
+
+      // Reusing cached valuePropagation on the same snapshot MUST preserve report.gaps and explain.gaps.
+      const second = await session.check({ at: "src/handlers.ts:9:10" });
+      assert.equal(
+        second.identity.snapshotDigest,
+        first.identity.snapshotDigest,
+      );
+      assert.deepEqual(second.gaps, first.gaps);
+      const exp =
+        second.explanation ??
+        second.explanations?.find(
+          (item) => item.ruleId === "rule-prop-gap-cache",
+        );
+      assert.ok(exp);
+      assert.ok(
+        exp.gaps.some((g) => g.kind === "dynamic-callee"),
+        JSON.stringify(exp.gaps),
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
