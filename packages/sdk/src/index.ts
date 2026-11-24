@@ -31,6 +31,7 @@ export {
   type LibraryAdapter,
 } from "./facts.ts";
 export { INLINE_IGNORE_RULE_ID } from "./inline-ignore.ts";
+export type { DiagnosticBasis, SelectableQueryResult } from "./evidence.ts";
 export { isSameInstance } from "./instance-identity.ts";
 export { parseObserveLimit, parseTargetSpec } from "./observation.ts";
 export {

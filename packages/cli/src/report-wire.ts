@@ -309,6 +309,18 @@ export const checkFailureSchema = z.object({
   conflict: factConflictDetailsSchema.optional(),
 });
 
+function toWireEvidence(
+  ev: CheckReport["diagnostics"][number]["evidence"][number],
+) {
+  return {
+    kind: ev.kind,
+    message: ev.message,
+    ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
+    ...(ev.modelId !== undefined ? { modelId: ev.modelId } : {}),
+    ...(ev.declaration !== undefined ? { declaration: ev.declaration } : {}),
+  };
+}
+
 export function toWireFactConflict(
   conflict: FactConflictDetails,
 ): WireFactConflictDetails {
@@ -331,22 +343,14 @@ export function toWireFactConflict(
         providers: [...party0.providers],
         conclusion: party0.conclusion,
         conclusionSummary: party0.conclusionSummary,
-        evidence: party0.evidence.map((ev) => ({
-          kind: ev.kind,
-          message: ev.message,
-          ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
-        })),
+        evidence: party0.evidence.map(toWireEvidence),
       },
       {
         providerId: party1.providerId,
         providers: [...party1.providers],
         conclusion: party1.conclusion,
         conclusionSummary: party1.conclusionSummary,
-        evidence: party1.evidence.map((ev) => ({
-          kind: ev.kind,
-          message: ev.message,
-          ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
-        })),
+        evidence: party1.evidence.map(toWireEvidence),
       },
     ],
   };

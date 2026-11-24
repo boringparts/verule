@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { registerProvenance } from "./evidence.ts";
 import { normalizeLookupFiles } from "./lookup-files.ts";
 import type { ResolvedImplementationTarget } from "./package-impl.ts";
 import { validateProgramRefs } from "./projection.ts";
@@ -334,46 +335,57 @@ export function createCallsValuesQueries(deps: {
               calls: raw.calls.map((id) =>
                 makeProgramRef("call", sessionToken, projectId, snapshotId, id),
               ),
-              callSites: raw.callSites.map((site) => ({
-                call: makeProgramRef(
-                  "call",
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                  site.call,
+              callSites: raw.callSites.map((site) =>
+                registerProvenance(
+                  {
+                    call: makeProgramRef(
+                      "call",
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                      site.call,
+                    ),
+                    syntax: makeProgramRef(
+                      "syntax",
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                      site.syntax,
+                    ),
+                    location: site.location,
+                    callerDeclaration:
+                      site.callerDeclaration !== null
+                        ? makeProgramRef(
+                            "declaration",
+                            sessionToken,
+                            projectId,
+                            snapshotId,
+                            site.callerDeclaration,
+                          )
+                        : null,
+                    parameterBindings: mapBindings(
+                      site.parameterBindings,
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                    ),
+                    returnTarget: makeProgramRef(
+                      "syntax",
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                      site.returnTarget,
+                    ),
+                  },
+                  [
+                    {
+                      kind: "source",
+                      message: "Direct call site",
+                      at: site.location,
+                    },
+                  ],
                 ),
-                syntax: makeProgramRef(
-                  "syntax",
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                  site.syntax,
-                ),
-                location: site.location,
-                callerDeclaration:
-                  site.callerDeclaration !== null
-                    ? makeProgramRef(
-                        "declaration",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        site.callerDeclaration,
-                      )
-                    : null,
-                parameterBindings: mapBindings(
-                  site.parameterBindings,
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                ),
-                returnTarget: makeProgramRef(
-                  "syntax",
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                  site.returnTarget,
-                ),
-              })),
+              ),
               gaps: raw.gaps,
             };
           });
@@ -445,7 +457,7 @@ export function createCallsValuesQueries(deps: {
               );
             }
             recordGaps(raw.gaps);
-            return {
+            const result: CallTargetsResult = {
               call,
               targets: raw.targets.map((id) =>
                 makeProgramRef(
@@ -456,36 +468,77 @@ export function createCallsValuesQueries(deps: {
                   id,
                 ),
               ),
-              resolvedTargets: raw.resolvedTargets.map((target) => ({
-                declaration: makeProgramRef(
-                  "declaration",
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                  target.declaration,
-                ),
-                name: target.name,
-                location: target.location,
-                isExternal: target.isExternal,
-                ...(target.implementation !== undefined
-                  ? { implementation: target.implementation }
-                  : {}),
-                parameterBindings: mapBindings(
-                  target.parameterBindings,
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                ),
-                returnExpressions: target.returnExpressions.map((id) =>
-                  makeProgramRef(
-                    "syntax",
+              resolvedTargets: raw.resolvedTargets.map((target) => {
+                const mappedTarget: CallTargetInfo = {
+                  declaration: makeProgramRef(
+                    "declaration",
                     sessionToken,
                     projectId,
                     snapshotId,
-                    id,
+                    target.declaration,
                   ),
-                ),
-              })),
+                  name: target.name,
+                  location: target.location,
+                  isExternal: target.isExternal,
+                  ...(target.implementation !== undefined
+                    ? { implementation: target.implementation }
+                    : {}),
+                  parameterBindings: mapBindings(
+                    target.parameterBindings,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                  ),
+                  returnExpressions: target.returnExpressions.map((id) =>
+                    makeProgramRef(
+                      "syntax",
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                      id,
+                    ),
+                  ),
+                };
+                const targetEvidence: Evidence[] = [];
+                if (mappedTarget.location !== null) {
+                  targetEvidence.push({
+                    kind: "source",
+                    message: `Call target: ${mappedTarget.name ?? "<anonymous>"}`,
+                    at: mappedTarget.location,
+                    ...(mappedTarget.name !== null
+                      ? { declaration: mappedTarget.name }
+                      : {}),
+                  });
+                }
+                if (
+                  mappedTarget.implementation?.location != null &&
+                  (mappedTarget.isExternal ||
+                    mappedTarget.location === null ||
+                    mappedTarget.implementation.location.file !==
+                      mappedTarget.location.file ||
+                    mappedTarget.implementation.location.start !==
+                      mappedTarget.location.start)
+                ) {
+                  targetEvidence.push({
+                    kind: "source",
+                    message: `Resolved ${mappedTarget.implementation.resolutionMode} implementation '${mappedTarget.implementation.file}' for '${mappedTarget.name ?? "<anonymous>"}'`,
+                    at: mappedTarget.implementation.location,
+                    ...(mappedTarget.name !== null
+                      ? { declaration: mappedTarget.name }
+                      : {}),
+                  });
+                } else if (
+                  targetEvidence.length === 0 &&
+                  mappedTarget.name !== null
+                ) {
+                  targetEvidence.push({
+                    kind: "source",
+                    message: `External call target: ${mappedTarget.name}`,
+                    declaration: mappedTarget.name,
+                  });
+                }
+                return registerProvenance(mappedTarget, targetEvidence);
+              }),
               returnTarget: makeProgramRef(
                 "syntax",
                 sessionToken,
@@ -496,6 +549,7 @@ export function createCallsValuesQueries(deps: {
               evidence: raw.evidence,
               gaps: raw.gaps,
             };
+            return registerProvenance(result, raw.evidence);
           });
           cache.calleesCache.set(key, rowPromise);
         }
@@ -601,19 +655,25 @@ export function createCallsValuesQueries(deps: {
               (row) => {
                 const fromRef = endpointByHandle.get(row.from)!;
                 const toRef = endpointByHandle.get(row.to)!;
-                return {
+                const targetResult: ValuePropagationTargetResult = {
                   from: fromRef,
                   to: toRef,
                   reachable: row.reachable,
-                  paths: row.paths.map((p) => ({
-                    from: endpointByHandle.get(p.from) ?? fromRef,
-                    to: endpointByHandle.get(p.to) ?? toRef,
-                    steps: p.steps,
-                    evidence: p.evidence,
-                  })),
+                  paths: row.paths.map((p) =>
+                    registerProvenance(
+                      {
+                        from: endpointByHandle.get(p.from) ?? fromRef,
+                        to: endpointByHandle.get(p.to) ?? toRef,
+                        steps: p.steps,
+                        evidence: p.evidence,
+                      },
+                      p.evidence,
+                    ),
+                  ),
                   evidence: row.evidence,
                   gaps: row.gaps,
                 };
+                return registerProvenance(targetResult, row.evidence);
               },
             );
             const reachableSet = new Set<ValueEndpoint>();

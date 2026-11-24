@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { registerProvenance } from "./evidence.ts";
 import type { InstanceModelMatch } from "./instance-identity.ts";
 import { normalizeLookupFiles } from "./lookup-files.ts";
 import { validateProgramRefs } from "./projection.ts";
@@ -475,39 +476,42 @@ function mapCleanupSite(
   projectId: string,
   snapshotId: number,
 ): CleanupSiteInfo {
-  return {
-    instance: makeProgramRef(
-      "instance",
-      sessionToken,
-      projectId,
-      snapshotId,
-      raw.instance,
-    ),
-    instanceKey: raw.instanceKey,
-    allocationLocation: raw.allocationLocation,
-    operationKind: raw.operationKind,
-    syntax: makeProgramRef(
-      "syntax",
-      sessionToken,
-      projectId,
-      snapshotId,
-      raw.syntax,
-    ),
-    location: raw.location,
-    viaCall:
-      raw.viaCall !== null
-        ? makeProgramRef(
-            "call",
-            sessionToken,
-            projectId,
-            snapshotId,
-            raw.viaCall,
-          )
-        : null,
-    viaCallLocation: raw.viaCallLocation,
-    modelId: raw.modelId,
-    evidence: raw.evidence,
-  };
+  return registerProvenance(
+    {
+      instance: makeProgramRef(
+        "instance",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.instance,
+      ),
+      instanceKey: raw.instanceKey,
+      allocationLocation: raw.allocationLocation,
+      operationKind: raw.operationKind,
+      syntax: makeProgramRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.syntax,
+      ),
+      location: raw.location,
+      viaCall:
+        raw.viaCall !== null
+          ? makeProgramRef(
+              "call",
+              sessionToken,
+              projectId,
+              snapshotId,
+              raw.viaCall,
+            )
+          : null,
+      viaCallLocation: raw.viaCallLocation,
+      modelId: raw.modelId,
+      evidence: raw.evidence,
+    },
+    raw.evidence,
+  );
 }
 
 function mapFieldEffect(
@@ -516,84 +520,87 @@ function mapFieldEffect(
   projectId: string,
   snapshotId: number,
 ): FieldEffect {
-  return {
-    kind: raw.kind,
-    propertyName: raw.propertyName,
-    operator: raw.operator,
-    syntax: makeProgramRef(
-      "syntax",
-      sessionToken,
-      projectId,
-      snapshotId,
-      raw.syntax,
-    ),
-    targetSyntax: makeProgramRef(
-      "syntax",
-      sessionToken,
-      projectId,
-      snapshotId,
-      raw.targetSyntax,
-    ),
-    receiverSyntax: makeProgramRef(
-      "syntax",
-      sessionToken,
-      projectId,
-      snapshotId,
-      raw.receiverSyntax,
-    ),
-    valueSyntax:
-      raw.valueSyntax !== null
-        ? makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            raw.valueSyntax,
-          )
-        : null,
-    valueText: raw.valueText,
-    location: raw.location,
-    viaCall:
-      raw.viaCall !== null
-        ? makeProgramRef(
-            "call",
-            sessionToken,
-            projectId,
-            snapshotId,
-            raw.viaCall,
-          )
-        : null,
-    enclosingFunction:
-      raw.enclosingFunction !== null
-        ? makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            raw.enclosingFunction,
-          )
-        : null,
-    guards: raw.guards.map((g) => ({
-      branchSyntax: makeProgramRef(
+  return registerProvenance(
+    {
+      kind: raw.kind,
+      propertyName: raw.propertyName,
+      operator: raw.operator,
+      syntax: makeProgramRef(
         "syntax",
         sessionToken,
         projectId,
         snapshotId,
-        g.branchSyntax,
+        raw.syntax,
       ),
-      condition: makeProgramRef(
+      targetSyntax: makeProgramRef(
         "syntax",
         sessionToken,
         projectId,
         snapshotId,
-        g.condition,
+        raw.targetSyntax,
       ),
-      conditionText: g.conditionText,
-      direction: g.direction,
-      location: g.location,
-    })),
-    evidence: raw.evidence,
-  };
+      receiverSyntax: makeProgramRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.receiverSyntax,
+      ),
+      valueSyntax:
+        raw.valueSyntax !== null
+          ? makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              raw.valueSyntax,
+            )
+          : null,
+      valueText: raw.valueText,
+      location: raw.location,
+      viaCall:
+        raw.viaCall !== null
+          ? makeProgramRef(
+              "call",
+              sessionToken,
+              projectId,
+              snapshotId,
+              raw.viaCall,
+            )
+          : null,
+      enclosingFunction:
+        raw.enclosingFunction !== null
+          ? makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              raw.enclosingFunction,
+            )
+          : null,
+      guards: raw.guards.map((g) => ({
+        branchSyntax: makeProgramRef(
+          "syntax",
+          sessionToken,
+          projectId,
+          snapshotId,
+          g.branchSyntax,
+        ),
+        condition: makeProgramRef(
+          "syntax",
+          sessionToken,
+          projectId,
+          snapshotId,
+          g.condition,
+        ),
+        conditionText: g.conditionText,
+        direction: g.direction,
+        location: g.location,
+      })),
+      evidence: raw.evidence,
+    },
+    raw.evidence,
+  );
 }
 
 export type CallEffectsCache = {
@@ -743,27 +750,35 @@ export function createCallEffectsQueries(deps: {
               const targetResults: TargetInstanceCleanupResult[] =
                 raw.targetResults.map((tr) => {
                   recordGaps(tr.gaps);
-                  return {
-                    instance:
-                      targetByHandle.get(tr.instance) ??
-                      makeProgramRef(
-                        "instance",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        tr.instance,
+                  return registerProvenance(
+                    {
+                      instance:
+                        targetByHandle.get(tr.instance) ??
+                        makeProgramRef(
+                          "instance",
+                          sessionToken,
+                          projectId,
+                          snapshotId,
+                          tr.instance,
+                        ),
+                      instanceKey: tr.instanceKey,
+                      allocationLocation: tr.allocationLocation,
+                      status: tr.status,
+                      cleanedOnAllPaths: tr.cleanedOnAllPaths,
+                      cleanedOnAnyPath: tr.cleanedOnAnyPath,
+                      cleanupSites: tr.cleanupSites.map((site) =>
+                        mapCleanupSite(
+                          site,
+                          sessionToken,
+                          projectId,
+                          snapshotId,
+                        ),
                       ),
-                    instanceKey: tr.instanceKey,
-                    allocationLocation: tr.allocationLocation,
-                    status: tr.status,
-                    cleanedOnAllPaths: tr.cleanedOnAllPaths,
-                    cleanedOnAnyPath: tr.cleanedOnAnyPath,
-                    cleanupSites: tr.cleanupSites.map((site) =>
-                      mapCleanupSite(site, sessionToken, projectId, snapshotId),
-                    ),
-                    evidence: tr.evidence,
-                    gaps: tr.gaps,
-                  };
+                      evidence: tr.evidence,
+                      gaps: tr.gaps,
+                    },
+                    tr.evidence,
+                  );
                 });
 
               return {
@@ -937,41 +952,46 @@ export function createCallEffectsQueries(deps: {
                 effects: raw.effects.map((e) =>
                   mapFieldEffect(e, sessionToken, projectId, snapshotId),
                 ),
-                callbackInvocations: raw.callbackInvocations.map((cb) => ({
-                  call: makeProgramRef(
-                    "call",
-                    sessionToken,
-                    projectId,
-                    snapshotId,
-                    cb.call,
+                callbackInvocations: raw.callbackInvocations.map((cb) =>
+                  registerProvenance(
+                    {
+                      call: makeProgramRef(
+                        "call",
+                        sessionToken,
+                        projectId,
+                        snapshotId,
+                        cb.call,
+                      ),
+                      syntax: makeProgramRef(
+                        "syntax",
+                        sessionToken,
+                        projectId,
+                        snapshotId,
+                        cb.syntax,
+                      ),
+                      callbackArgument: makeProgramRef(
+                        "syntax",
+                        sessionToken,
+                        projectId,
+                        snapshotId,
+                        cb.callbackArgument,
+                      ),
+                      parameterIndex: cb.parameterIndex,
+                      resolvedTargets: cb.resolvedTargets.map((id) =>
+                        makeProgramRef(
+                          "declaration",
+                          sessionToken,
+                          projectId,
+                          snapshotId,
+                          id,
+                        ),
+                      ),
+                      location: cb.location,
+                      evidence: cb.evidence,
+                    },
+                    cb.evidence,
                   ),
-                  syntax: makeProgramRef(
-                    "syntax",
-                    sessionToken,
-                    projectId,
-                    snapshotId,
-                    cb.syntax,
-                  ),
-                  callbackArgument: makeProgramRef(
-                    "syntax",
-                    sessionToken,
-                    projectId,
-                    snapshotId,
-                    cb.callbackArgument,
-                  ),
-                  parameterIndex: cb.parameterIndex,
-                  resolvedTargets: cb.resolvedTargets.map((id) =>
-                    makeProgramRef(
-                      "declaration",
-                      sessionToken,
-                      projectId,
-                      snapshotId,
-                      id,
-                    ),
-                  ),
-                  location: cb.location,
-                  evidence: cb.evidence,
-                })),
+                ),
                 calls: raw.calls.map((id) =>
                   makeProgramRef(
                     "call",

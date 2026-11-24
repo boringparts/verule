@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { registerProvenance } from "./evidence.ts";
 import { validateProgramRefs } from "./projection.ts";
 import type {
   CallRef,
@@ -152,14 +153,17 @@ export function createPackageImplQueries(deps: {
               );
             }
             recordGaps(raw.gaps);
-            return {
-              target,
-              status: raw.status,
-              implementation: raw.implementation,
-              candidates: raw.candidates,
-              evidence: raw.evidence,
-              gaps: raw.gaps,
-            };
+            return registerProvenance(
+              {
+                target,
+                status: raw.status,
+                implementation: raw.implementation,
+                candidates: raw.candidates,
+                evidence: raw.evidence,
+                gaps: raw.gaps,
+              },
+              raw.evidence,
+            );
           });
           cache.implCache.set(key, rowPromise);
         }
