@@ -8,6 +8,7 @@ export {
   createHostFileAccessors,
   linkNodeModulesPackage,
   normalizeLineEndings,
+  resolveCheckedHostDir,
   resolveHostDir,
   resolvePathInsideRoot,
   writeHostFiles,
@@ -19,8 +20,15 @@ export {
 } from "./materials.ts";
 export {
   prepareTempHost,
+  withPreparedTempHost,
   withTempHost,
   type PreparedTempHost,
   type PrepareTempHostOptions,
 } from "./temp-host.ts";
-export { runTscTypecheck, type HostTypecheckResult } from "./typecheck.ts";
+export {
+  discoverHostTsconfigs,
+  runTscTypecheck,
+  typecheckHostProjects,
+  type HostTypecheckResult,
+  type TypecheckHostProjectsOptions,
+} from "./typecheck.ts";

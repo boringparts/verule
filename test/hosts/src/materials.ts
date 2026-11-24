@@ -61,9 +61,13 @@ export function resolvePathInsideRoot(
 }
 
 /**
- * Resolves the checked host directory under `@verule/test-hosts/hosts/`.
+ * Resolves a checked host directory under `baseDir`, rejecting invalid names,
+ * traversal escapes, or missing host directories.
  */
-export function resolveHostDir(hostName: string): string {
+export function resolveCheckedHostDir(
+  baseDir: string,
+  hostName: string,
+): string {
   const segments = hostName.split("/");
   if (
     hostName.length === 0 ||
@@ -74,11 +78,18 @@ export function resolveHostDir(hostName: string): string {
   ) {
     throw new Error(`Invalid checked host name: ${JSON.stringify(hostName)}`);
   }
-  const dirPath = resolvePathInsideRoot(hostsRootDir, hostName);
+  const dirPath = resolvePathInsideRoot(baseDir, hostName);
   if (!existsSync(dirPath) || !statSync(dirPath).isDirectory()) {
     throw new Error(`Checked host "${hostName}" does not exist at ${dirPath}`);
   }
   return dirPath;
+}
+
+/**
+ * Resolves the checked host directory under `@verule/test-hosts/hosts/`.
+ */
+export function resolveHostDir(hostName: string): string {
+  return resolveCheckedHostDir(hostsRootDir, hostName);
 }
 
 function writeNormalizedCopiedFile(

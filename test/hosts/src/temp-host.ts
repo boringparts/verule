@@ -143,14 +143,14 @@ export async function prepareTempHost(
 }
 
 /**
- * Prepares a temporary host, passes it to `callback`, and always disposes
+ * Runs `callback` against a prepared temporary host and always disposes
  * registered resources in LIFO order while preserving any callback error.
  */
-export async function withTempHost<T>(
-  options: PrepareTempHostOptions,
+export async function withPreparedTempHost<T>(
+  prepare: () => Promise<PreparedTempHost>,
   callback: (host: PreparedTempHost) => Promise<T> | T,
 ): Promise<T> {
-  const host = await prepareTempHost(options);
+  const host = await prepare();
   let callbackFailed = false;
   try {
     return await callback(host);
@@ -167,4 +167,15 @@ export async function withTempHost<T>(
       await host.dispose();
     }
   }
+}
+
+/**
+ * Prepares a temporary host, passes it to `callback`, and always disposes
+ * registered resources in LIFO order while preserving any callback error.
+ */
+export async function withTempHost<T>(
+  options: PrepareTempHostOptions,
+  callback: (host: PreparedTempHost) => Promise<T> | T,
+): Promise<T> {
+  return withPreparedTempHost(() => prepareTempHost(options), callback);
 }

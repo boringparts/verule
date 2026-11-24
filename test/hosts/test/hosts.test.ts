@@ -3,8 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import {
+  discoverHostTsconfigs,
   prepareTempHost,
   resolveHostDir,
+  typecheckHostProjects,
   withTempHost,
 } from "@verule/test-hosts";
 
@@ -188,5 +190,50 @@ void describe("@verule/test-hosts", () => {
       assert.equal(existsSync(asyncRoot), true);
     }
     assert.equal(existsSync(asyncRoot), false);
+  });
+
+  void it("discovers host tsconfigs while skipping untyped, node_modules, and .skip-host-typecheck directories", async () => {
+    await withTempHost({}, async (host) => {
+      host.writeText(
+        "valid/tsconfig.json",
+        JSON.stringify({
+          compilerOptions: { strict: true, target: "ES2022" },
+          include: ["src/**/*.ts"],
+        }),
+      );
+      host.writeText("valid/src/ok.ts", "export const ok: number = 1;\n");
+      host.writeText("untyped/tsconfig.json", "{ invalid json");
+      host.writeText("node_modules/pkg/tsconfig.json", "{ invalid json");
+      host.writeText("skipped/.skip-host-typecheck", "");
+      host.writeText(
+        "skipped/tsconfig.json",
+        JSON.stringify({ compilerOptions: { strict: true } }),
+      );
+      host.writeText("skipped/bad.ts", "export const bad: number = 'nope';\n");
+
+      const discovered = discoverHostTsconfigs(host.rootDir);
+      assert.deepEqual(discovered, [host.resolvePath("valid/tsconfig.json")]);
+
+      const results = await typecheckHostProjects(host.rootDir);
+      assert.equal(results.length, 1);
+
+      host.writeText("valid/src/ok.ts", "export const ok: number = 'oops';\n");
+      await assert.rejects(
+        () => typecheckHostProjects(host.rootDir),
+        (error: unknown) =>
+          error instanceof Error && /TS2322/u.test(error.message),
+      );
+    });
+
+    await withTempHost({}, async (emptyHost) => {
+      await assert.rejects(
+        () => typecheckHostProjects(emptyHost.rootDir),
+        /No host tsconfig\.json files found/u,
+      );
+      assert.deepEqual(
+        await typecheckHostProjects(emptyHost.rootDir, { allowEmpty: true }),
+        [],
+      );
+    });
   });
 });
