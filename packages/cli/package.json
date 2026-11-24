@@ -27,6 +27,8 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@verule/cli-hosts": "workspace:*",
+    "@verule/test-hosts": "workspace:*",
     "@verule/tooling-config": "workspace:*",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
