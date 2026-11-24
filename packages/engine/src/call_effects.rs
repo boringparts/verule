@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tsrs_ast::{
-    Kind, Node, SourceFile, get_source_file_of_node, is_function_like_declaration, is_type_node,
+    Kind, Node, SourceFile, Symbol, get_source_file_of_node, is_function_like_declaration,
+    is_type_node,
 };
 use tsrs_checker::TypeFormatFlags;
 use tsrs_compiler::{CheckerHandle, Program};
@@ -120,11 +121,14 @@ pub struct FieldEffectPayload {
     pub syntax: String,
     pub target_syntax: String,
     pub receiver_syntax: String,
+    pub receiver_declaration: Option<String>,
     pub value_syntax: Option<String>,
     pub value_text: Option<String>,
     pub location: SourceLocation,
     pub via_call: Option<String>,
     pub enclosing_function: Option<String>,
+    pub enclosing_block: Option<String>,
+    pub cfg_scope: Option<String>,
     pub guards: Vec<GuardConditionPayload>,
     pub evidence: Vec<EvidenceItem>,
 }
@@ -132,12 +136,20 @@ pub struct FieldEffectPayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallbackInvocationPayload {
+    pub kind: &'static str,
     pub call: String,
+    pub outer_call: String,
     pub syntax: String,
     pub callback_argument: String,
-    pub parameter_index: usize,
+    pub parameter_index: Option<usize>,
+    pub target_declaration: Option<String>,
+    pub helper_declaration: Option<String>,
     pub resolved_targets: Vec<String>,
+    pub enclosing_function: Option<String>,
+    pub enclosing_block: Option<String>,
+    pub cfg_scope: Option<String>,
     pub location: SourceLocation,
+    pub outer_call_location: SourceLocation,
     pub evidence: Vec<EvidenceItem>,
 }
 
@@ -1620,21 +1632,20 @@ impl<'a> EffectsEngine<'a> {
                             format!("Wrote field '.{prop_name}' using '{op_str}'"),
                             Some(loc.clone()),
                         ));
-                        out.writes.push(RawFieldEffect {
-                            kind: "write",
-                            property_name: prop_name,
-                            operator: Some(op_str),
-                            syntax: node,
-                            target_syntax: unwrap_expr_wrappers(bin.left()),
-                            receiver_syntax: recv_expr,
-                            value_syntax: Some(bin.right()),
-                            value_text: node_text(bin.right()),
-                            location: loc,
+                        out.writes.push(self.build_raw_field_effect(
+                            "write",
+                            prop_name,
+                            Some(op_str),
+                            node,
+                            unwrap_expr_wrappers(bin.left()),
+                            recv_expr,
+                            Some(bin.right()),
+                            node_text(bin.right()),
+                            loc,
                             via_call,
-                            enclosing_fn: Some(enclosing_fn),
-                            guards: collect_structural_guards(&self.cwd, node, enclosing_fn),
-                            evidence: ev,
-                        });
+                            enclosing_fn,
+                            ev,
+                        ));
                     }
                     // Still inspect receiver (e.g. `a.b.c = 1` reads `a.b`) and RHS (`bin.right()`).
                     if opts.include_reads {
@@ -1691,21 +1702,20 @@ impl<'a> EffectsEngine<'a> {
                             format!("Updated field '.{prop_name}' using '{op_str}'"),
                             Some(loc.clone()),
                         ));
-                        out.writes.push(RawFieldEffect {
-                            kind: "write",
-                            property_name: prop_name,
-                            operator: Some(op_str),
-                            syntax: node,
-                            target_syntax: unwrap_expr_wrappers(operand),
-                            receiver_syntax: recv_expr,
-                            value_syntax: None,
-                            value_text: None,
-                            location: loc,
+                        out.writes.push(self.build_raw_field_effect(
+                            "write",
+                            prop_name,
+                            Some(op_str),
+                            node,
+                            unwrap_expr_wrappers(operand),
+                            recv_expr,
+                            None,
+                            None,
+                            loc,
                             via_call,
-                            enclosing_fn: Some(enclosing_fn),
-                            guards: collect_structural_guards(&self.cwd, node, enclosing_fn),
-                            evidence: ev,
-                        });
+                            enclosing_fn,
+                            ev,
+                        ));
                     }
                     return;
                 }
@@ -1722,21 +1732,20 @@ impl<'a> EffectsEngine<'a> {
                         format!("Read field '.{prop_name}'"),
                         Some(loc.clone()),
                     ));
-                    out.reads.push(RawFieldEffect {
-                        kind: "read",
-                        property_name: prop_name,
-                        operator: None,
-                        syntax: node,
-                        target_syntax: node,
-                        receiver_syntax: recv_expr,
-                        value_syntax: None,
-                        value_text: None,
-                        location: loc,
+                    out.reads.push(self.build_raw_field_effect(
+                        "read",
+                        prop_name,
+                        None,
+                        node,
+                        node,
+                        recv_expr,
+                        None,
+                        None,
+                        loc,
                         via_call,
-                        enclosing_fn: Some(enclosing_fn),
-                        guards: collect_structural_guards(&self.cwd, node, enclosing_fn),
-                        evidence: ev,
-                    });
+                        enclosing_fn,
+                        ev,
+                    ));
                 }
             }
             Kind::CallExpression => {
@@ -1770,35 +1779,16 @@ impl<'a> EffectsEngine<'a> {
                 let (callees, callback_param_idx, call_gaps) =
                     self.resolve_call_callees(node, call_stack);
 
-                if let Some(param_idx) = callback_param_idx
-                    && let Some(frame) = call_stack
-                        .iter()
-                        .rfind(|f| f.callee_fn == Some(enclosing_fn))
-                    && let Some(&cb_arg) = frame.call_node.arguments().get(param_idx)
-                    && let Some(ref loc) = call_loc
-                {
-                    let mut cb_ev = chain_evidence.to_vec();
-                    let fn_name = enclosing_fn
-                        .name()
-                        .and_then(node_text)
-                        .unwrap_or_else(|| "<helper>".to_string());
-                    let arg_txt = node_text(cb_arg).unwrap_or_else(|| "callback".to_string());
-                    cb_ev.push(EvidenceItem::simple(
-                        "source",
-                        format!(
-                            "Helper '{fn_name}' invokes callback parameter #{param_idx} ('{arg_txt}')"
-                        ),
-                        Some(loc.clone()),
-                    ));
-                    out.callback_invocations.push(RawCallbackInvocation {
-                        call_node: node,
-                        callback_argument: cb_arg,
-                        parameter_index: param_idx,
-                        resolved_targets: callees.iter().map(|c| c.fn_node).collect(),
-                        location: loc.clone(),
-                        evidence: cb_ev,
-                    });
-                }
+                self.record_callback_invocation(
+                    node,
+                    enclosing_fn,
+                    call_stack,
+                    &callees,
+                    callback_param_idx,
+                    call_loc.as_ref(),
+                    chain_evidence,
+                    out,
+                );
 
                 for g in call_gaps {
                     push_unique_gap(&mut out.gaps, g);
@@ -1865,6 +1855,328 @@ impl<'a> EffectsEngine<'a> {
             );
         }
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Constructs normalized RawFieldEffect with canonical receiver declaration and local CFG scope."
+    )]
+    fn build_raw_field_effect(
+        &mut self,
+        kind: &'static str,
+        property_name: String,
+        operator: Option<&'static str>,
+        syntax: P<Node>,
+        target_syntax: P<Node>,
+        receiver_syntax: P<Node>,
+        value_syntax: Option<P<Node>>,
+        value_text: Option<String>,
+        location: SourceLocation,
+        via_call: Option<P<Node>>,
+        enclosing_fn: P<Node>,
+        evidence: Vec<EvidenceItem>,
+    ) -> RawFieldEffect {
+        let receiver_declaration = resolve_decl_for_expr(self.checker, receiver_syntax);
+        let enclosing_block = resolve_enclosing_block(syntax, enclosing_fn);
+        let cfg_scope = Some(resolve_cfg_scope(syntax, enclosing_fn));
+        RawFieldEffect {
+            kind,
+            property_name,
+            operator,
+            syntax,
+            target_syntax,
+            receiver_syntax,
+            receiver_declaration,
+            value_syntax,
+            value_text,
+            location,
+            via_call,
+            enclosing_fn: Some(enclosing_fn),
+            enclosing_block,
+            cfg_scope,
+            guards: collect_structural_guards(&self.cwd, syntax, enclosing_fn),
+            evidence,
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Dispatches between indirect helper parameter invocations and direct local callable invocations."
+    )]
+    fn record_callback_invocation(
+        &mut self,
+        call_node: P<Node>,
+        enclosing_fn: P<Node>,
+        call_stack: &[CallFrame],
+        callees: &[ResolvedCallable],
+        callback_param_idx: Option<usize>,
+        call_loc: Option<&SourceLocation>,
+        chain_evidence: &[EvidenceItem],
+        out: &mut CollectedCallEffects,
+    ) {
+        let Some(loc) = call_loc else {
+            return;
+        };
+
+        if let Some(param_idx) = callback_param_idx {
+            self.record_indirect_callback_invocation(
+                call_node,
+                enclosing_fn,
+                call_stack,
+                callees,
+                param_idx,
+                loc,
+                chain_evidence,
+                out,
+            );
+            return;
+        }
+
+        if callees.is_empty() {
+            self.record_direct_callback_invocation(
+                call_node,
+                enclosing_fn,
+                loc,
+                chain_evidence,
+                out,
+            );
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Records an indirect callback invocation through a helper parameter with outer call and helper provenance."
+    )]
+    fn record_indirect_callback_invocation(
+        &mut self,
+        call_node: P<Node>,
+        enclosing_fn: P<Node>,
+        call_stack: &[CallFrame],
+        callees: &[ResolvedCallable],
+        param_idx: usize,
+        loc: &SourceLocation,
+        chain_evidence: &[EvidenceItem],
+        out: &mut CollectedCallEffects,
+    ) {
+        let Some(frame) = call_stack
+            .iter()
+            .rfind(|f| f.callee_fn == Some(enclosing_fn))
+        else {
+            return;
+        };
+        let Some(&cb_arg) = frame.call_node.arguments().get(param_idx) else {
+            return;
+        };
+        let Some(outer_loc) = node_location_rel(&self.cwd, frame.call_node) else {
+            return;
+        };
+
+        let fn_name = enclosing_fn
+            .name()
+            .and_then(node_text)
+            .unwrap_or_else(|| "<helper>".to_string());
+        let arg_txt = node_text(cb_arg).unwrap_or_else(|| "callback".to_string());
+        let helper_decl = resolve_decl_for_fn(self.checker, enclosing_fn);
+        let helper_decl_loc = node_location_rel(&self.cwd, helper_decl.0)
+            .or_else(|| node_location_rel(&self.cwd, enclosing_fn));
+        let target_declaration = resolve_decl_for_expr(self.checker, cb_arg);
+        let resolved_targets = callees
+            .iter()
+            .map(|c| resolve_decl_for_fn(self.checker, c.fn_node))
+            .collect();
+        let outer_enclosing_fn = resolve_enclosing_function(frame.call_node);
+        let enclosing_block =
+            outer_enclosing_fn.and_then(|f| resolve_enclosing_block(frame.call_node, f));
+        let cfg_scope = outer_enclosing_fn.map(|f| resolve_cfg_scope(frame.call_node, f));
+
+        let mut cb_ev: Vec<EvidenceItem> = chain_evidence
+            .iter()
+            .filter(|item| {
+                item.at.as_ref().is_none_or(|a| {
+                    a.file != outer_loc.file || a.start != outer_loc.start || a.end != outer_loc.end
+                })
+            })
+            .cloned()
+            .collect();
+        cb_ev.push(EvidenceItem::simple(
+            "source",
+            format!("Passed callback argument '{arg_txt}' to helper '{fn_name}'"),
+            Some(outer_loc.clone()),
+        ));
+        if let Some(h_loc) = helper_decl_loc {
+            cb_ev.push(EvidenceItem::simple(
+                "source",
+                format!("Helper '{fn_name}' accepts callback parameter #{param_idx}"),
+                Some(h_loc),
+            ));
+        }
+        cb_ev.push(EvidenceItem::simple(
+            "source",
+            format!("Helper '{fn_name}' invokes callback parameter #{param_idx} ('{arg_txt}')"),
+            Some(loc.clone()),
+        ));
+
+        out.callback_invocations.push(RawCallbackInvocation {
+            kind: "indirect",
+            call_node,
+            outer_call: frame.call_node,
+            callback_argument: cb_arg,
+            parameter_index: Some(param_idx),
+            target_declaration,
+            helper_declaration: Some(helper_decl),
+            resolved_targets,
+            enclosing_function: outer_enclosing_fn,
+            enclosing_block,
+            cfg_scope,
+            location: loc.clone(),
+            outer_call_location: outer_loc,
+            evidence: cb_ev,
+        });
+    }
+
+    fn record_direct_callback_invocation(
+        &mut self,
+        call_node: P<Node>,
+        enclosing_fn: P<Node>,
+        loc: &SourceLocation,
+        chain_evidence: &[EvidenceItem],
+        out: &mut CollectedCallEffects,
+    ) {
+        let Some(callee_expr) = call_node.expression() else {
+            return;
+        };
+        let Some((decl, sym_opt)) = resolve_decl_for_expr(self.checker, callee_expr) else {
+            return;
+        };
+        if is_external_declaration(self.program, decl)
+            || !matches!(
+                decl.kind(),
+                Kind::VariableDeclaration
+                    | Kind::Parameter
+                    | Kind::BindingElement
+                    | Kind::PropertyDeclaration
+                    | Kind::PropertySignature
+            )
+        {
+            return;
+        }
+
+        let arg_txt = node_text(callee_expr).unwrap_or_else(|| "callback".to_string());
+        let mut cb_ev = chain_evidence.to_vec();
+        cb_ev.push(EvidenceItem::simple(
+            "source",
+            format!("Direct invocation of callable '{arg_txt}'"),
+            Some(loc.clone()),
+        ));
+        let enclosing_block = resolve_enclosing_block(call_node, enclosing_fn);
+        let cfg_scope = Some(resolve_cfg_scope(call_node, enclosing_fn));
+        out.callback_invocations.push(RawCallbackInvocation {
+            kind: "direct",
+            call_node,
+            outer_call: call_node,
+            callback_argument: callee_expr,
+            parameter_index: None,
+            target_declaration: Some((decl, sym_opt)),
+            helper_declaration: None,
+            resolved_targets: Vec::new(),
+            enclosing_function: Some(enclosing_fn),
+            enclosing_block,
+            cfg_scope,
+            location: loc.clone(),
+            outer_call_location: loc.clone(),
+            evidence: cb_ev,
+        });
+    }
+}
+
+type DeclTarget = (P<Node>, Option<P<Symbol>>);
+
+fn resolve_decl_for_expr(checker: &mut CheckerHandle, expr: P<Node>) -> Option<DeclTarget> {
+    let unwrapped = unwrap_expr_wrappers(expr);
+    if let Some(sym) = canonical_symbol_for_node(checker, unwrapped)
+        && let Some(decl) = pick_preferred_impl_decl(sym, None)
+    {
+        return Some((decl, Some(sym)));
+    }
+    if is_function_like_declaration(Some(unwrapped)) {
+        return Some((unwrapped, unwrapped.symbol()));
+    }
+    None
+}
+
+fn resolve_decl_for_fn(checker: &mut CheckerHandle, fn_node: P<Node>) -> DeclTarget {
+    if matches!(
+        fn_node.kind(),
+        Kind::ArrowFunction | Kind::FunctionExpression
+    ) {
+        let mut cur = fn_node;
+        while let Some(parent) = cur.parent() {
+            if matches!(
+                parent.kind(),
+                Kind::ParenthesizedExpression
+                    | Kind::AsExpression
+                    | Kind::SatisfiesExpression
+                    | Kind::TypeAssertionExpression
+                    | Kind::NonNullExpression
+            ) {
+                cur = parent;
+                continue;
+            }
+            if matches!(
+                parent.kind(),
+                Kind::VariableDeclaration | Kind::PropertyAssignment | Kind::PropertyDeclaration
+            ) && let Some(sym) = canonical_symbol_for_node(checker, parent)
+            {
+                return (parent, Some(sym));
+            }
+            break;
+        }
+    }
+    if let Some(sym) = canonical_symbol_for_node(checker, fn_node) {
+        let decl = pick_preferred_impl_decl(sym, None).unwrap_or(fn_node);
+        return (decl, Some(sym));
+    }
+    (fn_node, fn_node.symbol())
+}
+
+fn resolve_enclosing_block(node: P<Node>, enclosing_fn: P<Node>) -> Option<P<Node>> {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        if parent.kind() == Kind::Block {
+            return Some(parent);
+        }
+        if parent == enclosing_fn {
+            break;
+        }
+        cur = parent;
+    }
+    None
+}
+
+fn resolve_cfg_scope(node: P<Node>, enclosing_fn: P<Node>) -> P<Node> {
+    let mut cur = node;
+    let mut highest_clean_block: Option<P<Node>> = None;
+    while let Some(parent) = cur.parent() {
+        if matches!(
+            parent.kind(),
+            Kind::ForStatement
+                | Kind::ForInStatement
+                | Kind::ForOfStatement
+                | Kind::WhileStatement
+                | Kind::DoStatement
+                | Kind::TryStatement
+                | Kind::LabeledStatement
+        ) {
+            return highest_clean_block.unwrap_or(enclosing_fn);
+        }
+        if parent == enclosing_fn {
+            return enclosing_fn;
+        }
+        if parent.kind() == Kind::Block {
+            highest_clean_block = Some(parent);
+        }
+        cur = parent;
+    }
+    enclosing_fn
 }
 
 #[derive(Clone, Copy)]
@@ -1909,21 +2221,32 @@ struct RawFieldEffect {
     syntax: P<Node>,
     target_syntax: P<Node>,
     receiver_syntax: P<Node>,
+    receiver_declaration: Option<DeclTarget>,
     value_syntax: Option<P<Node>>,
     value_text: Option<String>,
     location: SourceLocation,
     via_call: Option<P<Node>>,
     enclosing_fn: Option<P<Node>>,
+    enclosing_block: Option<P<Node>>,
+    cfg_scope: Option<P<Node>>,
     guards: Vec<RawGuardCondition>,
     evidence: Vec<EvidenceItem>,
 }
 
 struct RawCallbackInvocation {
+    kind: &'static str,
     call_node: P<Node>,
+    outer_call: P<Node>,
     callback_argument: P<Node>,
-    parameter_index: usize,
-    resolved_targets: Vec<P<Node>>,
+    parameter_index: Option<usize>,
+    target_declaration: Option<DeclTarget>,
+    helper_declaration: Option<DeclTarget>,
+    resolved_targets: Vec<DeclTarget>,
+    enclosing_function: Option<P<Node>>,
+    enclosing_block: Option<P<Node>>,
+    cfg_scope: Option<P<Node>>,
     location: SourceLocation,
+    outer_call_location: SourceLocation,
     evidence: Vec<EvidenceItem>,
 }
 
@@ -2054,6 +2377,9 @@ fn alloc_field_effect_payload(
     let syntax = snapshot.alloc_syntax(project_id, raw.syntax);
     let target_syntax = snapshot.alloc_syntax(project_id, raw.target_syntax);
     let receiver_syntax = snapshot.alloc_syntax(project_id, raw.receiver_syntax);
+    let receiver_declaration = raw
+        .receiver_declaration
+        .map(|(node, sym)| snapshot.alloc_declaration(project_id, node, sym));
     let value_syntax = raw
         .value_syntax
         .map(|v| snapshot.alloc_syntax(project_id, v));
@@ -2061,6 +2387,10 @@ fn alloc_field_effect_payload(
     let enclosing_function = raw
         .enclosing_fn
         .map(|f| snapshot.alloc_syntax(project_id, f));
+    let enclosing_block = raw
+        .enclosing_block
+        .map(|b| snapshot.alloc_syntax(project_id, b));
+    let cfg_scope = raw.cfg_scope.map(|s| snapshot.alloc_syntax(project_id, s));
     let guards = raw
         .guards
         .iter()
@@ -2080,11 +2410,14 @@ fn alloc_field_effect_payload(
         syntax,
         target_syntax,
         receiver_syntax,
+        receiver_declaration,
         value_syntax,
         value_text: raw.value_text.clone(),
         location: raw.location.clone(),
         via_call,
         enclosing_function,
+        enclosing_block,
+        cfg_scope,
         guards,
         evidence: raw.evidence.clone(),
     }
@@ -2532,20 +2865,42 @@ fn build_call_effects_rows(
                     push_unique_evidence(&mut combined_evidence, ev.clone());
                 }
                 let call = snapshot.alloc_call(project_id, cb.call_node);
+                let outer_call = snapshot.alloc_call(project_id, cb.outer_call);
                 let syntax = snapshot.alloc_syntax(project_id, cb.call_node);
                 let callback_argument = snapshot.alloc_syntax(project_id, cb.callback_argument);
+                let target_declaration = cb
+                    .target_declaration
+                    .map(|(node, sym)| snapshot.alloc_declaration(project_id, node, sym));
+                let helper_declaration = cb
+                    .helper_declaration
+                    .map(|(node, sym)| snapshot.alloc_declaration(project_id, node, sym));
                 let resolved_targets = cb
                     .resolved_targets
                     .into_iter()
-                    .map(|t| snapshot.alloc_declaration(project_id, t, None))
+                    .map(|(t, sym)| snapshot.alloc_declaration(project_id, t, sym))
                     .collect();
+                let enclosing_function = cb
+                    .enclosing_function
+                    .map(|f| snapshot.alloc_syntax(project_id, f));
+                let enclosing_block = cb
+                    .enclosing_block
+                    .map(|b| snapshot.alloc_syntax(project_id, b));
+                let cfg_scope = cb.cfg_scope.map(|s| snapshot.alloc_syntax(project_id, s));
                 CallbackInvocationPayload {
+                    kind: cb.kind,
                     call,
+                    outer_call,
                     syntax,
                     callback_argument,
                     parameter_index: cb.parameter_index,
+                    target_declaration,
+                    helper_declaration,
                     resolved_targets,
+                    enclosing_function,
+                    enclosing_block,
+                    cfg_scope,
                     location: cb.location,
+                    outer_call_location: cb.outer_call_location,
                     evidence: cb.evidence,
                 }
             })

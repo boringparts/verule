@@ -8,7 +8,7 @@ import {
   defineReentrantQueueModel,
   reentrantQueueFlagRule,
 } from "@verule/rules-reference";
-import { defineConfig, runCheck } from "@verule/sdk";
+import { defineConfig, openSession, runCheck } from "@verule/sdk";
 
 const schedulerQueueModel = defineReentrantQueueModel({
   id: "test-scheduler-queue",
@@ -175,62 +175,166 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
       );
 
       const directDiag = buggyReport.diagnostics[0]!;
+      assert.ok(directDiag.message.includes("directly"));
       assert.ok(
         directDiag.evidence.some(
-          (e) => e.message.includes("enqueue-sets-queued") && e.at?.line === 23,
+          (e) => e.kind === "model" && e.modelId === "test-scheduler-queue",
         ),
+        JSON.stringify(directDiag.evidence),
       );
       assert.ok(
         directDiag.evidence.some(
           (e) =>
-            e.message.includes("pre-call-allow-recurse-preclear") &&
-            e.at?.line === 35,
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 23 &&
+            e.message.includes("|="),
         ),
+        JSON.stringify(directDiag.evidence),
       );
       assert.ok(
         directDiag.evidence.some(
           (e) =>
-            e.message.includes("direct-callback-call") && e.at?.line === 37,
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 29,
         ),
+        JSON.stringify(directDiag.evidence),
       );
       assert.ok(
         directDiag.evidence.some(
           (e) =>
-            e.message.includes("unguarded-post-callback-clear") &&
-            e.at?.line === 38,
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 35,
         ),
+        JSON.stringify(directDiag.evidence),
+      );
+      assert.ok(
+        directDiag.evidence.some(
+          (e) =>
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 37 &&
+            e.message.includes("Direct invocation"),
+        ),
+        JSON.stringify(directDiag.evidence),
+      );
+      assert.ok(
+        directDiag.evidence.some(
+          (e) =>
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 38 &&
+            e.message.includes("&="),
+        ),
+        JSON.stringify(directDiag.evidence),
+      );
+      assert.equal(
+        directDiag.evidence.some(
+          (e) =>
+            e.at?.file === "src/customScheduler.ts" &&
+            (e.at.line === 52 || e.at.line === 73),
+        ),
+        false,
+        `Unrelated post-flush or finally clear leaked: ${JSON.stringify(directDiag.evidence)}`,
       );
 
       const indirectDiag = buggyReport.diagnostics[1]!;
       assert.ok(
+        indirectDiag.message.includes("indirectly via helper callback"),
+      );
+      assert.ok(
         indirectDiag.evidence.some(
-          (e) =>
-            e.message.includes("indirect-callback-call") && e.at?.line === 65,
+          (e) => e.kind === "model" && e.modelId === "test-scheduler-queue",
         ),
+        JSON.stringify(indirectDiag.evidence),
       );
       assert.ok(
         indirectDiag.evidence.some(
           (e) =>
-            e.message.includes("callback-helper-declaration") &&
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 65 &&
+            e.message.includes("invokeSafely"),
+        ),
+        JSON.stringify(indirectDiag.evidence),
+      );
+      assert.ok(
+        indirectDiag.evidence.some(
+          (e) =>
+            e.kind === "source" &&
             e.at?.file === "src/customHandling.ts" &&
-            e.at?.line === 1,
+            e.at.line === 1 &&
+            e.message.includes("invokeSafely"),
         ),
+        JSON.stringify(indirectDiag.evidence),
       );
       assert.ok(
         indirectDiag.evidence.some(
           (e) =>
-            e.message.includes("helper-invokes-param") &&
+            e.kind === "source" &&
             e.at?.file === "src/customHandling.ts" &&
-            e.at?.line === 3,
+            e.at.line === 3 &&
+            e.message.includes("invokes callback parameter"),
         ),
+        JSON.stringify(indirectDiag.evidence),
       );
       assert.ok(
         indirectDiag.evidence.some(
           (e) =>
-            e.message.includes("unguarded-post-callback-clear") &&
-            e.at?.line === 66,
+            e.kind === "source" &&
+            e.at?.file === "src/customScheduler.ts" &&
+            e.at.line === 66 &&
+            e.message.includes("&="),
         ),
+        JSON.stringify(indirectDiag.evidence),
       );
+
+      // Targeted explain across reported, finally-excluded, and secondary-queue-excluded sites
+      const buggySession = await openSession({
+        cwd: buggyRoot,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          models: [schedulerQueueModel],
+          rules: [reentrantQueueFlagRule],
+        }),
+      });
+      try {
+        const reportedExplain = await buggySession.explain({
+          ruleId: "reentrant-queue-flag",
+          at: { file: "src/customScheduler.ts", line: 38 },
+        });
+        assert.equal(reportedExplain.explanation?.status, "reported");
+
+        const finallyExplain = await buggySession.explain({
+          ruleId: "reentrant-queue-flag",
+          at: { file: "src/customScheduler.ts", line: 73 },
+        });
+        assert.equal(
+          finallyExplain.explanation?.status,
+          "excluded_by_checkpoint",
+        );
+        assert.equal(
+          finallyExplain.explanation?.excludedByCheckpoint?.name,
+          "post-callback-clear-filter",
+        );
+
+        const otherQueueExplain = await buggySession.explain({
+          ruleId: "reentrant-queue-flag",
+          at: { file: "src/customScheduler.ts", line: 52 },
+        });
+        assert.equal(
+          otherQueueExplain.explanation?.status,
+          "excluded_by_checkpoint",
+        );
+        assert.equal(
+          otherQueueExplain.explanation?.excludedByCheckpoint?.name,
+          "queue-scope-filter",
+        );
+      } finally {
+        await buggySession.close();
+      }
     } finally {
       rmSync(buggyRoot, { recursive: true, force: true });
     }
@@ -268,6 +372,31 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
 
       assert.equal(fixedReport.status, "clean");
       assert.equal(fixedReport.diagnostics.length, 0);
+
+      const fixedSession = await openSession({
+        cwd: fixedRoot,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          models: [schedulerQueueModel],
+          rules: [reentrantQueueFlagRule],
+        }),
+      });
+      try {
+        const guardedExplain = await fixedSession.explain({
+          ruleId: "reentrant-queue-flag",
+          at: { file: "src/customScheduler.ts", line: 39 },
+        });
+        assert.equal(
+          guardedExplain.explanation?.status,
+          "excluded_by_checkpoint",
+        );
+        assert.equal(
+          guardedExplain.explanation?.excludedByCheckpoint?.name,
+          "branch-guard-coverage",
+        );
+      } finally {
+        await fixedSession.close();
+      }
     } finally {
       rmSync(fixedRoot, { recursive: true, force: true });
     }

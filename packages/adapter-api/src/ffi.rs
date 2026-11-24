@@ -114,6 +114,7 @@ pub struct FfiRequest {
     pub variables: FfiNodeList,
     pub targets: FfiNodeList,
     pub has_targets: bool,
+    pub explain: bool,
 }
 
 #[repr(C)]
@@ -246,9 +247,18 @@ unsafe fn invoke_adapter_inner<A: Adapter>(
         calls,
         variables,
         targets,
+        explain: wire.explain,
     };
-    let adapter = A::default();
-    let contributions = adapter.extract(&context, &request)?;
+    let contributions = A::default().extract(&context, &request)?;
+    finish_adapter_output(host, &manifest.id, &context, contributions)
+}
+
+fn finish_adapter_output(
+    host: &FfiHostApi,
+    adapter_id: &str,
+    context: &Context<'_>,
+    contributions: Vec<crate::FactContribution<'_>>,
+) -> Result<(), AdapterError> {
     let mut output_contributions = Vec::with_capacity(contributions.len());
     for contribution in contributions {
         output_contributions.push(NativeContribution {
@@ -257,14 +267,15 @@ unsafe fn invoke_adapter_inner<A: Adapter>(
             value: contribution.value,
             evidence: contribution.evidence,
             gaps: contribution.gaps,
+            explain_trace: contribution.explain_trace,
         });
     }
     let additional_inputs: Vec<String> =
-        context.additional_inputs.into_inner().into_iter().collect();
+        context.additional_inputs.borrow().iter().cloned().collect();
     let adapter_inputs = additional_inputs
         .iter()
         .map(|path| NativeAdapterInputAttribution {
-            adapter_id: manifest.id.clone(),
+            adapter_id: adapter_id.to_string(),
             path: path.clone(),
         })
         .collect();

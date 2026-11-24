@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { runCli } from "../../src/main.ts";
+import { checkReportSchema } from "../../src/report-wire.ts";
 
 const identity = { commandName: "verule", version: "0.0.0" };
 const cliRequire = createRequire(import.meta.url);
@@ -568,6 +569,179 @@ void test("verule check merges complementary partial facts identically and exits
     assert.match(conflictTextAC.stderr, /provider-c/u);
     assert.match(conflictTextAC.stderr, /provider-a id=required/u);
     assert.match(conflictTextAC.stderr, /provider-c id=optional/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+void test("verule check --at surfaces blocked_by_gap, localGaps (unresolved and resolved_by_override), and skipped providers in JSON and text output", async () => {
+  const root = createTempHostProject({
+    "src/source.ts": [
+      "export function defineSpec(name: string, fields: Record<string, string>) {",
+      "  return { name, fields };",
+      "}",
+      "declare function dynamicSpec(): string;",
+      'export const orderSpec = defineSpec("order", {',
+      '  orderId: "required",',
+      "  couponCode: dynamicSpec(),",
+      "});",
+      "",
+    ].join("\n"),
+    "src/consumer.ts": [
+      'import { orderSpec } from "./source.js";',
+      "export function useSpec(spec: unknown, overrides?: Record<string, string>) {",
+      "  return { spec, overrides };",
+      "}",
+      "export const rawConsumer = useSpec(orderSpec);",
+      'export const overriddenConsumer = useSpec(orderSpec, { couponCode: "defaulted" });',
+      "",
+    ].join("\n"),
+    "verule.local-gaps.config.mjs": [
+      'import { defineAdapter, defineConfig, defineFactProvider, defineFactType, defineRule } from "@verule/sdk";',
+      'const SourceFact = defineFactType({ id: "cli.explain.source", subjectKind: "syntax" });',
+      'const ConsumerFact = defineFactType({ id: "cli.explain.consumer", subjectKind: "syntax" });',
+      'const UnusedFact = defineFactType({ id: "cli.explain.unused", subjectKind: "syntax" });',
+      "const adapterA = defineAdapter({",
+      '  id: "cli-adapter-a",',
+      "  provides: [",
+      "    defineFactProvider(SourceFact, async (ctx, req) => {",
+      '      const calls = await ctx.findSyntax({ files: ["src/source.ts"], kinds: ["CallExpression"] });',
+      '      const spec = calls.find((c) => c.text.startsWith("defineSpec("));',
+      '      const dyn = calls.find((c) => c.text.startsWith("dynamicSpec("));',
+      "      if (!spec || !dyn) return [];",
+      '      const gap = { kind: "unresolved-field", message: "Field couponCode is dynamic.", at: dyn.location };',
+      "      return [{",
+      "        subject: spec.ref,",
+      '        value: { fields: { orderId: "required" }, unknownFields: ["couponCode"] },',
+      "        gaps: [gap],",
+      "        ...(req.explain ? { explainTrace: { localGaps: [{",
+      '          status: "unresolved",',
+      "          factTypeId: SourceFact.id,",
+      '          providerId: "cli-adapter-a",',
+      '          field: "couponCode",',
+      "          gap,",
+      "          subjectLocation: spec.location,",
+      "        }] } } : {}),",
+      "      }];",
+      "    }),",
+      "  ],",
+      "});",
+      "const adapterB = defineAdapter({",
+      '  id: "cli-adapter-b",',
+      "  provides: [",
+      "    defineFactProvider(ConsumerFact, async (ctx, req) => {",
+      '      const srcCalls = await ctx.findSyntax({ files: ["src/source.ts"], kinds: ["CallExpression"] });',
+      '      const srcTarget = srcCalls.find((c) => c.text.startsWith("defineSpec("));',
+      "      if (!srcTarget) return [];",
+      "      const srcFacts = await ctx.facts(SourceFact, { targets: [srcTarget.ref] });",
+      "      const factA = srcFacts[0];",
+      "      if (!factA) return [];",
+      '      const calls = await ctx.findSyntax({ files: ["src/consumer.ts"], kinds: ["CallExpression"] });',
+      "      return calls",
+      '        .filter((c) => c.text.startsWith("useSpec("))',
+      "        .map((call) => {",
+      '          const isOverridden = call.text.includes("defaulted");',
+      "          const initialGap = factA.gaps[0];",
+      "          return {",
+      "            subject: call.ref,",
+      "            value: {",
+      "              consumerName: isOverridden ? 'overridden' : 'raw',",
+      "              fields: isOverridden ? { orderId: 'required', couponCode: 'defaulted' } : { orderId: 'required' },",
+      "              unknownFields: isOverridden ? [] : ['couponCode'],",
+      "            },",
+      "            evidence: [{ kind: 'source', message: 'derived', at: call.location }],",
+      "            gaps: isOverridden ? [] : factA.gaps,",
+      "            ...(req.explain && initialGap ? { explainTrace: { localGaps: [{",
+      "              status: isOverridden ? 'resolved_by_override' : 'unresolved',",
+      "              factTypeId: SourceFact.id,",
+      "              providerId: 'cli-adapter-a',",
+      "              field: 'couponCode',",
+      "              gap: initialGap,",
+      "              subjectLocation: call.location,",
+      "              ...(isOverridden ? { resolvedBy: { providerId: 'cli-adapter-b', operation: 'override', conclusion: 'couponCode=defaulted', at: call.location } } : {}),",
+      "            }] } } : {}),",
+      "          };",
+      "        });",
+      "    }),",
+      "  ],",
+      "});",
+      "const unusedAdapter = defineAdapter({",
+      '  id: "cli-adapter-unused",',
+      "  provides: [defineFactProvider(UnusedFact, () => [])],",
+      "});",
+      "const couponRule = defineRule({",
+      '  id: "cli-coupon-rule",',
+      "  run: async (ctx) => {",
+      "    const facts = await ctx.facts(ConsumerFact);",
+      "    for (const fact of facts) {",
+      '      if (fact.value.unknownFields.includes("couponCode")) continue;',
+      '      if (fact.value.fields.couponCode === "defaulted") {',
+      "        ctx.report({ at: fact.evidence[0].at, message: 'coupon defaulted', basis: [fact] });",
+      "      }",
+      "    }",
+      "  },",
+      "});",
+      "export default defineConfig({",
+      '  tsconfig: "tsconfig.json",',
+      "  adapters: [adapterA, adapterB, unusedAdapter],",
+      "  rules: [couponRule],",
+      "});",
+      "",
+    ].join("\n"),
+  });
+
+  try {
+    const blockedJson = await captureCli(
+      [
+        "check",
+        "--config",
+        "verule.local-gaps.config.mjs",
+        "--at",
+        "src/consumer.ts:5:28",
+        "--output",
+        "json",
+      ],
+      root,
+    );
+    assert.equal(blockedJson.status, 1, blockedJson.stderr);
+    const blockedParsed = checkReportSchema.parse(
+      (JSON.parse(blockedJson.stdout) as { readonly data: unknown }).data,
+    );
+    assert.equal(blockedParsed.gaps.length, 1);
+    assert.equal(blockedParsed.explanation?.status, "blocked_by_gap");
+    assert.equal(blockedParsed.explanation?.gaps.length, 1);
+    assert.equal(blockedParsed.explanation?.localGaps[0]?.status, "unresolved");
+    assert.equal(blockedParsed.explanation?.localGaps[0]?.field, "couponCode");
+    assert.ok(
+      blockedParsed.explanation?.providerEvaluations.some(
+        (ev) =>
+          ev.providerId === "cli-adapter-unused" && ev.status === "skipped",
+      ),
+    );
+
+    const overriddenText = await captureCli(
+      [
+        "check",
+        "--config",
+        "verule.local-gaps.config.mjs",
+        "--at",
+        "src/consumer.ts:6:35",
+      ],
+      root,
+    );
+    assert.equal(overriddenText.status, 1, overriddenText.stderr);
+    assert.match(
+      overriddenText.stdout,
+      /localGap \[resolved_by_override\] cli\.explain\.source \(cli-adapter-a\) field=couponCode/u,
+    );
+    assert.match(
+      overriddenText.stdout,
+      /resolved_by cli-adapter-b \(override: couponCode=defaulted/u,
+    );
+    assert.match(
+      overriddenText.stdout,
+      /provider \[skipped\] cli-adapter-unused/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

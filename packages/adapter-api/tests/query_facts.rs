@@ -22,6 +22,7 @@ fn serializes_host_queried_facts_and_adapter_input_attributions() {
             at: None,
         }],
         providers: vec!["provider-a".to_string()],
+        explain_trace: None,
     };
     let encoded = serde_json::to_value(&queried).expect("serialize HostQueriedFact");
     assert_eq!(encoded["subjectNodeId"], json!(42));

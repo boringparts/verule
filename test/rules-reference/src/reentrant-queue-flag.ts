@@ -2,10 +2,8 @@ import {
   defineModel,
   defineRule,
   type BranchEdgeInfo,
-  type CallEffectsResult,
   type DeclarationRef,
-  type DiagnosticLocation,
-  type Evidence,
+  type DiagnosticBasis,
   type FieldEffect,
   type Model,
   type Rule,
@@ -49,60 +47,16 @@ type ResolvedContract = ReentrantQueueContract & {
   readonly modelId: string;
 };
 
-type LocationKey = string;
-
 type QueueEnqueueState = {
-  readonly queueDeclKeys: ReadonlySet<LocationKey>;
-  readonly enqueueEvidence: readonly Evidence[];
-};
-
-type CallbackInvocationMatch = {
-  readonly kind: "direct" | "indirect";
-  readonly itemDeclKey: LocationKey;
-  readonly callLocation: DiagnosticLocation;
-  readonly helperDeclLocation?: DiagnosticLocation;
-  readonly helperInvokeLocation?: DiagnosticLocation;
-  readonly evidence: readonly Evidence[];
+  readonly queueDeclIds: ReadonlySet<string>;
+  readonly enqueueWrites: readonly FieldEffect[];
 };
 
 type FlagClearCandidate = {
   readonly write: FieldEffect;
-  readonly itemDeclKey: LocationKey;
-  readonly itemDeclLocation: DiagnosticLocation;
-  readonly queueReadLocation: DiagnosticLocation;
+  readonly receiverDeclId: string;
+  readonly queueReadBasis: DiagnosticBasis | null;
 };
-
-function locationKey(loc: DiagnosticLocation): LocationKey {
-  return `${loc.file}:${loc.start}:${loc.end}`;
-}
-
-function insideSpan(
-  inner: DiagnosticLocation,
-  outer: DiagnosticLocation,
-): boolean {
-  return (
-    inner.file === outer.file &&
-    inner.start >= outer.start &&
-    inner.end <= outer.end
-  );
-}
-
-function spanLength(loc: DiagnosticLocation): number {
-  return loc.end - loc.start;
-}
-
-function dedupeEvidence(items: readonly Evidence[]): readonly Evidence[] {
-  const seen = new Set<string>();
-  const out: Evidence[] = [];
-  for (const item of items) {
-    const key = JSON.stringify(item);
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(item);
-    }
-  }
-  return out;
-}
 
 function hasNonEmptyStringProperty(obj: object, key: string): boolean {
   if (!(key in obj)) return false;
@@ -137,54 +91,24 @@ function extractContracts(
     for (const item of raw) {
       if (!isReentrantQueueContract(item)) continue;
       const contractId = item.id ?? item.queueName;
-      const dedupeKey = `${model.id}:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
-      if (!seen.has(dedupeKey)) {
-        seen.add(dedupeKey);
-        out.push({
-          ...item,
-          contractId,
-          modelId: model.id,
-        });
+      const key = `${model.id}:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ ...item, contractId, modelId: model.id });
       }
     }
   }
 
-  if (optionContracts !== undefined) {
-    for (const item of optionContracts) {
-      const contractId = item.id ?? item.queueName;
-      const dedupeKey = `rule-options:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
-      if (!seen.has(dedupeKey)) {
-        seen.add(dedupeKey);
-        out.push({
-          ...item,
-          contractId,
-          modelId: "rule-options",
-        });
-      }
+  for (const item of optionContracts ?? []) {
+    const contractId = item.id ?? item.queueName;
+    const key = `rule-options:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push({ ...item, contractId, modelId: "rule-options" });
     }
   }
 
   return out;
-}
-
-function extractDeclaredFunctionName(fn: SyntaxNodeResult): string | null {
-  const match =
-    /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/u.exec(
-      fn.text.trimStart(),
-    );
-  return match?.[1] ?? null;
-}
-
-function matchesFlagClearSyntax(
-  text: string,
-  contract: ResolvedContract,
-): boolean {
-  return (
-    text.includes(`.${contract.flagProperty}`) &&
-    text.includes("&=") &&
-    text.includes("~") &&
-    text.includes(contract.queuedFlagName)
-  );
 }
 
 function isQueuedClearWrite(
@@ -215,38 +139,69 @@ function isPostCallbackReentrantGuardBranch(
   invocationEnd: number,
   contract: ResolvedContract,
 ): boolean {
-  if (branch.location.start < invocationEnd) {
-    return false;
-  }
   if (
+    branch.location.start < invocationEnd ||
     !branch.conditionText.includes(contract.reentrantFlagName) ||
     !branch.conditionText.includes(contract.flagProperty)
   ) {
     return false;
   }
-
-  const trimmed = branch.conditionText.trimStart();
-  const isNegated = trimmed.startsWith("!");
+  const isNegated = branch.conditionText.trimStart().startsWith("!");
   return (
     (isNegated && branch.direction === "true") ||
     (!isNegated && branch.direction === "false")
   );
 }
 
+async function resolveQueueDeclsInFunction(
+  ctx: RuleContext,
+  fn: SyntaxNodeResult,
+  queueIdentifier: string,
+): Promise<{
+  readonly queueIds: readonly SyntaxNodeResult[];
+  readonly resolvedDecls: readonly (DeclarationRef | null)[];
+}> {
+  const idsInFn = await ctx.findSyntax({
+    kinds: ["Identifier"],
+    range: {
+      file: fn.location.file,
+      start: fn.location.start,
+      end: fn.location.end,
+      match: "within",
+    },
+    textIncludes: [queueIdentifier],
+  });
+  const queueIds = idsInFn.filter((id) => id.text === queueIdentifier);
+  if (queueIds.length === 0) {
+    return { queueIds: [], resolvedDecls: [] };
+  }
+  const rows = await ctx.resolveDeclarations(queueIds.map((id) => id.ref));
+  return {
+    queueIds,
+    resolvedDecls: rows.map((row) => row.declaration),
+  };
+}
+
 async function resolveEnqueueState(
   ctx: RuleContext,
   contract: ResolvedContract,
 ): Promise<QueueEnqueueState | null> {
-  const fnDecls = await ctx.findSyntax({ kinds: ["FunctionDeclaration"] });
+  const fnDecls = await ctx.findSyntax({
+    kinds: ["FunctionDeclaration"],
+    textIncludes: [contract.enqueueFunctionName],
+  });
+  if (fnDecls.length === 0) return null;
+
+  const declRows = await ctx.resolveDeclarations(
+    fnDecls.map((fn) => fn.ref),
+    { select: { name: true } },
+  );
   const enqueueFns = fnDecls.filter(
-    (fn) =>
-      extractDeclaredFunctionName(fn) === contract.enqueueFunctionName &&
+    (fn, idx) =>
+      declRows[idx]?.name === contract.enqueueFunctionName &&
       fn.text.includes(contract.queuedFlagName),
   );
-
-  if (enqueueFns.length === 0) {
-    return null;
-  }
+  if (enqueueFns.length === 0) return null;
 
   const enqueueEffects = await ctx.callEffects({
     targets: enqueueFns.map((fn) => fn.ref),
@@ -255,12 +210,13 @@ async function resolveEnqueueState(
     includeWrites: true,
   });
 
-  const queueDeclKeys = new Set<LocationKey>();
-  const enqueueEvidence: Evidence[] = [];
+  const queueDeclIds = new Set<string>();
+  const enqueueWrites: FieldEffect[] = [];
 
   for (const [index, fn] of enqueueFns.entries()) {
-    const eff = enqueueEffects[index]!;
-    const setWrite = eff.fieldWrites.find((w) => isQueuedSetWrite(w, contract));
+    const setWrite = enqueueEffects[index]?.fieldWrites.find((w) =>
+      isQueuedSetWrite(w, contract),
+    );
     if (!setWrite) continue;
 
     ctx.checkpoint("enqueue-contract", fn.ref, "pass", () => ({
@@ -268,146 +224,117 @@ async function resolveEnqueueState(
       enqueueFunction: contract.enqueueFunctionName,
       setWrite: setWrite.location,
     }));
+    enqueueWrites.push(setWrite);
 
-    enqueueEvidence.push({
-      kind: "source",
-      message: `enqueue-sets-queued: '${contract.enqueueFunctionName}' marks '.${contract.flagProperty}' with '${contract.queuedFlagName}' before queuing.`,
-      at: setWrite.location,
-    });
-
-    const idsInFn = await ctx.findSyntax({
-      kinds: ["Identifier"],
-      range: {
-        file: fn.location.file,
-        start: fn.location.start,
-        end: fn.location.end,
-        match: "within",
-      },
-    });
-    const queueIds = idsInFn.filter(
-      (id) => id.text === contract.queueIdentifier,
+    const { resolvedDecls } = await resolveQueueDeclsInFunction(
+      ctx,
+      fn,
+      contract.queueIdentifier,
     );
-    if (queueIds.length > 0) {
-      const resolved = await ctx.resolveDeclarations(
-        queueIds.map((id) => id.ref),
-        { select: { location: true } },
+    for (const decl of resolvedDecls) {
+      if (decl !== null) {
+        queueDeclIds.add(decl.handleId);
+      }
+    }
+  }
+
+  return queueDeclIds.size > 0 ? { queueDeclIds, enqueueWrites } : null;
+}
+
+async function resolveQueueItemCandidates(
+  ctx: RuleContext,
+  writes: readonly FieldEffect[],
+  queueDeclIds: ReadonlySet<string>,
+  trackedQueueReads: readonly SyntaxRef[],
+): Promise<readonly FlagClearCandidate[]> {
+  const uniqueDecls = new Map<string, DeclarationRef>();
+  for (const write of writes) {
+    if (write.receiverDeclaration !== null) {
+      uniqueDecls.set(
+        write.receiverDeclaration.handleId,
+        write.receiverDeclaration,
       );
-      for (const row of resolved) {
-        if (row.location !== null) {
-          queueDeclKeys.add(locationKey(row.location));
+    }
+  }
+  if (uniqueDecls.size === 0) return [];
+
+  const declList = [...uniqueDecls.values()];
+  const declSyntaxRows = await ctx.syntaxOf(declList, {
+    select: { location: true, initializer: true },
+  });
+  const initRows = declSyntaxRows
+    .map((row, idx) => ({
+      declId: declList[idx]!.handleId,
+      row,
+      initializer: row.initializer ?? null,
+    }))
+    .filter(
+      (
+        entry,
+      ): entry is {
+        readonly declId: string;
+        readonly row: (typeof declSyntaxRows)[number];
+        readonly initializer: SyntaxRef;
+      } => entry.initializer !== null,
+    );
+
+  const directReadBasisByDecl = new Map<string, DiagnosticBasis>();
+  if (initRows.length > 0) {
+    const exprRows = await ctx.syntaxOf(
+      initRows.map((e) => e.initializer),
+      { select: { expression: true } },
+    );
+    const exprTargets = exprRows
+      .map((r, idx) => ({
+        declId: initRows[idx]!.declId,
+        row: initRows[idx]!.row,
+        expr: r.expression ?? null,
+      }))
+      .filter(
+        (
+          entry,
+        ): entry is {
+          readonly declId: string;
+          readonly row: (typeof declSyntaxRows)[number];
+          readonly expr: SyntaxRef;
+        } => entry.expr !== null,
+      );
+
+    if (exprTargets.length > 0) {
+      const resolvedExprs = await ctx.resolveDeclarations(
+        exprTargets.map((e) => e.expr),
+      );
+      for (const [idx, target] of exprTargets.entries()) {
+        const declId = resolvedExprs[idx]?.declaration?.handleId;
+        if (declId !== undefined && queueDeclIds.has(declId)) {
+          directReadBasisByDecl.set(target.declId, target.row);
         }
       }
     }
   }
 
-  if (queueDeclKeys.size === 0) {
-    return null;
-  }
-
-  return {
-    queueDeclKeys,
-    enqueueEvidence,
-  };
-}
-
-async function resolveQueueItemDeclarations(
-  ctx: RuleContext,
-  fn: SyntaxNodeResult,
-  writes: readonly FieldEffect[],
-  queueDeclKeys: ReadonlySet<LocationKey>,
-  contract: ResolvedContract,
-): Promise<readonly FlagClearCandidate[]> {
-  if (writes.length === 0) return [];
-
-  const resolvedRecvs = await ctx.resolveDeclarations(
-    writes.map((w) => w.receiverSyntax),
-    { select: { location: true } },
-  );
-
-  const varDeclsInFn = await ctx.findSyntax({
-    kinds: ["VariableDeclaration"],
-    range: {
-      file: fn.location.file,
-      start: fn.location.start,
-      end: fn.location.end,
-      match: "within",
-    },
-  });
-  const idsInFn = await ctx.findSyntax({
-    kinds: ["Identifier"],
-    range: {
-      file: fn.location.file,
-      start: fn.location.start,
-      end: fn.location.end,
-      match: "within",
-    },
-  });
-
-  const queueIdsInFn = idsInFn.filter(
-    (id) => id.text === contract.queueIdentifier,
-  );
-  const resolvedQueueIds =
-    queueIdsInFn.length > 0
-      ? await ctx.resolveDeclarations(
-          queueIdsInFn.map((id) => id.ref),
-          { select: { location: true } },
-        )
-      : [];
-
-  const trackedQueueReads: SyntaxNodeResult[] = [];
-  for (const [idx, idNode] of queueIdsInFn.entries()) {
-    const loc = resolvedQueueIds[idx]?.location;
-    if (
-      loc !== null &&
-      loc !== undefined &&
-      queueDeclKeys.has(locationKey(loc))
-    ) {
-      trackedQueueReads.push(idNode);
-    }
-  }
-
-  const varDeclByKey = new Map<LocationKey, SyntaxNodeResult>();
-  for (const decl of varDeclsInFn) {
-    varDeclByKey.set(locationKey(decl.location), decl);
-  }
-
   const candidates: FlagClearCandidate[] = [];
-  for (const [index, write] of writes.entries()) {
-    const declLoc = resolvedRecvs[index]?.location;
-    if (declLoc === null || declLoc === undefined) continue;
-    const itemDeclKey = locationKey(declLoc);
+  for (const write of writes) {
+    const receiverDeclId = write.receiverDeclaration?.handleId;
+    if (receiverDeclId === undefined) continue;
 
-    const varDecl = varDeclByKey.get(itemDeclKey);
-    const matchingQueueRead =
-      varDecl !== undefined
-        ? trackedQueueReads.find((qId) =>
-            insideSpan(qId.location, varDecl.location),
-          )
-        : undefined;
-
-    if (matchingQueueRead !== undefined && varDecl !== undefined) {
-      candidates.push({
-        write,
-        itemDeclKey,
-        itemDeclLocation: declLoc,
-        queueReadLocation: varDecl.location,
-      });
+    const directBasis = directReadBasisByDecl.get(receiverDeclId);
+    if (directBasis !== undefined) {
+      candidates.push({ write, receiverDeclId, queueReadBasis: directBasis });
       continue;
     }
 
-    // Fallback for aliased local variables propagated from a tracked queue element read.
     if (trackedQueueReads.length > 0) {
       const prop = await ctx.valuePropagation({
-        from: trackedQueueReads.map((q) => q.ref),
+        from: trackedQueueReads,
         to: [write.receiverSyntax],
       });
-      const firstPath = prop.results[0]?.paths[0];
-      if (prop.results[0]?.reachable && firstPath !== undefined) {
+      const targetResult = prop.results[0];
+      if (targetResult?.reachable && targetResult.paths.length > 0) {
         candidates.push({
           write,
-          itemDeclKey,
-          itemDeclLocation: declLoc,
-          queueReadLocation: declLoc,
+          receiverDeclId,
+          queueReadBasis: targetResult,
         });
       }
     }
@@ -416,186 +343,17 @@ async function resolveQueueItemDeclarations(
   return candidates;
 }
 
-async function collectItemCallbackInvocations(
-  ctx: RuleContext,
-  eff: CallEffectsResult,
-  targetItemKeys: ReadonlySet<LocationKey>,
-): Promise<readonly CallbackInvocationMatch[]> {
-  const matches: CallbackInvocationMatch[] = [];
-
-  if (eff.calls.length > 0) {
-    const projectedCalls = await ctx.projectCalls(eff.calls, {
-      select: {
-        location: true,
-        callee: true,
-        calleeDeclaration: true,
-        arguments: true,
-      },
-    });
-
-    const calleeTargets = projectedCalls
-      .map((c) => c.callee)
-      .filter((c): c is SyntaxRef => c !== null);
-    const calleeDecls =
-      calleeTargets.length > 0
-        ? await ctx.resolveDeclarations(calleeTargets, {
-            select: { location: true },
-          })
-        : [];
-
-    const calleeDeclBySyntax = new Map<SyntaxRef, DiagnosticLocation>();
-    for (const [idx, target] of calleeTargets.entries()) {
-      const loc = calleeDecls[idx]?.location;
-      if (loc !== null && loc !== undefined) {
-        calleeDeclBySyntax.set(target, loc);
-      }
-    }
-
-    for (const callRow of projectedCalls) {
-      if (callRow.callee === null) continue;
-      const calleeDeclLoc = calleeDeclBySyntax.get(callRow.callee);
-      if (calleeDeclLoc === undefined) continue;
-      const declKey = locationKey(calleeDeclLoc);
-      if (!targetItemKeys.has(declKey)) continue;
-
-      matches.push({
-        kind: "direct",
-        itemDeclKey: declKey,
-        callLocation: callRow.location,
-        evidence: [
-          {
-            kind: "source",
-            message:
-              "direct-callback-call: Queue item is invoked directly here and may re-enqueue itself.",
-            at: callRow.location,
-          },
-        ],
-      });
-    }
-
-    if (eff.callbackInvocations.length > 0) {
-      const cbArgDecls = await ctx.resolveDeclarations(
-        eff.callbackInvocations.map((cb) => cb.callbackArgument),
-        { select: { location: true } },
-      );
-      const cbArgSyntaxInfo = await ctx.syntaxOf(
-        eff.callbackInvocations.map((cb) => cb.callbackArgument),
-        { select: { location: true } },
-      );
-
-      const helperDeclRefs: DeclarationRef[] = [];
-      const outerCallsForCb: ((typeof projectedCalls)[number] | undefined)[] =
-        [];
-
-      for (const [idx] of eff.callbackInvocations.entries()) {
-        const argLoc = cbArgSyntaxInfo[idx]?.location;
-        const outerCall =
-          argLoc !== undefined && argLoc !== null
-            ? projectedCalls
-                .filter((c) => insideSpan(argLoc, c.location))
-                .toSorted(
-                  (a, b) => spanLength(a.location) - spanLength(b.location),
-                )[0]
-            : undefined;
-        outerCallsForCb.push(outerCall);
-        if (
-          outerCall?.calleeDeclaration !== null &&
-          outerCall?.calleeDeclaration !== undefined
-        ) {
-          helperDeclRefs.push(outerCall.calleeDeclaration);
-        }
-      }
-
-      const helperSyntaxRows =
-        helperDeclRefs.length > 0
-          ? await ctx.syntaxOf(helperDeclRefs, { select: { location: true } })
-          : [];
-      const helperLocByDecl = new Map<DeclarationRef, DiagnosticLocation>();
-      for (const [idx, ref] of helperDeclRefs.entries()) {
-        const loc = helperSyntaxRows[idx]?.location;
-        if (loc !== null && loc !== undefined) {
-          helperLocByDecl.set(ref, loc);
-        }
-      }
-
-      const seenIndirect = new Set<string>();
-      for (const [idx, cbInv] of eff.callbackInvocations.entries()) {
-        const argDeclLoc = cbArgDecls[idx]?.location;
-        if (argDeclLoc === null || argDeclLoc === undefined) continue;
-        const declKey = locationKey(argDeclLoc);
-        if (!targetItemKeys.has(declKey)) continue;
-
-        const outerCall = outerCallsForCb[idx];
-        const callLocation = outerCall?.location ?? cbInv.location;
-        const helperDeclLoc =
-          outerCall?.calleeDeclaration !== null &&
-          outerCall?.calleeDeclaration !== undefined
-            ? helperLocByDecl.get(outerCall.calleeDeclaration)
-            : undefined;
-
-        const dedupeKey = `${declKey}|${locationKey(callLocation)}|${cbInv.location.file}:${cbInv.location.line}`;
-        if (seenIndirect.has(dedupeKey)) continue;
-        seenIndirect.add(dedupeKey);
-
-        const evidence: Evidence[] = [
-          {
-            kind: "source",
-            message:
-              "indirect-callback-call: Queue item is passed as a callback argument to a helper.",
-            at: callLocation,
-          },
-          ...(helperDeclLoc !== undefined
-            ? [
-                {
-                  kind: "source" as const,
-                  message:
-                    "callback-helper-declaration: Helper accepts callback parameter.",
-                  at: helperDeclLoc,
-                },
-              ]
-            : []),
-          {
-            kind: "source",
-            message:
-              "helper-invokes-param: Helper synchronously invokes the callback parameter and may trigger re-enqueue.",
-            at: cbInv.location,
-          },
-        ];
-
-        matches.push({
-          kind: "indirect",
-          itemDeclKey: declKey,
-          callLocation,
-          ...(helperDeclLoc !== undefined
-            ? { helperDeclLocation: helperDeclLoc }
-            : {}),
-          helperInvokeLocation: cbInv.location,
-          evidence,
-        });
-      }
-    }
-  }
-
-  return matches;
-}
-
 async function analyzeCandidateFunction(
   ctx: RuleContext,
   fn: SyntaxNodeResult,
-  fileBlocks: readonly SyntaxNodeResult[],
   enqueueState: QueueEnqueueState,
   contract: ResolvedContract,
 ): Promise<void> {
-  const idsInFn = await ctx.findSyntax({
-    kinds: ["Identifier"],
-    range: {
-      file: fn.location.file,
-      start: fn.location.start,
-      end: fn.location.end,
-      match: "within",
-    },
-  });
-  const queueIds = idsInFn.filter((id) => id.text === contract.queueIdentifier);
+  const { queueIds, resolvedDecls } = await resolveQueueDeclsInFunction(
+    ctx,
+    fn,
+    contract.queueIdentifier,
+  );
   if (queueIds.length === 0) {
     ctx.checkpoint("queue-scope-filter", fn.ref, "exclude", () => ({
       contractId: contract.contractId,
@@ -604,16 +362,13 @@ async function analyzeCandidateFunction(
     return;
   }
 
-  const resolvedQueueRefs = await ctx.resolveDeclarations(
-    queueIds.map((id) => id.ref),
-    { select: { location: true } },
-  );
-  const referencesTrackedQueue = resolvedQueueRefs.some(
-    (row) =>
-      row.location !== null &&
-      enqueueState.queueDeclKeys.has(locationKey(row.location)),
-  );
-  if (!referencesTrackedQueue) {
+  const trackedQueueReads: SyntaxRef[] = [];
+  for (const [idx, decl] of resolvedDecls.entries()) {
+    if (decl !== null && enqueueState.queueDeclIds.has(decl.handleId)) {
+      trackedQueueReads.push(queueIds[idx]!.ref);
+    }
+  }
+  if (trackedQueueReads.length === 0) {
     ctx.checkpoint("queue-scope-filter", fn.ref, "exclude", () => ({
       contractId: contract.contractId,
       reason: `'${contract.queueIdentifier}' resolves to a different declaration than the tracked queue.`,
@@ -634,28 +389,21 @@ async function analyzeCandidateFunction(
   );
   if (clearWrites.length === 0) return;
 
-  const candidates = await resolveQueueItemDeclarations(
+  const candidates = await resolveQueueItemCandidates(
     ctx,
-    fn,
     clearWrites,
-    enqueueState.queueDeclKeys,
-    contract,
+    enqueueState.queueDeclIds,
+    trackedQueueReads,
   );
   if (candidates.length === 0) return;
 
-  const targetItemKeys = new Set(candidates.map((c) => c.itemDeclKey));
-  const invocations = await collectItemCallbackInvocations(
-    ctx,
-    eff,
-    targetItemKeys,
-  );
-
+  const model = ctx.getModel(contract.modelId);
   for (const candidate of candidates) {
-    const priorInvocations = invocations.filter(
+    const priorInvocations = eff.callbackInvocations.filter(
       (inv) =>
-        inv.itemDeclKey === candidate.itemDeclKey &&
-        inv.callLocation.file === candidate.write.location.file &&
-        inv.callLocation.end <= candidate.write.location.start,
+        inv.targetDeclaration?.handleId === candidate.receiverDeclId &&
+        inv.outerCallLocation.file === candidate.write.location.file &&
+        inv.outerCallLocation.end <= candidate.write.location.start,
     );
 
     if (priorInvocations.length === 0) {
@@ -673,27 +421,15 @@ async function analyzeCandidateFunction(
     }
 
     const latestInvocation = priorInvocations.toSorted(
-      (a, b) => b.callLocation.end - a.callLocation.end,
+      (a, b) => b.outerCallLocation.end - a.outerCallLocation.end,
     )[0]!;
 
-    const enclosingScopeBlock = fileBlocks
-      .filter(
-        (block) =>
-          !insideSpan(fn.location, block.location) &&
-          insideSpan(block.location, fn.location) &&
-          insideSpan(latestInvocation.callLocation, block.location) &&
-          insideSpan(candidate.write.location, block.location),
-      )
-      .toSorted((a, b) => spanLength(a.location) - spanLength(b.location))[0];
-
-    const scopeRef = enclosingScopeBlock?.ref ?? fn.ref;
+    const scopeRef = candidate.write.cfgScope ?? fn.ref;
     const [branchGroup] = await ctx.listBranches([scopeRef]);
-    const branches = branchGroup?.branches ?? [];
-
-    const guardBranches = branches.filter((b) =>
+    const guardBranches = (branchGroup?.branches ?? []).filter((b) =>
       isPostCallbackReentrantGuardBranch(
         b,
-        latestInvocation.callLocation.end,
+        latestInvocation.outerCallLocation.end,
         contract,
       ),
     );
@@ -703,7 +439,6 @@ async function analyzeCandidateFunction(
       branches: guardBranches.map((b) => b.ref),
       targets: [candidate.write.syntax],
     });
-
     if (coverage === undefined) continue;
 
     ctx.checkpoint(
@@ -718,45 +453,35 @@ async function analyzeCandidateFunction(
       }),
     );
 
-    if (coverage.status === "covered") {
-      continue;
-    }
+    if (coverage.status === "covered") continue;
 
     const preClears = candidates.filter(
       (other) =>
-        other.itemDeclKey === candidate.itemDeclKey &&
-        other.write.location.end <= latestInvocation.callLocation.start &&
+        other.receiverDeclId === candidate.receiverDeclId &&
+        other.write.location.end <= latestInvocation.outerCallLocation.start &&
         other.write.guards.some((g) =>
           g.conditionText.includes(contract.reentrantFlagName),
         ),
     );
 
-    const evidence = dedupeEvidence([
-      {
-        kind: "model",
-        modelId: contract.modelId,
-        declaration: contract.queueName,
-        message: `Model '${contract.modelId}' requires post-callback '.${contract.flagProperty}' '${contract.queuedFlagName}' clears on '${contract.queueName}' to preserve '${contract.reentrantFlagName}' re-enqueues.`,
-      },
-      ...enqueueState.enqueueEvidence,
-      {
-        kind: "source",
-        message: `main-queue-read: Queue item read from '${contract.queueIdentifier}'.`,
-        at: candidate.queueReadLocation,
-      },
-      ...preClears.map((pre): Evidence => ({
-        kind: "source",
-        message: `pre-call-allow-recurse-preclear: Pre-call clear checks '${contract.reentrantFlagName}' before callback invocation.`,
-        at: pre.write.location,
-      })),
-      ...latestInvocation.evidence,
-      {
-        kind: "source",
-        message: `unguarded-post-callback-clear: Post-callback clear unconditionally strips '${contract.queuedFlagName}' after callback execution.`,
-        at: candidate.write.location,
-      },
-      ...coverage.evidence,
-    ]);
+    const basis: DiagnosticBasis[] = [
+      ...(model !== undefined
+        ? [model]
+        : [
+            {
+              kind: "model" as const,
+              modelId: contract.modelId,
+              declaration: contract.queueName,
+              message: `Contract '${contract.contractId}' requires post-callback '.${contract.flagProperty}' '${contract.queuedFlagName}' clears on '${contract.queueName}' to preserve '${contract.reentrantFlagName}' re-enqueues.`,
+            },
+          ]),
+      ...enqueueState.enqueueWrites,
+      ...(candidate.queueReadBasis !== null ? [candidate.queueReadBasis] : []),
+      ...preClears.map((pre) => pre.write),
+      latestInvocation,
+      candidate.write,
+      coverage,
+    ];
 
     const invocationKindNote =
       latestInvocation.kind === "indirect"
@@ -765,9 +490,9 @@ async function analyzeCandidateFunction(
 
     ctx.report({
       at: candidate.write.location,
-      findingKey: `${contract.contractId}:${locationKey(candidate.write.location)}`,
+      findingKey: `${contract.contractId}:${candidate.write.location.file}:${candidate.write.location.start}:${candidate.write.location.end}`,
       message: `Queue item clears '${contract.queuedFlagName}' on '.${contract.flagProperty}' after invoking callback ${invocationKindNote} without guarding with '!(item.${contract.flagProperty} & ${contract.reentrantFlagName})'.`,
-      evidence,
+      basis,
     });
   }
 }
@@ -807,60 +532,30 @@ export function createReentrantQueueFlagRule(
       const contracts = extractContracts(ctx, options.contracts);
       if (contracts.length === 0) return;
 
-      const binaryExprs = await ctx.findSyntax({ kinds: ["BinaryExpression"] });
+      const candidateFns = await ctx.findSyntax({
+        kinds: [
+          "FunctionDeclaration",
+          "FunctionExpression",
+          "ArrowFunction",
+          "MethodDeclaration",
+        ],
+        textIncludes: contracts.map((c) => c.queuedFlagName),
+      });
 
       for (const contract of contracts) {
-        const candidateWrites = binaryExprs.filter((expr) =>
-          matchesFlagClearSyntax(expr.text, contract),
+        const matchingFns = candidateFns.filter(
+          (fn) =>
+            fn.text.includes(`.${contract.flagProperty}`) &&
+            fn.text.includes("&=") &&
+            fn.text.includes(contract.queuedFlagName),
         );
-        if (candidateWrites.length === 0) continue;
+        if (matchingFns.length === 0) continue;
 
         const enqueueState = await resolveEnqueueState(ctx, contract);
         if (enqueueState === null) continue;
 
-        const files = [
-          ...new Set(candidateWrites.map((expr) => expr.location.file)),
-        ].toSorted();
-
-        for (const file of files) {
-          const writesInFile = candidateWrites.filter(
-            (w) => w.location.file === file,
-          );
-          const fnsInFile = await ctx.findSyntax({
-            files: [file],
-            kinds: [
-              "FunctionDeclaration",
-              "FunctionExpression",
-              "ArrowFunction",
-              "MethodDeclaration",
-            ],
-          });
-          const blocksInFile = await ctx.findSyntax({
-            files: [file],
-            kinds: ["Block"],
-          });
-
-          const candidateFns = new Map<LocationKey, SyntaxNodeResult>();
-          for (const writeExpr of writesInFile) {
-            const enclosing = fnsInFile
-              .filter((fn) => insideSpan(writeExpr.location, fn.location))
-              .toSorted(
-                (a, b) => spanLength(a.location) - spanLength(b.location),
-              )[0];
-            if (enclosing !== undefined) {
-              candidateFns.set(locationKey(enclosing.location), enclosing);
-            }
-          }
-
-          for (const fn of candidateFns.values()) {
-            await analyzeCandidateFunction(
-              ctx,
-              fn,
-              blocksInFile,
-              enqueueState,
-              contract,
-            );
-          }
+        for (const fn of matchingFns) {
+          await analyzeCandidateFunction(ctx, fn, enqueueState, contract);
         }
       }
     },

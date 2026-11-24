@@ -448,6 +448,39 @@ export type ExplainCleanupPath = {
   readonly evidence: readonly Evidence[];
 };
 
+export type ExplainGapResolutionStatus = "unresolved" | "resolved_by_override";
+
+export type ExplainGapResolution = {
+  readonly providerId: string;
+  readonly operation: string;
+  readonly conclusion: string;
+  readonly at?: DiagnosticLocation;
+};
+
+export type ExplainLocalGap = {
+  readonly status: ExplainGapResolutionStatus;
+  readonly factTypeId: string;
+  readonly providerId: string;
+  readonly field?: string;
+  readonly gap: Gap;
+  readonly subjectLocation?: DiagnosticLocation;
+  readonly resolvedBy?: ExplainGapResolution;
+  readonly impact?: string;
+};
+
+export type ExplainProviderEvaluationStatus =
+  | "evaluated"
+  | "reused"
+  | "skipped";
+
+export type ExplainProviderEvaluation = {
+  readonly providerId: string;
+  readonly factTypeId?: string;
+  readonly status: ExplainProviderEvaluationStatus;
+  readonly reason?: string;
+  readonly subjectLocation?: DiagnosticLocation;
+};
+
 export type ExplainResult = {
   readonly ruleId: string;
   readonly target: SourceTarget;
@@ -461,6 +494,8 @@ export type ExplainResult = {
   readonly queries: readonly ExplainQueryStep[];
   readonly checkpoints: readonly ExplainCheckpointTrace[];
   readonly gaps: readonly Gap[];
+  readonly localGaps: readonly ExplainLocalGap[];
+  readonly providerEvaluations: readonly ExplainProviderEvaluation[];
   readonly providers: readonly string[];
   readonly cleanupPaths: readonly ExplainCleanupPath[];
   readonly inlineIgnore?: {

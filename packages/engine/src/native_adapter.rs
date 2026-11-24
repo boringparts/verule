@@ -12,9 +12,9 @@ use tsrs_checker::TypeFormatFlags;
 use tsrs_compiler::{CheckerHandle, Program};
 use tsrs_core::{P, tspath};
 use verule_adapter_api::{
-    AdapterError, DeclarationInfo, Evidence, Gap, HostAccess, HostFactQuery, HostQueriedFact,
-    HostValue, NativeAdapterInputAttribution, NativeAdapterOutput, NativeContribution,
-    NativeFactRequest, NativeLibrary, NodeKind, NodeOperation, SourceLocation,
+    AdapterError, DeclarationInfo, Evidence, FactExplainTrace, Gap, HostAccess, HostFactQuery,
+    HostQueriedFact, HostValue, NativeAdapterInputAttribution, NativeAdapterOutput,
+    NativeContribution, NativeFactRequest, NativeLibrary, NodeKind, NodeOperation, SourceLocation,
 };
 
 use crate::calls_values::{
@@ -117,6 +117,7 @@ struct NativeFactCacheKey {
     fact_type_id: String,
     condition_key: String,
     targets: CacheTargetKey,
+    explain: bool,
 }
 
 #[derive(Clone)]
@@ -126,6 +127,7 @@ struct CachedContribution {
     value: Value,
     evidence: Vec<Evidence>,
     gaps: Vec<Gap>,
+    explain_trace: Option<FactExplainTrace>,
 }
 
 #[derive(Clone)]
@@ -205,6 +207,7 @@ pub fn extract(
     target_handles: &[String],
     has_targets: bool,
     condition: Option<&Value>,
+    explain: bool,
     step_start: Option<Instant>,
     observer: &mut ObserveCollector,
 ) -> Result<NativeExtractionOutcome, RpcErr> {
@@ -227,6 +230,7 @@ pub fn extract(
         provider_id,
         fact_type_id,
         condition,
+        explain,
         target_nodes.as_deref(),
         targets.as_deref(),
         &mut candidates_cache,
@@ -322,6 +326,7 @@ fn materialize_contributions(
                     value: item.value.clone(),
                     evidence: item.evidence.clone(),
                     gaps: item.gaps.clone(),
+                    explain_trace: item.explain_trace.clone(),
                 });
             }
         } else {
@@ -331,6 +336,7 @@ fn materialize_contributions(
                 value: item.value.clone(),
                 evidence: item.evidence.clone(),
                 gaps: item.gaps.clone(),
+                explain_trace: item.explain_trace.clone(),
             });
         }
     }
@@ -349,6 +355,7 @@ fn extract_provider_cached(
     provider_id: &str,
     fact_type_id: &str,
     condition: Option<&Value>,
+    explain: bool,
     target_nodes: Option<&[P<Node>]>,
     resolved_targets: Option<&[ResolvedNativeTarget]>,
     candidates_cache: &mut Option<Rc<NativeAdapterCandidates>>,
@@ -385,6 +392,7 @@ fn extract_provider_cached(
         fact_type_id: fact_type_id.to_string(),
         condition_key: canonical_condition_key(condition),
         targets: normalize_target_key(target_nodes),
+        explain,
     };
     if let Some(cached) = snapshot.native_fact_cache.entries.get(&cache_key)
         && additional_inputs_unchanged(&snapshot.cwd, &cached.additional_input_snapshots)
@@ -417,6 +425,7 @@ fn extract_provider_cached(
         provider_id,
         fact_type_id,
         condition,
+        explain,
         target_nodes,
         resolved_targets,
         requested_set,
@@ -442,6 +451,7 @@ fn run_uncached_provider_extraction(
     provider_id: &str,
     fact_type_id: &str,
     condition: Option<&Value>,
+    explain: bool,
     target_nodes: Option<&[P<Node>]>,
     resolved_targets: Option<&[ResolvedNativeTarget]>,
     requested_set: Option<FxHashSet<P<Node>>>,
@@ -482,6 +492,7 @@ fn run_uncached_provider_extraction(
         candidates: Rc::clone(candidates),
         active_extractions,
         observer,
+        explain,
         recorded_input_snapshots: Vec::new(),
         child_additional_inputs: Vec::new(),
         child_adapter_inputs: Vec::new(),
@@ -498,6 +509,7 @@ fn run_uncached_provider_extraction(
         calls: &call_ids,
         variables: &variable_ids,
         targets: target_ids.as_deref(),
+        explain,
     };
     let extract_result = adapter.extract(&request, &mut host);
     let host_conflict = host.pending_conflict.take();
@@ -576,6 +588,7 @@ fn resolve_cached_contributions(
             value: contrib.value,
             evidence: contrib.evidence,
             gaps: contrib.gaps,
+            explain_trace: contrib.explain_trace,
         });
     }
     Ok(cached)
@@ -986,6 +999,7 @@ struct SnapshotAdapterHost<'a> {
     candidates: Rc<NativeAdapterCandidates>,
     active_extractions: &'a mut Vec<ActiveExtraction>,
     observer: &'a mut ObserveCollector,
+    explain: bool,
     recorded_input_snapshots: Vec<(String, Option<Vec<u8>>)>,
     child_additional_inputs: Vec<String>,
     child_adapter_inputs: Vec<NativeAdapterInputAttribution>,
@@ -1267,6 +1281,7 @@ impl SnapshotAdapterHost<'_> {
                 pid,
                 fact_type_id,
                 condition,
+                self.explain,
                 target_nodes,
                 None,
                 &mut candidates_cache,
@@ -1344,6 +1359,7 @@ impl SnapshotAdapterHost<'_> {
                 evidence: item.evidence,
                 gaps: item.gaps,
                 providers: item.providers,
+                explain_trace: item.explain_trace,
             });
         }
 
@@ -1367,6 +1383,7 @@ struct MergedQueriedItem {
     evidence: Vec<Evidence>,
     gaps: Vec<Gap>,
     providers: Vec<String>,
+    explain_trace: Option<FactExplainTrace>,
 }
 
 fn merge_queried_contributions(
@@ -1401,6 +1418,12 @@ fn merge_queried_contributions(
                         .collect(),
                 );
                 existing.gaps = dedupe_gaps(existing.gaps.drain(..).chain(contrib.gaps).collect());
+                if let Some(incoming_trace) = contrib.explain_trace {
+                    let target = existing
+                        .explain_trace
+                        .get_or_insert_with(FactExplainTrace::default);
+                    target.local_gaps.extend(incoming_trace.local_gaps);
+                }
                 if existing.subject_location.is_none() {
                     existing.subject_location = contrib.subject_location;
                 }
@@ -1415,6 +1438,7 @@ fn merge_queried_contributions(
                         evidence: dedupe_evidence(contrib.evidence),
                         gaps: dedupe_gaps(contrib.gaps),
                         providers: vec![provider_id.clone()],
+                        explain_trace: contrib.explain_trace,
                     },
                 );
             }
