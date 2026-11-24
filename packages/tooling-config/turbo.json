@@ -9,7 +9,7 @@
       "tags": []
     },
     "format:check": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -28,13 +28,13 @@
     },
     "typecheck": {
       "dependsOn": [],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
     "lint": {
       "dependsOn": ["^lint"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     }

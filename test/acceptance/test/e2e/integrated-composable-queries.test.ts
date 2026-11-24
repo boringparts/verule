@@ -518,6 +518,99 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       } finally {
         await session.close();
       }
+
+      // Case C & D: field-modifier `.default(21)` and `.and(...)` / `.pipe(...)` overrides on `createSelectSchema`.
+      host.replaceText(
+        dataIndexRelPath,
+        '  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+        '  andOverriddenSchema,\n  modifierDefaultedSchema,\n  pipeOverriddenSchema,\n  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+      );
+      host.writeText(
+        schemaRelPath,
+        [
+          originalSchema,
+          "",
+          "declare function runtimeFieldValidator(): z.ZodType<number>;",
+          "",
+          "export const modifierDefaultedSchema = createSelectSchema(users, {",
+          "  age: runtimeFieldValidator().default(21),",
+          "});",
+          "",
+          "export const andOverriddenSchema = createSelectSchema(users, {",
+          "  age: runtimeFieldValidator(),",
+          "}).and(z.object({ age: z.number().default(21) }));",
+          "",
+          "export const pipeOverriddenSchema = createSelectSchema(users, {",
+          "  age: runtimeFieldValidator(),",
+          "}).pipe(z.object({ id: z.number(), fullName: z.string(), status: z.string().nullable(), age: z.number().default(21) }));",
+          "",
+        ].join("\n"),
+      );
+      host.writeText(
+        rowProjectionRelPath,
+        [
+          "import {",
+          "  andOverriddenSchema,",
+          "  getUserWithStatusNoAge,",
+          "  modifierDefaultedSchema,",
+          "  pipeOverriddenSchema,",
+          '} from "@verule/acceptance-host-drizzle-zod-data";',
+          "",
+          "export async function checkCombinatorOverrides() {",
+          "  const missingOnlyAge = await getUserWithStatusNoAge();",
+          "  if (missingOnlyAge === undefined) return undefined;",
+          "  return {",
+          "    mod: modifierDefaultedSchema.parse(missingOnlyAge),",
+          "    and: andOverriddenSchema.parse(missingOnlyAge),",
+          "    pipe: pipeOverriddenSchema.parse(missingOnlyAge),",
+          "  };",
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      const combinatorCheck = await host.check({
+        config: integratedExplainConfigPath,
+      });
+      assert.equal(
+        combinatorCheck.status,
+        0,
+        combinatorCheck.stderr + combinatorCheck.stdout,
+      );
+      assert.deepEqual(combinatorCheck.report.diagnostics, []);
+      assert.equal(
+        combinatorCheck.report.gaps.some(
+          (gap) => gap.kind === "unresolved-schema-field",
+        ),
+        false,
+        JSON.stringify(combinatorCheck.report.gaps),
+      );
+
+      for (const [needle, expectedOp] of [
+        ["modifierDefaultedSchema.parse(missingOnlyAge)", ".default()"],
+        ["andOverriddenSchema.parse(missingOnlyAge)", ".and()"],
+        ["pipeOverriddenSchema.parse(missingOnlyAge)", ".pipe()"],
+      ] as const) {
+        const callAt = lineColOf(host, rowProjectionRelPath, needle);
+        const explained = await host.check({
+          config: integratedExplainConfigPath,
+          rule: "row-projection-satisfies-validator",
+          at: callAt,
+        });
+        assert.equal(explained.status, 0);
+        const exp = explained.report.explanation;
+        assert.ok(exp);
+        assert.ok(
+          exp.localGaps.some(
+            (lg) =>
+              lg.status === "resolved_by_override" &&
+              lg.field === "age" &&
+              lg.resolvedBy?.providerId === "zod" &&
+              lg.resolvedBy.operation === expectedOp,
+          ),
+          `Expected resolved_by_override for ${needle}: ${JSON.stringify({ status: exp.status, gaps: exp.gaps, localGaps: exp.localGaps, queries: exp.queries.map((q) => q.summary), providers: exp.providers })}`,
+        );
+      }
     },
   );
 });

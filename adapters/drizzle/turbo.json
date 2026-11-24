@@ -20,7 +20,7 @@
     },
     "format:check": {
       "dependsOn": ["//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -33,7 +33,7 @@
     },
     "lint": {
       "dependsOn": ["^lint", "//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -50,14 +50,15 @@
         "$TURBO_DEFAULT$",
         "native/Cargo.toml",
         "native/Cargo.lock",
-        "native/src/**"
+        "native/src/**",
+        "!native/target/**"
       ],
       "outputs": [],
       "tags": ["quality:light"]
     },
     "typecheck": {
       "dependsOn": ["@verule/sdk#typecheck"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     }

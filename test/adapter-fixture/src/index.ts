@@ -36,6 +36,7 @@ export function createFixtureAdapter(
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     );
 

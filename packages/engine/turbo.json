@@ -11,7 +11,7 @@
     },
     "format:check": {
       "dependsOn": ["//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -24,18 +24,18 @@
     },
     "lint": {
       "dependsOn": ["//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
     "test": {
       "dependsOn": ["//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
     "typecheck": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     }

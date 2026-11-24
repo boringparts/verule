@@ -112,6 +112,7 @@ export type FactResult<
   readonly evidence: readonly Evidence[];
   readonly gaps: readonly Gap[];
   readonly providers: readonly string[];
+  readonly explainTrace?: FactExplainTrace;
 };
 
 /** Options passed to `AdapterContext.extractEngineFacts`. */
@@ -407,6 +408,50 @@ function dedupeGaps(items: readonly Gap[]): readonly Gap[] {
 
 const factExplainLocalGaps = new WeakMap<object, readonly ExplainLocalGap[]>();
 
+function localGapSuperseded(
+  upstream: ExplainLocalGap,
+  explicit: ExplainLocalGap,
+): boolean {
+  if (
+    stableSerializeValue(explicit.gap) === stableSerializeValue(upstream.gap) &&
+    (explicit.field === undefined ||
+      upstream.field === undefined ||
+      explicit.field === upstream.field)
+  ) {
+    return true;
+  }
+  return (
+    explicit.status === "resolved_by_override" &&
+    explicit.field !== undefined &&
+    explicit.field === upstream.field &&
+    explicit.factTypeId === upstream.factTypeId &&
+    explicit.providerId === upstream.providerId
+  );
+}
+
+function collectContributionLocalGaps<
+  SubjectKind extends ProgramObjectKind,
+  Value,
+>(contribution: FactContribution<SubjectKind, Value>): ExplainLocalGap[] {
+  const explicit = contribution.explainTrace?.localGaps ?? [];
+  const combined: ExplainLocalGap[] = [...explicit];
+  for (const basisItem of contribution.basis ?? []) {
+    if (typeof basisItem !== "object" || basisItem === null) {
+      continue;
+    }
+    const upstreamLocalGaps = factExplainLocalGaps.get(basisItem);
+    if (!upstreamLocalGaps) {
+      continue;
+    }
+    for (const upstream of upstreamLocalGaps) {
+      if (!combined.some((item) => localGapSuperseded(upstream, item))) {
+        combined.push(upstream);
+      }
+    }
+  }
+  return combined;
+}
+
 type ProviderEntry = {
   readonly adapterId: string;
   readonly provider: FactProvider;
@@ -524,7 +569,7 @@ function mergeContributions<
       ];
       const incomingGaps = [...(contribution.gaps ?? [])];
       const incomingLocalGaps = recordExplain
-        ? [...(contribution.explainTrace?.localGaps ?? [])]
+        ? collectContributionLocalGaps(contribution)
         : [];
       const existing = bySubject.get(handleId);
 
@@ -643,21 +688,20 @@ function mergeContributions<
 
   return orderedIds.map((handleId) => {
     const acc = bySubject.get(handleId)!;
-    const fact: FactResult<SubjectKind, Value> = {
-      factTypeId: factType.id,
-      projectId,
-      snapshotId,
-      subject: acc.subject,
-      value: acc.value,
-      evidence: acc.evidence,
-      gaps: acc.gaps,
-      providers: acc.providers,
-    };
+    let mergedLocalGaps: ExplainLocalGap[] = [];
     if (recordExplain) {
       const subjectLocation = syntaxLocations.get(acc.subject as SyntaxRef);
+      const resolvedEntries = acc.localGaps.filter(
+        (item) => item.status === "resolved_by_override",
+      );
       const seen = new Set<string>();
-      const mergedLocalGaps: ExplainLocalGap[] = [];
       for (const item of acc.localGaps) {
+        if (
+          item.status === "unresolved" &&
+          resolvedEntries.some((resolved) => localGapSuperseded(item, resolved))
+        ) {
+          continue;
+        }
         const key = stableSerializeValue(item);
         if (!seen.has(key)) {
           seen.add(key);
@@ -681,9 +725,22 @@ function mergeContributions<
           });
         }
       }
-      if (mergedLocalGaps.length > 0) {
-        factExplainLocalGaps.set(fact, mergedLocalGaps);
-      }
+    }
+    const fact: FactResult<SubjectKind, Value> = {
+      factTypeId: factType.id,
+      projectId,
+      snapshotId,
+      subject: acc.subject,
+      value: acc.value,
+      evidence: acc.evidence,
+      gaps: acc.gaps,
+      providers: acc.providers,
+      ...(recordExplain && mergedLocalGaps.length > 0
+        ? { explainTrace: { localGaps: mergedLocalGaps } }
+        : {}),
+    };
+    if (recordExplain && mergedLocalGaps.length > 0) {
+      factExplainLocalGaps.set(fact, mergedLocalGaps);
     }
     return registerProvenance(fact, acc.evidence);
   });

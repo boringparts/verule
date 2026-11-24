@@ -25,6 +25,7 @@ export const drizzleAdapter: LibraryAdapter = defineAdapter({
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
     defineFactProvider(DrizzleTableColumnsFact, (context, request) =>
@@ -35,6 +36,7 @@ export const drizzleAdapter: LibraryAdapter = defineAdapter({
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
     defineFactProvider(ValidatorSchemaFieldsFact, (context, request) =>
@@ -42,6 +44,7 @@ export const drizzleAdapter: LibraryAdapter = defineAdapter({
         factTypeId: request.factType.id,
         providerId: "drizzle",
         ...(request.targets !== undefined ? { targets: request.targets } : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
   ],

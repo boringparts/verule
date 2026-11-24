@@ -1591,4 +1591,276 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("propagates upstream localGaps through TS AdapterContext.facts(FactA) via basis and explainTrace during session.explain and runCheck", async () => {
+    const root = createTempProject({
+      "src/source.ts": [
+        "export function defineInput(name: string, fields: Record<string, string>) {",
+        "  return { name, fields };",
+        "}",
+        "export function dynamicPromo(): string { return 'dyn'; }",
+        'export const checkoutInput = defineInput("checkout", {',
+        '  id: "required",',
+        "  promoCode: dynamicPromo(),",
+        "});",
+        "",
+      ].join("\n"),
+      "src/consumer.ts": [
+        'import { checkoutInput } from "./source.js";',
+        "export function wrapInput(input: unknown, overrides?: Record<string, string>) {",
+        "  return { input, overrides };",
+        "}",
+        "export const forwardedConsumer = wrapInput(checkoutInput);",
+        'export const overriddenConsumer = wrapInput(checkoutInput, { promoCode: "defaulted" });',
+        "",
+      ].join("\n"),
+    });
+
+    type InputShape = {
+      readonly fields: Readonly<Record<string, string>>;
+      readonly unknownFields: readonly string[];
+    };
+
+    const InputFactA = defineFactType<"syntax", undefined, InputShape>({
+      id: "ts.prop.input-a",
+      subjectKind: "syntax",
+    });
+
+    const ConsumerFactB = defineFactType<
+      "syntax",
+      undefined,
+      InputShape & { readonly consumer: string }
+    >({
+      id: "ts.prop.consumer-b",
+      subjectKind: "syntax",
+    });
+
+    const adapterA = defineAdapter({
+      id: "ts-prop-adapter-a",
+      provides: [
+        defineFactProvider(InputFactA, async (ctx, request) => {
+          const calls = await ctx.findSyntax({
+            files: ["src/source.ts"],
+            kinds: ["CallExpression"],
+          });
+          const defCall = calls.find((c) => c.text.startsWith("defineInput("));
+          const dynCall = calls.find((c) => c.text.startsWith("dynamicPromo("));
+          if (!defCall || !dynCall) return [];
+          const promoGap = {
+            kind: "unresolved-promo-field",
+            message: 'Field "promoCode" could not be statically resolved.',
+            at: dynCall.location,
+          };
+          return [
+            {
+              subject: defCall.ref,
+              value: {
+                fields: { id: "required" },
+                unknownFields: ["promoCode"],
+              },
+              evidence: [
+                {
+                  kind: "source",
+                  message: "Adapter A extracted checkoutInput.",
+                  at: defCall.location,
+                },
+              ],
+              gaps: [promoGap],
+              ...(request.explain
+                ? {
+                    explainTrace: {
+                      localGaps: [
+                        {
+                          status: "unresolved" as const,
+                          factTypeId: InputFactA.id,
+                          providerId: "ts-prop-adapter-a",
+                          field: "promoCode",
+                          gap: promoGap,
+                          subjectLocation: defCall.location,
+                        },
+                      ],
+                    },
+                  }
+                : {}),
+            },
+          ];
+        }),
+      ],
+    });
+
+    const adapterB = defineAdapter({
+      id: "ts-prop-adapter-b",
+      provides: [
+        defineFactProvider(ConsumerFactB, async (ctx, request) => {
+          const sourceFacts = await ctx.facts(InputFactA);
+          const factA = sourceFacts[0];
+          if (!factA) return [];
+          const calls = await ctx.findSyntax({
+            files: ["src/consumer.ts"],
+            kinds: ["CallExpression"],
+          });
+          const wrapCalls = calls.filter((c) =>
+            c.text.startsWith("wrapInput("),
+          );
+          return wrapCalls.map((call) => {
+            const isOverride = call.text.includes('promoCode: "defaulted"');
+            if (!isOverride) {
+              // Forward upstream FactA solely through basis without rebuilding explainTrace manually.
+              return {
+                subject: call.ref,
+                value: {
+                  consumer: "forwardedConsumer",
+                  fields: { ...factA.value.fields },
+                  unknownFields: [...factA.value.unknownFields],
+                },
+                basis: [factA],
+                evidence: [
+                  {
+                    kind: "source" as const,
+                    message: "Adapter B forwarded checkoutInput.",
+                    at: call.location,
+                  },
+                ],
+                gaps: factA.gaps,
+              };
+            }
+
+            const upstreamPromoLocalGap = factA.explainTrace?.localGaps?.find(
+              (lg) => lg.field === "promoCode",
+            );
+            return {
+              subject: call.ref,
+              value: {
+                consumer: "overriddenConsumer",
+                fields: { ...factA.value.fields, promoCode: "defaulted" },
+                unknownFields: [],
+              },
+              basis: [factA],
+              evidence: [
+                {
+                  kind: "source" as const,
+                  message: "Adapter B overrode promoCode.",
+                  at: call.location,
+                },
+              ],
+              gaps: [],
+              ...(request.explain && upstreamPromoLocalGap
+                ? {
+                    explainTrace: {
+                      localGaps: [
+                        {
+                          status: "resolved_by_override" as const,
+                          factTypeId: upstreamPromoLocalGap.factTypeId,
+                          providerId: upstreamPromoLocalGap.providerId,
+                          field: "promoCode",
+                          gap: upstreamPromoLocalGap.gap,
+                          subjectLocation: call.location,
+                          resolvedBy: {
+                            providerId: "ts-prop-adapter-b",
+                            operation: "override",
+                            conclusion: "promoCode=defaulted",
+                            at: call.location,
+                          },
+                        },
+                      ],
+                    },
+                  }
+                : {}),
+            };
+          });
+        }),
+      ],
+    });
+
+    const consumerRule = defineRule({
+      id: "ts-prop-consumer-rule",
+      run: async (ctx) => {
+        const items = await ctx.facts(ConsumerFactB);
+        for (const item of items) {
+          if (item.value.unknownFields.includes("promoCode")) {
+            continue;
+          }
+          if (item.value.fields.promoCode === "defaulted") {
+            const at = item.evidence.find((ev) =>
+              ev.message.includes("Adapter B"),
+            )?.at;
+            if (at) {
+              ctx.report({
+                at,
+                findingKey: `promo-${item.value.consumer}`,
+                message: `${item.value.consumer}: promoCode defaulted`,
+                basis: [item],
+              });
+            }
+          }
+        }
+      },
+    });
+
+    const config = defineConfig({
+      tsconfig: "tsconfig.json",
+      adapters: [adapterA, adapterB],
+      rules: [consumerRule],
+    });
+    const session = await openSession({ cwd: root, config });
+
+    try {
+      const forwardedExplain = await session.explain({
+        ruleId: "ts-prop-consumer-rule",
+        at: "src/consumer.ts:5:34",
+      });
+      assert.equal(forwardedExplain.explanation.status, "blocked_by_gap");
+      assert.equal(forwardedExplain.explanation.localGaps.length, 1);
+      assert.equal(
+        forwardedExplain.explanation.localGaps[0]?.status,
+        "unresolved",
+      );
+      assert.equal(
+        forwardedExplain.explanation.localGaps[0]?.field,
+        "promoCode",
+      );
+      assert.equal(
+        forwardedExplain.explanation.localGaps[0]?.providerId,
+        "ts-prop-adapter-a",
+      );
+
+      const overriddenExplain = await session.explain({
+        ruleId: "ts-prop-consumer-rule",
+        at: "src/consumer.ts:6:35",
+      });
+      assert.equal(overriddenExplain.explanation.status, "reported");
+      assert.equal(overriddenExplain.explanation.localGaps.length, 1);
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.status,
+        "resolved_by_override",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.field,
+        "promoCode",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.providerId,
+        "ts-prop-adapter-a",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.resolvedBy?.providerId,
+        "ts-prop-adapter-b",
+      );
+
+      const oneShotOverridden = await runCheck({
+        cwd: root,
+        config,
+        at: "src/consumer.ts:6:35",
+      });
+      assert.equal(oneShotOverridden.explanation?.status, "reported");
+      assert.equal(oneShotOverridden.explanation?.localGaps.length, 1);
+      assert.equal(
+        oneShotOverridden.explanation?.localGaps[0]?.status,
+        "resolved_by_override",
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

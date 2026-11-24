@@ -98,6 +98,7 @@ struct FieldResult {
     nullability_explicit: bool,
     has_dynamic_fields: bool,
     gaps: Vec<Gap>,
+    local_gaps: Vec<ExplainLocalGap>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,6 +155,14 @@ impl Schema {
     }
 
     fn apply_field_result(&mut self, name: String, result: FieldResult) {
+        for mut lg in result.local_gaps {
+            if lg.field.is_none() {
+                lg.field = Some(name.clone());
+            }
+            if lg.status == ExplainGapResolutionStatus::ResolvedByOverride {
+                self.resolved_local_gaps.push(lg);
+            }
+        }
         if let Some(field) = result.field {
             self.evidence.extend(field.evidence.clone());
             self.fields.insert(name.clone(), field);
@@ -1021,6 +1030,7 @@ impl ZodEvaluator {
                                 ),
                                 at: property.location()?,
                             }],
+                            local_gaps: Vec::new(),
                         }
                     };
                     schema.apply_field_result(name, field);
@@ -1161,7 +1171,13 @@ impl ZodEvaluator {
                     apply_field_modifier(field, &mut inner.nullability_explicit, method.as_str());
                     return Ok(inner);
                 }
-                if resolve_unknown_with_modifier(&mut inner, method.as_str(), evidence) {
+                let modifier_at = expression.location()?;
+                if resolve_unknown_with_modifier(
+                    &mut inner,
+                    method.as_str(),
+                    evidence,
+                    modifier_at.as_ref(),
+                ) {
                     return Ok(inner);
                 }
                 return Ok(inner);
@@ -1200,6 +1216,7 @@ impl ZodEvaluator {
                         nullability_explicit: right.nullability_explicit,
                         has_dynamic_fields: left.has_dynamic_fields || right.has_dynamic_fields,
                         gaps: [left.gaps, right.gaps].concat(),
+                        local_gaps: [left.local_gaps, right.local_gaps].concat(),
                     });
                 }
             }
@@ -1222,6 +1239,7 @@ impl ZodEvaluator {
                         ),
                         expression.location()?,
                     )],
+                    local_gaps: Vec::new(),
                 });
             }
             if is_zod_namespace(receiver) {
@@ -1366,48 +1384,85 @@ fn apply_field_modifier(field: &mut Field, nullability_explicit: &mut bool, meth
     }
 }
 
+fn record_modifier_resolution(
+    inner: &mut FieldResult,
+    method: &str,
+    field: &Field,
+    modifier_at: Option<&SourceLocation>,
+) {
+    let prior_gaps = std::mem::take(&mut inner.gaps);
+    for prior_gap in prior_gaps {
+        inner.local_gaps.push(ExplainLocalGap {
+            status: ExplainGapResolutionStatus::ResolvedByOverride,
+            fact_type_id: String::new(),
+            provider_id: "zod".to_string(),
+            field: None,
+            gap: prior_gap,
+            subject_location: None,
+            resolved_by: Some(ExplainGapResolution {
+                provider_id: "zod".to_string(),
+                operation: format!(".{method}()"),
+                conclusion: format!(
+                    "{}: {} (nullable={})",
+                    method,
+                    field.requirement.as_str(),
+                    field.nullable
+                ),
+                at: modifier_at.cloned(),
+            }),
+            impact: Some(format!(
+                "Prior unknown field validator was resolved by .{method}()."
+            )),
+        });
+    }
+}
+
 fn resolve_unknown_with_modifier(
     inner: &mut FieldResult,
     method: &str,
     evidence: Vec<Evidence>,
+    modifier_at: Option<&SourceLocation>,
 ) -> bool {
     match method {
         "default" | "prefault" | "catch" => {
-            inner.field = Some(Field {
+            let field = Field {
                 requirement: InputRequirement::Defaulted,
                 presence: OutputPresence::Required,
                 nullable: false,
                 from_default: true,
                 evidence,
-            });
+            };
+            record_modifier_resolution(inner, method, &field, modifier_at);
+            inner.field = Some(field);
             inner.has_dynamic_fields = false;
-            inner.gaps.clear();
             true
         }
         "optional" | "nullish" => {
             let nullable = method == "nullish";
-            inner.field = Some(Field {
+            let field = Field {
                 requirement: InputRequirement::Optional,
                 presence: OutputPresence::Optional,
                 nullable,
                 from_default: false,
                 evidence,
-            });
+            };
+            record_modifier_resolution(inner, method, &field, modifier_at);
+            inner.field = Some(field);
             inner.nullability_explicit |= nullable;
             inner.has_dynamic_fields = false;
-            inner.gaps.clear();
             true
         }
         "nonoptional" => {
-            inner.field = Some(Field {
+            let field = Field {
                 requirement: InputRequirement::Required,
                 presence: OutputPresence::Required,
                 nullable: false,
                 from_default: false,
                 evidence,
-            });
+            };
+            record_modifier_resolution(inner, method, &field, modifier_at);
+            inner.field = Some(field);
             inner.has_dynamic_fields = false;
-            inner.gaps.clear();
             true
         }
         "nullable" => {
@@ -1467,6 +1522,21 @@ fn extract_validator_fields<'a>(
         let mut contribution = FactContribution::new(target, Value::Object(value));
         contribution.evidence = contribution_evidence;
         contribution.gaps = dedupe_gaps(result.gaps);
+        if request.explain {
+            let subject_loc = expr.location()?;
+            let mut local_gaps = result.local_gaps;
+            for entry in &mut local_gaps {
+                if entry.fact_type_id.is_empty() {
+                    entry.fact_type_id = FIELD_FACT.to_string();
+                }
+                if entry.subject_location.is_none() {
+                    entry.subject_location.clone_from(&subject_loc);
+                }
+            }
+            if !local_gaps.is_empty() {
+                contribution.explain_trace = Some(FactExplainTrace { local_gaps });
+            }
+        }
         contributions.push(contribution);
     }
     Ok(contributions)
@@ -1612,7 +1682,9 @@ fn schema_from_external_fact(fact: QueriedFact<'_>) -> Schema {
 
     if let Some(trace) = fact.explain_trace {
         for local_gap in trace.local_gaps {
-            if let Some(field_name) = local_gap.field.clone() {
+            if local_gap.status == ExplainGapResolutionStatus::ResolvedByOverride {
+                schema.resolved_local_gaps.push(local_gap);
+            } else if let Some(field_name) = local_gap.field.clone() {
                 schema.field_gap_origins.insert(field_name, local_gap);
             } else {
                 schema.shape_local_gaps.push(local_gap);
@@ -1684,12 +1756,24 @@ fn union_schema(location: Option<SourceLocation>, branches: &[Schema], label: &s
     };
     for branch in branches {
         output.gaps.extend(branch.gaps.clone());
+        output
+            .resolved_local_gaps
+            .extend(branch.resolved_local_gaps.clone());
+        output
+            .shape_local_gaps
+            .extend(branch.shape_local_gaps.clone());
         for (name, fgaps) in &branch.field_gaps {
             output
                 .field_gaps
                 .entry(name.clone())
                 .or_default()
                 .extend(fgaps.clone());
+        }
+        for (name, origin) in &branch.field_gap_origins {
+            output
+                .field_gap_origins
+                .entry(name.clone())
+                .or_insert_with(|| origin.clone());
         }
         output.evidence.extend(branch.evidence.clone());
     }
@@ -1772,6 +1856,9 @@ fn intersection_schema(
             || right.explicit_dynamic,
         fields: left.fields.clone(),
         field_gaps: left.field_gaps.clone(),
+        field_gap_origins: left.field_gap_origins,
+        shape_local_gaps: [left.shape_local_gaps, right.shape_local_gaps].concat(),
+        resolved_local_gaps: [left.resolved_local_gaps, right.resolved_local_gaps].concat(),
         gaps: [left.gaps.clone(), right.gaps.clone()].concat(),
         evidence: [left.evidence, right.evidence.clone()].concat(),
         ..Schema::default()
@@ -1779,6 +1866,11 @@ fn intersection_schema(
     for (name, fgaps) in right.field_gaps {
         if !output.fields.contains_key(&name) {
             output.field_gaps.entry(name).or_default().extend(fgaps);
+        }
+    }
+    for (name, origin) in right.field_gap_origins {
+        if !output.fields.contains_key(&name) {
+            output.field_gap_origins.entry(name).or_insert(origin);
         }
     }
     for (name, right_field) in right.fields {
@@ -1806,6 +1898,25 @@ fn intersection_schema(
             left_field.evidence.extend(right_field.evidence);
             left_field.evidence = dedupe_evidence(std::mem::take(&mut left_field.evidence));
         } else {
+            if let Some(mut origin) = output.field_gap_origins.remove(&name) {
+                let override_at = right_field
+                    .evidence
+                    .first()
+                    .and_then(|ev| ev.at.clone())
+                    .or_else(|| location.clone());
+                origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+                origin.resolved_by = Some(ExplainGapResolution {
+                    provider_id: "zod".to_string(),
+                    operation: label.to_string(),
+                    conclusion: format!(
+                        "field \"{name}\": {} (nullable={})",
+                        right_field.requirement.as_str(),
+                        right_field.nullable
+                    ),
+                    at: override_at,
+                });
+                output.resolved_local_gaps.push(origin);
+            }
             output.fields.insert(name.clone(), right_field);
             output.field_gaps.remove(&name);
         }
@@ -1828,16 +1939,37 @@ fn pipe_schema(location: Option<SourceLocation>, input: &Schema, output: &Schema
         recognized: input.recognized || output.recognized,
         explicit_dynamic: input.explicit_dynamic || output.explicit_dynamic,
         field_gaps: input.field_gaps.clone(),
+        field_gap_origins: input.field_gap_origins.clone(),
+        shape_local_gaps: [
+            input.shape_local_gaps.clone(),
+            output.shape_local_gaps.clone(),
+        ]
+        .concat(),
+        resolved_local_gaps: [
+            input.resolved_local_gaps.clone(),
+            output.resolved_local_gaps.clone(),
+        ]
+        .concat(),
         gaps: [input.gaps.clone(), output.gaps.clone()].concat(),
         evidence: [input.evidence.clone(), output.evidence.clone()].concat(),
         ..Schema::default()
     };
     for (name, fgaps) in &output.field_gaps {
-        schema
-            .field_gaps
-            .entry(name.clone())
-            .or_default()
-            .extend(fgaps.clone());
+        if !output.fields.contains_key(name) {
+            schema
+                .field_gaps
+                .entry(name.clone())
+                .or_default()
+                .extend(fgaps.clone());
+        }
+    }
+    for (name, origin) in &output.field_gap_origins {
+        if !output.fields.contains_key(name) {
+            schema
+                .field_gap_origins
+                .entry(name.clone())
+                .or_insert_with(|| origin.clone());
+        }
     }
     for name in names {
         let input_field = input.fields.get(&name);
@@ -1847,6 +1979,28 @@ fn pipe_schema(location: Option<SourceLocation>, input: &Schema, output: &Schema
             .cloned()
             .unwrap_or_else(|| Field::required(Vec::new()));
         if let Some(output_field) = output_field {
+            if input_field.is_none() {
+                if let Some(mut origin) = schema.field_gap_origins.remove(&name) {
+                    let override_at = output_field
+                        .evidence
+                        .first()
+                        .and_then(|ev| ev.at.clone())
+                        .or_else(|| location.clone());
+                    origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+                    origin.resolved_by = Some(ExplainGapResolution {
+                        provider_id: "zod".to_string(),
+                        operation: ".pipe()".to_string(),
+                        conclusion: format!(
+                            "field \"{name}\": {} (nullable={})",
+                            output_field.requirement.as_str(),
+                            output_field.nullable
+                        ),
+                        at: override_at,
+                    });
+                    schema.resolved_local_gaps.push(origin);
+                }
+                schema.field_gaps.remove(&name);
+            }
             field.presence = output_field.presence;
             field.nullable = output_field.nullable;
             field.from_default |= output_field.from_default;
@@ -2032,6 +2186,7 @@ fn unresolved_field(at: Option<SourceLocation>) -> FieldResult {
             message: "Zod field schema could not be statically resolved.".to_string(),
             at,
         }],
+        local_gaps: Vec::new(),
     }
 }
 
