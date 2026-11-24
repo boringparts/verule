@@ -464,6 +464,177 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     }
   });
 
+  void it("handles bracket relation reads, destructured aliases, chained rest omissions, omitted-relation counterexample, and targeted explain", async () => {
+    const root = createMonorepoFixture({
+      "packages/db/src/schema.ts": [
+        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
+        "",
+        'export const workspace = sqliteTable("workspace", {',
+        '  id: integer("id").primaryKey(),',
+        '  slug: text("slug").notNull(),',
+        '  name: text("name"),',
+        "});",
+        "",
+        'export const page = sqliteTable("page", {',
+        '  id: integer("id").primaryKey(),',
+        '  workspaceId: integer("workspace_id").notNull(),',
+        '  slug: text("slug").notNull(),',
+        '  customDomain: text("custom_domain"),',
+        "});",
+        "",
+        "export const pageRelations = relations(page, ({ one }) => ({",
+        "  workspace: one(workspace),",
+        "}));",
+        "",
+      ].join("\n"),
+      "packages/db/src/validation.ts": [
+        'import { createSelectSchema } from "./drizzle.js";',
+        'import { page, workspace } from "./schema.js";',
+        "",
+        "export const selectWorkspaceSchema = createSelectSchema(workspace);",
+        "export const selectPageSchema = createSelectSchema(page);",
+        "",
+      ].join("\n"),
+      "packages/db/src/index.ts": [
+        'export { db } from "./drizzle.js";',
+        'export { page, pageRelations, workspace } from "./schema.js";',
+        'export { selectPageSchema, selectWorkspaceSchema } from "./validation.js";',
+        "",
+      ].join("\n"),
+      "packages/validators/src/index.ts": [
+        'import { z } from "./zod.js";',
+        "",
+        "export const pageSlugSchema = z.object({",
+        "  slug: z.string(),",
+        "});",
+        "export const dynSchema = z.object({",
+        "  id: z.number(),",
+        "  slug: z.string(),",
+        "});",
+        "",
+      ].join("\n"),
+      "packages/api/src/routes.ts": [
+        'import { db, page, selectWorkspaceSchema } from "@fixture/db";',
+        'import { dynSchema, pageSlugSchema } from "@fixture/validators";',
+        "",
+        "declare function extraFields(): Record<string, unknown>;",
+        "",
+        "export async function checkCases(external: unknown) {",
+        "  const partialPage = await db.query.page.findFirst({",
+        "    columns: { slug: true, customDomain: true },",
+        "    with: { workspace: { columns: { id: true } } },",
+        "  });",
+        "  if (!partialPage) return null;",
+        "",
+        "  // Bracket access on nested relation missing `slug` -> MUST report at line 14",
+        '  const badBracketWs = selectWorkspaceSchema.safeParse(partialPage["workspace"]);',
+        "",
+        "  // Destructured same-name and aliased relation missing `slug` -> MUST report at lines 17 & 19",
+        "  const { workspace } = partialPage;",
+        "  const badDestructWs = selectWorkspaceSchema.safeParse(workspace);",
+        "  const { workspace: wsAlias } = partialPage;",
+        "  const badAliasWs = selectWorkspaceSchema.safeParse(wsAlias);",
+        "",
+        "  // Chained rest destructuring omitting `slug` -> MUST report missing `slug` at line 24",
+        "  const { customDomain: _cd, ...r1 } = partialPage;",
+        "  const { slug: _slug, ...r2 } = r1;",
+        "  const badChainedRest = pageSlugSchema.parse(r2);",
+        "",
+        "  // Counterexample: rest omitted `workspace`, so `withoutWs.workspace` must NOT match original relation",
+        "  const { workspace: _omittedWs, ...withoutWs } = partialPage;",
+        "  const omittedRel = selectWorkspaceSchema.safeParse((withoutWs as Record<string, unknown>).workspace);",
+        "",
+        "  // Passing case: r1 retains `slug`",
+        "  const okRest = pageSlugSchema.parse(r1);",
+        "",
+        "  // Dynamic projection gap case",
+        "  const dynRow = await db.select({ id: page.id, ...extraFields() }).from(page).get();",
+        "  const dynOut = dynRow ? dynSchema.parse(dynRow) : null;",
+        "",
+        "  // Unrelated non-query input",
+        "  const extOut = pageSlugSchema.parse(external);",
+        "",
+        "  return { badBracketWs, badDestructWs, badAliasWs, badChainedRest, omittedRel, okRest, dynOut, extOut };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    const session = await openSession({
+      cwd: root,
+      adapterResolutionRoot: packageRoot,
+      config: defineConfig({
+        projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
+        adapters: [drizzleAdapter, zodAdapter],
+        rules: [rowProjectionSatisfiesValidatorRule],
+      }),
+    });
+
+    try {
+      const report = await session.check();
+      assert.equal(report.status, "findings");
+      const diagLines = report.diagnostics
+        .map((d) => d.at.line)
+        .toSorted((a, b) => a - b);
+      assert.deepEqual(diagLines, [14, 18, 20, 25]);
+      for (const diag of report.diagnostics) {
+        assert.ok(diag.message.includes("slug"), diag.message);
+        assert.ok(
+          diag.evidence.some(
+            (e) => e.at?.file === "packages/api/src/routes.ts",
+          ),
+        );
+        assert.ok(
+          diag.evidence.some((e) => e.at?.file === "packages/db/src/schema.ts"),
+        );
+      }
+
+      const explainedReported = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:14:24",
+      });
+      assert.equal(explainedReported.explanation.status, "reported");
+      assert.ok(explainedReported.diagnostics.some((d) => d.at.line === 14));
+
+      const explainedPass = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:32:18",
+      });
+      assert.ok(
+        explainedPass.explanation.checkpoints.some(
+          (cp) =>
+            cp.name === "row-projection-satisfied" && cp.outcome === "pass",
+        ),
+      );
+
+      const explainedDyn = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:36:27",
+      });
+      assert.equal(explainedDyn.explanation.status, "excluded_by_checkpoint");
+      assert.equal(
+        explainedDyn.explanation.excludedByCheckpoint?.name,
+        "dynamic-query-projection-gap",
+      );
+
+      const explainedUnrelated = await session.explain({
+        ruleId: "row-projection-satisfies-validator",
+        at: "packages/api/src/routes.ts:39:18",
+      });
+      assert.equal(
+        explainedUnrelated.explanation.status,
+        "excluded_by_checkpoint",
+      );
+      assert.equal(
+        explainedUnrelated.explanation.excludedByCheckpoint?.name,
+        "validator-input-not-from-query",
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @verule/sdk .d.ts", () => {
     const root = mkdtempSync(join(tmpdir(), "verule-rules-ref-typecheck-"));
     try {
