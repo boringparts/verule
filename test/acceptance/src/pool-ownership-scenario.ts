@@ -596,21 +596,32 @@ const FIXED_LIST_FACTORY_BODY = [
   "  }",
 ].join("\n");
 
+function replaceFileSegments(
+  host: PreparedAcceptanceHost,
+  relativePath: string,
+  replacements: readonly (readonly [string, string])[],
+): void {
+  let content = host.readText(relativePath);
+  for (const [search, replacement] of replacements) {
+    if (!content.includes(search)) {
+      throw new Error(
+        `Expected ${relativePath} to contain ${JSON.stringify(search)}`,
+      );
+    }
+    content = content.replace(search, replacement);
+  }
+  host.writeText(relativePath, content);
+}
+
 /** Moves `CollapsibleListPool`'s `ResourceLabels` from outer `this._register` to an item-owned `DisposableStore`. */
 export function fixPoolOwnershipViolation(
   host: PreparedAcceptanceHost,
   spec: PoolOwnershipMaterializedSpec,
 ): void {
-  host.replaceText(
-    spec.violatingFile,
-    BUGGY_LIST_IMPORT_AND_FACTORY,
-    FIXED_LIST_IMPORT_AND_FACTORY,
-  );
-  host.replaceText(
-    spec.violatingFile,
-    BUGGY_LIST_FACTORY_BODY,
-    FIXED_LIST_FACTORY_BODY,
-  );
+  replaceFileSegments(host, spec.violatingFile, [
+    [BUGGY_LIST_IMPORT_AND_FACTORY, FIXED_LIST_IMPORT_AND_FACTORY],
+    [BUGGY_LIST_FACTORY_BODY, FIXED_LIST_FACTORY_BODY],
+  ]);
 }
 
 /** Restores `CollapsibleListPool`'s outer `this._register` ownership violation. */
@@ -618,16 +629,10 @@ export function restorePoolOwnershipViolation(
   host: PreparedAcceptanceHost,
   spec: PoolOwnershipMaterializedSpec,
 ): void {
-  host.replaceText(
-    spec.violatingFile,
-    FIXED_LIST_IMPORT_AND_FACTORY,
-    BUGGY_LIST_IMPORT_AND_FACTORY,
-  );
-  host.replaceText(
-    spec.violatingFile,
-    FIXED_LIST_FACTORY_BODY,
-    BUGGY_LIST_FACTORY_BODY,
-  );
+  replaceFileSegments(host, spec.violatingFile, [
+    [FIXED_LIST_IMPORT_AND_FACTORY, BUGGY_LIST_IMPORT_AND_FACTORY],
+    [FIXED_LIST_FACTORY_BODY, BUGGY_LIST_FACTORY_BODY],
+  ]);
 }
 
 /** Appends a comment to an included background `.ts` file without changing semantics. */

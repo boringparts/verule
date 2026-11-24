@@ -4,5 +4,11 @@
     "types": ["node"],
     "declarationMap": false
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scenarios/**/*.ts", "*.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "test/**/*.ts",
+    "scenarios/**/*.ts",
+    "*.config.ts"
+  ]
 }
