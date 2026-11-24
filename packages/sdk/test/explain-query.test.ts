@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 
@@ -12,94 +9,54 @@ import {
   runCheck,
   type SyntaxRef,
 } from "@verule/sdk";
-
-function createTempProject(sourceText: string): string {
-  const root = mkdtempSync(join(tmpdir(), "verule-sdk-explain-"));
-  mkdirSync(join(root, "src"), { recursive: true });
-  writeFileSync(
-    join(root, "tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-        },
-        include: ["src/**/*.ts"],
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-  writeFileSync(join(root, "src", "handlers.ts"), sourceText, "utf8");
-  return root;
-}
-
-const SAMPLE_SOURCE = [
-  "function sink(_mode: string, value: string | number): string {",
-  "  return String(value);",
-  "}",
-  "",
-  'export function processValue(input: string | number, mode: "fast" | "safe"): string {',
-  '  if (typeof input === "string") {',
-  "    return sink(mode, input);",
-  "  }",
-  '  if (mode === "fast") {',
-  "    return sink(mode, input);",
-  "  }",
-  "  return String(input);",
-  "}",
-  "",
-].join("\n");
+import { withTempHost } from "@verule/test-hosts";
 
 void describe("@verule/sdk explain and observation", () => {
   void it("skips lazy checkpoint details when observe is off or summary, and evaluates them in detail mode", async () => {
-    const root = createTempProject(SAMPLE_SOURCE);
-    let detailEvalCount = 0;
+    await withTempHost({ host: "sdk-projects/explain-basic" }, async (host) => {
+      await host.typecheck();
+      let detailEvalCount = 0;
 
-    const ruleWithCheckpoint = defineRule({
-      id: "rule-sink-string",
-      run: async (ctx) => {
-        const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
-        const sinks = calls.filter((c) => c.text.startsWith("sink("));
-        const args = sinks
-          .map((c) => c.arguments?.[1])
-          .filter((arg): arg is SyntaxRef => arg !== undefined);
-        const types = await ctx.typeAt(args);
+      const ruleWithCheckpoint = defineRule({
+        id: "rule-sink-string",
+        run: async (ctx) => {
+          const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
+          const sinks = calls.filter((c) => c.text.startsWith("sink("));
+          const args = sinks
+            .map((c) => c.arguments?.[1])
+            .filter((arg): arg is SyntaxRef => arg !== undefined);
+          const types = await ctx.typeAt(args);
 
-        for (const [index, ty] of types.entries()) {
-          const call = sinks[index]!;
-          if (ty.typeText === "string") {
-            ctx.checkpoint("require-string-arg", call, "pass", () => {
-              detailEvalCount += 1;
-              return { actualType: ty.typeText };
-            });
-            ctx.report({
-              at: call.location,
-              message: "sink() received narrowed string",
-              findingKey: "narrowed-string",
-            });
-          } else {
-            ctx.checkpoint("require-string-arg", call, "exclude", () => {
-              detailEvalCount += 1;
-              return { actualType: ty.typeText, expected: "string" };
-            });
+          for (const [index, ty] of types.entries()) {
+            const call = sinks[index]!;
+            if (ty.typeText === "string") {
+              ctx.checkpoint("require-string-arg", call, "pass", () => {
+                detailEvalCount += 1;
+                return { actualType: ty.typeText };
+              });
+              ctx.report({
+                at: call.location,
+                message: "sink() received narrowed string",
+                findingKey: "narrowed-string",
+              });
+            } else {
+              ctx.checkpoint("require-string-arg", call, "exclude", () => {
+                detailEvalCount += 1;
+                return { actualType: ty.typeText, expected: "string" };
+              });
+            }
           }
-        }
-      },
-    });
+        },
+      });
 
-    const config = defineConfig({
-      tsconfig: "tsconfig.json",
-      rules: [ruleWithCheckpoint],
-    });
+      const config = defineConfig({
+        tsconfig: "tsconfig.json",
+        rules: [ruleWithCheckpoint],
+      });
 
-    try {
       // 1. Default observe = "off": zero debug fields, zero lazy detail evaluations
       const offStart = performance.now();
-      const offReport = await runCheck({ cwd: root, config });
+      const offReport = await runCheck({ cwd: host.rootDir, config });
       const offElapsedMs = performance.now() - offStart;
       assert.equal(detailEvalCount, 0);
       assert.equal("observation" in offReport, false);
@@ -107,7 +64,7 @@ void describe("@verule/sdk explain and observation", () => {
 
       // 2. observe = "summary": phase/rpc/overhead metrics present, details omitted, lazy detail skipped
       const summaryReport = await runCheck({
-        cwd: root,
+        cwd: host.rootDir,
         config,
         observe: "summary",
       });
@@ -130,7 +87,7 @@ void describe("@verule/sdk explain and observation", () => {
       // 3. observe = "detail": evaluates lazy callbacks, business report remains identical
       const detailStart = performance.now();
       const detailReport = await runCheck({
-        cwd: root,
+        cwd: host.rootDir,
         config,
         observe: "detail",
       });
@@ -146,29 +103,27 @@ void describe("@verule/sdk explain and observation", () => {
       assert.deepEqual(detailReport.diagnostics, offReport.diagnostics);
       assert.deepEqual(detailReport.gaps, offReport.gaps);
       assert.deepEqual(detailReport.projects, offReport.projects);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   void it("marks truncation and droppedCount when observeLimit is exceeded", async () => {
-    const root = createTempProject(SAMPLE_SOURCE);
-    const rule = defineRule({
-      id: "rule-many-checkpoints",
-      run: async (ctx) => {
-        const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
-        for (const call of calls) {
-          ctx.checkpoint("visit-call", call, "info", () => ({
-            text: call.text,
-            padding: "x".repeat(64),
-          }));
-        }
-      },
-    });
+    await withTempHost({ host: "sdk-projects/explain-basic" }, async (host) => {
+      await host.typecheck();
+      const rule = defineRule({
+        id: "rule-many-checkpoints",
+        run: async (ctx) => {
+          const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
+          for (const call of calls) {
+            ctx.checkpoint("visit-call", call, "info", () => ({
+              text: call.text,
+              padding: "x".repeat(64),
+            }));
+          }
+        },
+      });
 
-    try {
       const itemLimited = await runCheck({
-        cwd: root,
+        cwd: host.rootDir,
         config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
         observe: "detail",
         observeLimit: { maxItems: 2 },
@@ -179,7 +134,7 @@ void describe("@verule/sdk explain and observation", () => {
       assert.equal(itemLimited.observation.details?.length, 2);
 
       const byteLimited = await runCheck({
-        cwd: root,
+        cwd: host.rootDir,
         config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
         observe: "detail",
         observeLimit: { maxBytes: 220 },
@@ -187,196 +142,190 @@ void describe("@verule/sdk explain and observation", () => {
       assert.ok(byteLimited.observation);
       assert.equal(byteLimited.observation.truncated, true);
       assert.ok(byteLimited.observation.droppedCount >= 1);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   void it("explains checkpoint exclusion, candidate miss, out-of-project targets, reported targets, and reused queries", async () => {
-    const root = createTempProject(SAMPLE_SOURCE);
-    const firstRule = defineRule({
-      id: "rule-prefilter",
-      run: async (ctx) => {
-        await ctx.findSyntax({ kinds: ["CallExpression"] });
-      },
-    });
-    const targetRule = defineRule({
-      id: "rule-sink-string",
-      run: async (ctx) => {
-        const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
-        const sinks = calls.filter((c) => c.text.startsWith("sink("));
-        const args = sinks
-          .map((c) => c.arguments?.[1])
-          .filter((arg): arg is SyntaxRef => arg !== undefined);
-        const types = await ctx.typeAt(args);
+    await withTempHost({ host: "sdk-projects/explain-basic" }, async (host) => {
+      await host.typecheck();
+      const firstRule = defineRule({
+        id: "rule-prefilter",
+        run: async (ctx) => {
+          await ctx.findSyntax({ kinds: ["CallExpression"] });
+        },
+      });
+      const targetRule = defineRule({
+        id: "rule-sink-string",
+        run: async (ctx) => {
+          const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
+          const sinks = calls.filter((c) => c.text.startsWith("sink("));
+          const args = sinks
+            .map((c) => c.arguments?.[1])
+            .filter((arg): arg is SyntaxRef => arg !== undefined);
+          const types = await ctx.typeAt(args);
 
-        for (const [index, ty] of types.entries()) {
-          const call = sinks[index]!;
-          if (ty.typeText === "string") {
-            ctx.checkpoint("require-string-arg", call, "pass", () => ({
-              actualType: ty.typeText,
-            }));
-            ctx.report({
-              at: call.location,
-              message: "sink() received narrowed string",
-            });
-          } else {
-            ctx.checkpoint("require-string-arg", call, "exclude", () => ({
-              actualType: ty.typeText,
-              expected: "string",
-            }));
+          for (const [index, ty] of types.entries()) {
+            const call = sinks[index]!;
+            if (ty.typeText === "string") {
+              ctx.checkpoint("require-string-arg", call, "pass", () => ({
+                actualType: ty.typeText,
+              }));
+              ctx.report({
+                at: call.location,
+                message: "sink() received narrowed string",
+              });
+            } else {
+              ctx.checkpoint("require-string-arg", call, "exclude", () => ({
+                actualType: ty.typeText,
+                expected: "string",
+              }));
+            }
           }
-        }
-      },
+        },
+      });
+
+      const session = await openSession({
+        cwd: host.rootDir,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [firstRule, targetRule],
+        }),
+      });
+
+      try {
+        // 1. Excluded by named checkpoint (line 13: return sink(mode, input);)
+        const excluded = await session.explain({
+          ruleId: "rule-sink-string",
+          at: "src/handlers.ts:13:12",
+        });
+        assert.equal(excluded.explanation.status, "excluded_by_checkpoint");
+        assert.equal(excluded.explanation.inCandidates, true);
+        assert.equal(
+          excluded.explanation.excludedByCheckpoint?.name,
+          "require-string-arg",
+        );
+        assert.deepEqual(excluded.explanation.excludedByCheckpoint?.detail, {
+          actualType: "number",
+          expected: "string",
+        });
+        // Because firstRule already queried CallExpression in the same session, check cacheStatus tracking
+        assert.ok(
+          excluded.explanation.queries.some(
+            (q) => q.op === "findSyntax" && q.candidateCount >= 3,
+          ),
+        );
+
+        // 2. Also verify reused query tracking when running both rules in one check with explain
+        const combinedExplain = await session.check({
+          at: "src/handlers.ts:13:12",
+          observe: "summary",
+        });
+        const secondRuleExplain = combinedExplain.explanations?.find(
+          (item) => item.ruleId === "rule-sink-string",
+        );
+        assert.ok(secondRuleExplain);
+        assert.ok(
+          secondRuleExplain.queries.some(
+            (q) => q.op === "findSyntax" && q.cacheStatus === "reused",
+          ),
+        );
+
+        // 3. Not in candidates (line 1: function declaration signature, not a CallExpression)
+        const notCandidate = await session.explain({
+          ruleId: "rule-sink-string",
+          at: "src/handlers.ts:1:1",
+        });
+        assert.equal(notCandidate.explanation.inCandidates, false);
+        assert.equal(notCandidate.explanation.status, "not_in_candidates");
+        assert.equal(
+          notCandidate.explanation.excludedByQuery?.op,
+          "findSyntax",
+        );
+
+        // 4. Target not in project
+        const missingFile = await session.explain({
+          ruleId: "rule-sink-string",
+          at: "src/nonexistent.ts:5:1",
+        });
+        assert.equal(missingFile.explanation.inCandidates, false);
+        assert.equal(missingFile.explanation.status, "target_not_in_project");
+
+        // 5. Reported at target (line 10: return sink(mode, input);)
+        const reported = await session.explain({
+          ruleId: "rule-sink-string",
+          at: "src/handlers.ts:10:12",
+        });
+        assert.equal(reported.explanation.status, "reported");
+        assert.equal(reported.explanation.inCandidates, true);
+      } finally {
+        await session.close();
+      }
     });
-
-    const session = await openSession({
-      cwd: root,
-      config: defineConfig({
-        tsconfig: "tsconfig.json",
-        rules: [firstRule, targetRule],
-      }),
-    });
-
-    try {
-      // 1. Excluded by named checkpoint (line 10: return sink(mode, input);)
-      const excluded = await session.explain({
-        ruleId: "rule-sink-string",
-        at: "src/handlers.ts:10:12",
-      });
-      assert.equal(excluded.explanation.status, "excluded_by_checkpoint");
-      assert.equal(excluded.explanation.inCandidates, true);
-      assert.equal(
-        excluded.explanation.excludedByCheckpoint?.name,
-        "require-string-arg",
-      );
-      assert.deepEqual(excluded.explanation.excludedByCheckpoint?.detail, {
-        actualType: "number",
-        expected: "string",
-      });
-      // Because firstRule already queried CallExpression in the same session, check cacheStatus tracking
-      assert.ok(
-        excluded.explanation.queries.some(
-          (q) => q.op === "findSyntax" && q.candidateCount >= 3,
-        ),
-      );
-
-      // 2. Also verify reused query tracking when running both rules in one check with explain
-      const combinedExplain = await session.check({
-        at: "src/handlers.ts:10:12",
-        observe: "summary",
-      });
-      const secondRuleExplain = combinedExplain.explanations?.find(
-        (item) => item.ruleId === "rule-sink-string",
-      );
-      assert.ok(secondRuleExplain);
-      assert.ok(
-        secondRuleExplain.queries.some(
-          (q) => q.op === "findSyntax" && q.cacheStatus === "reused",
-        ),
-      );
-
-      // 3. Not in candidates (line 1: function declaration signature, not a CallExpression)
-      const notCandidate = await session.explain({
-        ruleId: "rule-sink-string",
-        at: "src/handlers.ts:1:1",
-      });
-      assert.equal(notCandidate.explanation.inCandidates, false);
-      assert.equal(notCandidate.explanation.status, "not_in_candidates");
-      assert.equal(notCandidate.explanation.excludedByQuery?.op, "findSyntax");
-
-      // 4. Target not in project
-      const missingFile = await session.explain({
-        ruleId: "rule-sink-string",
-        at: "src/nonexistent.ts:5:1",
-      });
-      assert.equal(missingFile.explanation.inCandidates, false);
-      assert.equal(missingFile.explanation.status, "target_not_in_project");
-
-      // 5. Reported at target (line 7: return sink(mode, input);)
-      const reported = await session.explain({
-        ruleId: "rule-sink-string",
-        at: "src/handlers.ts:7:12",
-      });
-      assert.equal(reported.explanation.status, "reported");
-      assert.equal(reported.explanation.inCandidates, true);
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 
   void it("preserves query gaps when cached relation queries are reused across same-snapshot check and explain calls", async () => {
-    const root = createTempProject(
-      [
-        "interface ExternalParser {",
-        "  parse(value: unknown): unknown;",
-        "}",
-        "declare const parser: ExternalParser;",
-        "declare function makeInput(): { id: number };",
-        "",
-        "export function runFlow() {",
-        "  const row = makeInput();",
-        "  return parser.parse(row);",
-        "}",
-        "",
-      ].join("\n"),
-    );
+    await withTempHost(
+      { host: "sdk-projects/explain-parser" },
+      async (host) => {
+        await host.typecheck();
 
-    const propRule = defineRule({
-      id: "rule-prop-gap-cache",
-      run: async (ctx) => {
-        const calls = await ctx.findSyntax({
-          files: ["src/handlers.ts"],
-          kinds: ["CallExpression"],
+        const propRule = defineRule({
+          id: "rule-prop-gap-cache",
+          run: async (ctx) => {
+            const calls = await ctx.findSyntax({
+              files: ["src/handlers.ts"],
+              kinds: ["CallExpression"],
+            });
+            const makeCall = calls.find((c) => c.text === "makeInput()");
+            const parseCall = calls.find((c) =>
+              c.text.startsWith("parser.parse("),
+            );
+            const argRef = parseCall?.arguments?.[0];
+            if (!makeCall || !parseCall || !argRef) return;
+            await ctx.valuePropagation({
+              propagation: "value",
+              from: makeCall.ref,
+              to: argRef,
+            });
+          },
         });
-        const makeCall = calls.find((c) => c.text === "makeInput()");
-        const parseCall = calls.find((c) => c.text.startsWith("parser.parse("));
-        const argRef = parseCall?.arguments?.[0];
-        if (!makeCall || !parseCall || !argRef) return;
-        await ctx.valuePropagation({
-          propagation: "value",
-          from: makeCall.ref,
-          to: argRef,
+
+        const session = await openSession({
+          cwd: host.rootDir,
+          config: defineConfig({
+            tsconfig: "tsconfig.json",
+            rules: [propRule],
+          }),
         });
+
+        try {
+          const first = await session.check();
+          assert.ok(
+            first.gaps.some((g) => g.kind === "dynamic-callee"),
+            JSON.stringify(first.gaps),
+          );
+
+          // Reusing cached valuePropagation on the same snapshot MUST preserve report.gaps and explain.gaps.
+          const second = await session.check({ at: "src/handlers.ts:9:10" });
+          assert.equal(
+            second.identity.snapshotDigest,
+            first.identity.snapshotDigest,
+          );
+          assert.deepEqual(second.gaps, first.gaps);
+          const exp =
+            second.explanation ??
+            second.explanations?.find(
+              (item) => item.ruleId === "rule-prop-gap-cache",
+            );
+          assert.ok(exp);
+          assert.ok(
+            exp.gaps.some((g) => g.kind === "dynamic-callee"),
+            JSON.stringify(exp.gaps),
+          );
+        } finally {
+          await session.close();
+        }
       },
-    });
-
-    const session = await openSession({
-      cwd: root,
-      config: defineConfig({
-        tsconfig: "tsconfig.json",
-        rules: [propRule],
-      }),
-    });
-
-    try {
-      const first = await session.check();
-      assert.ok(
-        first.gaps.some((g) => g.kind === "dynamic-callee"),
-        JSON.stringify(first.gaps),
-      );
-
-      // Reusing cached valuePropagation on the same snapshot MUST preserve report.gaps and explain.gaps.
-      const second = await session.check({ at: "src/handlers.ts:9:10" });
-      assert.equal(
-        second.identity.snapshotDigest,
-        first.identity.snapshotDigest,
-      );
-      assert.deepEqual(second.gaps, first.gaps);
-      const exp =
-        second.explanation ??
-        second.explanations?.find(
-          (item) => item.ruleId === "rule-prop-gap-cache",
-        );
-      assert.ok(exp);
-      assert.ok(
-        exp.gaps.some((g) => g.kind === "dynamic-callee"),
-        JSON.stringify(exp.gaps),
-      );
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+    );
   });
 });
