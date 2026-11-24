@@ -379,6 +379,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
+      '@verule/test-hosts':
+        specifier: workspace:*
+        version: link:../../test/hosts
       '@verule/tooling-config':
         specifier: workspace:*
         version: link:../tooling-config
@@ -442,6 +445,9 @@ importers:
       '@verule/acceptance-host-zod-data':
         specifier: workspace:*
         version: link:../acceptance-host/overlays/zod/data
+      '@verule/test-hosts':
+        specifier: workspace:*
+        version: link:../hosts
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -659,6 +665,27 @@ importers:
       oxlint:
         specifier: 'catalog:'
         version: 1.94.0
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  test/hosts:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.6.6
+      '@verule/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.79.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.94.0
+      tsrs:
+        specifier: 'catalog:'
+        version: 7.1.0-beta.tsrs4
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2

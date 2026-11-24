@@ -1,17 +1,15 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { NormalizedVeruleConfig } from "@verule/sdk";
+import {
+  type CleanupFn,
+  createHostFileAccessors,
+  runCleanupsLifo,
+} from "@verule/test-hosts";
 
 import {
   type PackedArtifact,
@@ -131,23 +129,6 @@ export type PreparedAcceptanceHost = {
   [Symbol.asyncDispose](): Promise<void>;
 };
 
-async function runCleanupsLifo(
-  cleanups: Array<() => Promise<void> | void>,
-): Promise<unknown> {
-  let firstError: unknown;
-  while (cleanups.length > 0) {
-    const cleanup = cleanups.pop()!;
-    try {
-      await cleanup();
-    } catch (error) {
-      if (firstError === undefined) {
-        firstError = error;
-      }
-    }
-  }
-  return firstError;
-}
-
 /**
  * Prepares an isolated out-of-repo acceptance host with packed workspace
  * artifacts installed and verified, guaranteeing LIFO resource reclamation on
@@ -156,7 +137,7 @@ async function runCleanupsLifo(
 export async function prepareAcceptanceHost(
   options: PrepareAcceptanceHostOptions = {},
 ): Promise<PreparedAcceptanceHost> {
-  const cleanups: Array<() => Promise<void> | void> = [];
+  const cleanups: CleanupFn[] = [];
   const tempParent = options.tempRoot ?? tmpdir();
   mkdirSync(tempParent, { recursive: true });
   const environmentDir = mkdtempSync(join(tempParent, "verule-host-"));
@@ -258,8 +239,8 @@ export async function prepareAcceptanceHost(
       return disposePromise;
     };
 
-    const resolvePath = (relativePath: string): string =>
-      join(hostDir, relativePath);
+    const hostFiles = createHostFileAccessors(hostDir);
+    const resolvePath = hostFiles.resolvePath;
 
     const runCli = (
       args: readonly string[],
@@ -295,28 +276,9 @@ export async function prepareAcceptanceHost(
       audit,
       nativeLibraries,
       resolvePath,
-      readText(relativePath: string): string {
-        return readFileSync(resolvePath(relativePath), "utf8");
-      },
-      writeText(relativePath: string, content: string): void {
-        writeFileSync(resolvePath(relativePath), content, "utf8");
-      },
-      replaceText(
-        relativePath: string,
-        search: string,
-        replacement: string,
-      ): string {
-        const filePath = resolvePath(relativePath);
-        const current = readFileSync(filePath, "utf8");
-        if (!current.includes(search)) {
-          throw new Error(
-            `Expected ${relativePath} to contain ${JSON.stringify(search)}`,
-          );
-        }
-        const next = current.replace(search, replacement);
-        writeFileSync(filePath, next, "utf8");
-        return next;
-      },
+      readText: hostFiles.readText,
+      writeText: hostFiles.writeText,
+      replaceText: hostFiles.replaceText,
       artifact: getArtifact,
       runCli,
       async check(

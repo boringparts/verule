@@ -11,7 +11,8 @@
         "@verule/cli#build",
         "@verule/engine#build",
         "@verule/rules-reference#build",
-        "@verule/sdk#build"
+        "@verule/sdk#build",
+        "@verule/test-hosts#build"
       ],
       "inputs": [],
       "outputs": ["dist/**"],
