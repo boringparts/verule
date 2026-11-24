@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@acme/lifecycle": [
+        "./node_modules/@acme/lifecycle/index.d.ts",
+        "./vendor/@acme/lifecycle/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*"]
+}

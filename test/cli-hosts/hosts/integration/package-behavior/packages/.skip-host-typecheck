@@ -1,0 +1,1 @@
+packages/esm and packages/cjs import synthetic node_modules/dual-pkg without paths overrides to verify package.json exports; they are typechecked via host.typecheck() after materialization.
