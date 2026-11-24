@@ -11,6 +11,7 @@ import {
   defineFactProvider,
   defineFactType,
   defineRule,
+  openSession,
   runCheck,
   type FactResult,
 } from "@verule/sdk";
@@ -1162,6 +1163,431 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
           /cyclic/iu.test(err.message),
       );
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("distinguishes skipped providers, unresolved gaps with blocked_by_gap, and resolved_by_override across same-snapshot explain", async () => {
+    const root = createTempProject({
+      "src/source.ts": [
+        "export function defineSpec(name: string, fields: Record<string, string>) {",
+        "  return { name, fields };",
+        "}",
+        "export function dynamicSpec(): string { return 'dynamic'; }",
+        'export const orderSpec = defineSpec("order", {',
+        '  orderId: "required",',
+        "  couponCode: dynamicSpec(),",
+        "});",
+        "",
+      ].join("\n"),
+      "src/consumer.ts": [
+        'import { orderSpec } from "./source.js";',
+        "export function useSpec(spec: unknown, overrides?: Record<string, string>) {",
+        "  return { spec, overrides };",
+        "}",
+        "export function unrelatedHelper(x: string): string { return x; }",
+        "export const rawConsumer = useSpec(orderSpec);",
+        'export const overriddenConsumer = useSpec(orderSpec, { couponCode: "defaulted" });',
+        'export const ignoredValue = unrelatedHelper("ok");',
+        "",
+      ].join("\n"),
+    });
+
+    type SpecValue = {
+      readonly sourceName: string;
+      readonly fields: Readonly<Record<string, string>>;
+      readonly unknownFields: readonly string[];
+    };
+
+    const SourceSpecFact = defineFactType<"syntax", undefined, SpecValue>({
+      id: "ts.explain.source-spec",
+      subjectKind: "syntax",
+    });
+
+    const DerivedConsumerFact = defineFactType<
+      "syntax",
+      undefined,
+      SpecValue & { readonly consumerName: string }
+    >({
+      id: "ts.explain.derived-consumer",
+      subjectKind: "syntax",
+    });
+
+    const UnusedFact = defineFactType<
+      "syntax",
+      undefined,
+      { readonly ok: true }
+    >({
+      id: "ts.explain.unused",
+      subjectKind: "syntax",
+    });
+
+    let adapterAExplainFlags: boolean[] = [];
+    let adapterBExplainFlags: boolean[] = [];
+
+    const adapterA = defineAdapter({
+      id: "ts-gap-adapter-a",
+      provides: [
+        defineFactProvider(SourceSpecFact, async (ctx, request) => {
+          adapterAExplainFlags.push(Boolean(request.explain));
+          const calls = await ctx.findSyntax({
+            files: ["src/source.ts"],
+            kinds: ["CallExpression"],
+          });
+          const specCall = calls.find((c) => c.text.startsWith("defineSpec("));
+          const dynamicCall = calls.find((c) =>
+            c.text.startsWith("dynamicSpec("),
+          );
+          if (!specCall || !dynamicCall) return [];
+          if (
+            request.targets &&
+            !request.targets.some((t) => t.handleId === specCall.ref.handleId)
+          ) {
+            return [];
+          }
+          const gap = {
+            kind: "unresolved-fixture-field",
+            message:
+              'Field "couponCode" in "order" could not be statically resolved.',
+            at: dynamicCall.location,
+          };
+          return [
+            {
+              subject: specCall.ref,
+              value: {
+                sourceName: "order",
+                fields: { orderId: "required" },
+                unknownFields: ["couponCode"],
+              },
+              evidence: [
+                {
+                  kind: "source",
+                  message: "Adapter A extracted source spec on orderSpec.",
+                  at: specCall.location,
+                },
+              ],
+              gaps: [gap],
+              ...(request.explain
+                ? {
+                    explainTrace: {
+                      localGaps: [
+                        {
+                          status: "unresolved" as const,
+                          factTypeId: SourceSpecFact.id,
+                          providerId: "ts-gap-adapter-a",
+                          field: "couponCode",
+                          gap,
+                          subjectLocation: specCall.location,
+                        },
+                      ],
+                    },
+                  }
+                : {}),
+            },
+          ];
+        }),
+      ],
+    });
+
+    const adapterB = defineAdapter({
+      id: "ts-gap-adapter-b",
+      provides: [
+        defineFactProvider(DerivedConsumerFact, async (ctx, request) => {
+          adapterBExplainFlags.push(Boolean(request.explain));
+          const consumerCalls = await ctx.findSyntax({
+            files: ["src/consumer.ts"],
+            kinds: ["CallExpression"],
+          });
+          const sourceCalls = await ctx.findSyntax({
+            files: ["src/source.ts"],
+            kinds: ["CallExpression"],
+          });
+          const targetA = sourceCalls.find((c) =>
+            c.text.startsWith("defineSpec("),
+          );
+          if (!targetA) return [];
+          const sourceFacts = await ctx.facts(SourceSpecFact, {
+            targets: [targetA.ref],
+          });
+          const factA = sourceFacts[0];
+          if (!factA) return [];
+
+          const useCalls = consumerCalls.filter((c) =>
+            c.text.startsWith("useSpec("),
+          );
+          const out = [];
+          for (const call of useCalls) {
+            if (
+              request.targets &&
+              !request.targets.some((t) => t.handleId === call.ref.handleId)
+            ) {
+              continue;
+            }
+            const hasOverride = call.text.includes('couponCode: "defaulted"');
+            if (hasOverride) {
+              const fields = {
+                ...factA.value.fields,
+                couponCode: "defaulted",
+              };
+              const initialGap = factA.gaps[0]!;
+              out.push({
+                subject: call.ref,
+                value: {
+                  consumerName: "overriddenConsumer",
+                  sourceName: factA.value.sourceName,
+                  fields,
+                  unknownFields: [],
+                },
+                basis: [factA],
+                evidence: [
+                  {
+                    kind: "source" as const,
+                    message:
+                      'Adapter B overrode "couponCode" to "defaulted" on overriddenConsumer.',
+                    at: call.location,
+                  },
+                ],
+                gaps: [],
+                ...(request.explain
+                  ? {
+                      explainTrace: {
+                        localGaps: [
+                          {
+                            status: "resolved_by_override" as const,
+                            factTypeId: SourceSpecFact.id,
+                            providerId: "ts-gap-adapter-a",
+                            field: "couponCode",
+                            gap: initialGap,
+                            subjectLocation: call.location,
+                            resolvedBy: {
+                              providerId: "ts-gap-adapter-b",
+                              operation: "override",
+                              conclusion: "couponCode=defaulted",
+                              at: call.location,
+                            },
+                          },
+                        ],
+                      },
+                    }
+                  : {}),
+              });
+            } else {
+              out.push({
+                subject: call.ref,
+                value: {
+                  consumerName: "rawConsumer",
+                  sourceName: factA.value.sourceName,
+                  fields: { ...factA.value.fields },
+                  unknownFields: [...factA.value.unknownFields],
+                },
+                basis: [factA],
+                evidence: [
+                  {
+                    kind: "source" as const,
+                    message:
+                      "Adapter B derived rawConsumer without overriding couponCode.",
+                    at: call.location,
+                  },
+                ],
+                gaps: factA.gaps,
+                ...(request.explain
+                  ? {
+                      explainTrace: {
+                        localGaps: [
+                          {
+                            status: "unresolved" as const,
+                            factTypeId: SourceSpecFact.id,
+                            providerId: "ts-gap-adapter-a",
+                            field: "couponCode",
+                            gap: factA.gaps[0]!,
+                            subjectLocation: call.location,
+                          },
+                        ],
+                      },
+                    }
+                  : {}),
+              });
+            }
+          }
+          return out;
+        }),
+      ],
+    });
+
+    const unusedAdapter = defineAdapter({
+      id: "ts-gap-unused",
+      provides: [defineFactProvider(UnusedFact, () => [])],
+    });
+
+    const independentFieldRule = defineRule({
+      id: "ts-independent-field-rule",
+      run: async (ctx) => {
+        const items = await ctx.facts(DerivedConsumerFact);
+        for (const item of items) {
+          if (item.value.fields.orderId === "required") {
+            const at = item.evidence.find((ev) =>
+              ev.message.includes("Adapter B"),
+            )?.at;
+            if (at) {
+              ctx.report({
+                at,
+                findingKey: `req-orderId-${item.value.consumerName}`,
+                message: `${item.value.consumerName}: orderId is required`,
+                basis: [item],
+              });
+            }
+          }
+        }
+      },
+    });
+
+    const couponRequiredRule = defineRule({
+      id: "ts-coupon-check-rule",
+      run: async (ctx) => {
+        const items = await ctx.facts(DerivedConsumerFact);
+        for (const item of items) {
+          if (item.value.unknownFields.includes("couponCode")) {
+            continue;
+          }
+          if (item.value.fields.couponCode === "defaulted") {
+            const at = item.evidence.find((ev) =>
+              ev.message.includes("Adapter B"),
+            )?.at;
+            if (at) {
+              ctx.report({
+                at,
+                findingKey: `coupon-defaulted-${item.value.consumerName}`,
+                message: `${item.value.consumerName}: couponCode defaulted`,
+                basis: [item],
+              });
+            }
+          }
+        }
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: [adapterA, adapterB, unusedAdapter],
+        rules: [independentFieldRule, couponRequiredRule],
+      }),
+    });
+
+    try {
+      // Normal check (explain == false): only unresolved gap from rawConsumer leaks into CheckReport.gaps.
+      const normalReport = await session.check();
+      assert.deepEqual(adapterAExplainFlags, [false]);
+      assert.deepEqual(adapterBExplainFlags, [false]);
+      assert.equal(normalReport.gaps.length, 1);
+      assert.equal(normalReport.gaps[0]?.kind, "unresolved-fixture-field");
+      assert.equal(normalReport.gaps[0]?.at?.file, "src/source.ts");
+      assert.equal(normalReport.gaps[0]?.at?.line, 7);
+      // Independent field orderId still reports for both consumers, and overriddenConsumer reports couponCode defaulted.
+      assert.equal(normalReport.diagnostics.length, 3);
+
+      // Same-snapshot explain on rawConsumer (blocked_by_gap for ts-coupon-check-rule).
+      const rawExplain = await session.explain({
+        ruleId: "ts-coupon-check-rule",
+        at: "src/consumer.ts:6:28",
+      });
+      assert.equal(
+        rawExplain.identity.snapshotDigest,
+        normalReport.identity.snapshotDigest,
+      );
+      assert.equal(rawExplain.explanation.status, "blocked_by_gap");
+      assert.equal(rawExplain.explanation.gaps.length, 1);
+      assert.equal(rawExplain.explanation.gaps[0]?.at?.file, "src/source.ts");
+      assert.equal(rawExplain.explanation.localGaps.length, 1);
+      assert.equal(rawExplain.explanation.localGaps[0]?.status, "unresolved");
+      assert.equal(rawExplain.explanation.localGaps[0]?.field, "couponCode");
+      assert.equal(
+        rawExplain.explanation.localGaps[0]?.providerId,
+        "ts-gap-adapter-a",
+      );
+      assert.deepEqual(
+        rawExplain.diagnostics,
+        normalReport.diagnostics.filter(
+          (diag) => diag.ruleId === "ts-coupon-check-rule",
+        ),
+      );
+      assert.deepEqual(rawExplain.gaps, normalReport.gaps);
+
+      const fullExplainSameSnapshot = await session.check({
+        at: "src/consumer.ts:6:28",
+      });
+      assert.deepEqual(
+        fullExplainSameSnapshot.diagnostics,
+        normalReport.diagnostics,
+      );
+      assert.deepEqual(fullExplainSameSnapshot.gaps, normalReport.gaps);
+
+      // Explain on overriddenConsumer shows resolved_by_override and keeps gaps empty for that target.
+      const overriddenExplain = await session.explain({
+        ruleId: "ts-coupon-check-rule",
+        at: "src/consumer.ts:7:35",
+      });
+      assert.equal(overriddenExplain.explanation.status, "reported");
+      assert.deepEqual(overriddenExplain.explanation.gaps, []);
+      assert.equal(overriddenExplain.explanation.localGaps.length, 1);
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.status,
+        "resolved_by_override",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.field,
+        "couponCode",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.gap.at?.file,
+        "src/source.ts",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.resolvedBy?.providerId,
+        "ts-gap-adapter-b",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.resolvedBy?.at?.file,
+        "src/consumer.ts",
+      );
+      assert.equal(
+        overriddenExplain.explanation.localGaps[0]?.resolvedBy?.at?.line,
+        7,
+      );
+      assert.ok(
+        overriddenExplain.explanation.providerEvaluations.some(
+          (entry) =>
+            entry.providerId === "ts-gap-unused" && entry.status === "skipped",
+        ),
+      );
+      assert.ok(
+        overriddenExplain.explanation.providerEvaluations.some(
+          (entry) =>
+            entry.providerId === "ts-gap-adapter-a" &&
+            entry.status !== "skipped",
+        ),
+      );
+      assert.ok(
+        overriddenExplain.explanation.providerEvaluations.some(
+          (entry) =>
+            entry.providerId === "ts-gap-adapter-b" &&
+            entry.status !== "skipped",
+        ),
+      );
+
+      // Unrelated expression is skipped with no spurious gaps.
+      const unrelatedExplain = await session.explain({
+        ruleId: "ts-coupon-check-rule",
+        at: "src/consumer.ts:8:30",
+      });
+      assert.equal(unrelatedExplain.explanation.status, "not_in_candidates");
+      assert.deepEqual(unrelatedExplain.explanation.gaps, []);
+      assert.deepEqual(unrelatedExplain.explanation.localGaps, []);
+      assert.ok(adapterAExplainFlags.includes(true));
+      assert.ok(adapterBExplainFlags.includes(true));
+    } finally {
+      await session.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

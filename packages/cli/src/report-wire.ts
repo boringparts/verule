@@ -205,6 +205,32 @@ export const explainCleanupPathSchema = z.object({
   evidence: z.array(evidenceSchema),
 });
 
+export const explainGapResolutionSchema = z.object({
+  providerId: z.string(),
+  operation: z.string(),
+  conclusion: z.string(),
+  at: locationSchema.optional(),
+});
+
+export const explainLocalGapSchema = z.object({
+  status: z.enum(["unresolved", "resolved_by_override"]),
+  factTypeId: z.string(),
+  providerId: z.string(),
+  field: z.string().optional(),
+  gap: gapSchema,
+  subjectLocation: locationSchema.optional(),
+  resolvedBy: explainGapResolutionSchema.optional(),
+  impact: z.string().optional(),
+});
+
+export const explainProviderEvaluationSchema = z.object({
+  providerId: z.string(),
+  factTypeId: z.string().optional(),
+  status: z.enum(["evaluated", "reused", "skipped"]),
+  reason: z.string().optional(),
+  subjectLocation: locationSchema.optional(),
+});
+
 export const explainResultSchema = z.object({
   ruleId: z.string(),
   target: z.object({
@@ -232,6 +258,8 @@ export const explainResultSchema = z.object({
   queries: z.array(explainQueryStepSchema),
   checkpoints: z.array(explainCheckpointTraceSchema),
   gaps: z.array(gapSchema),
+  localGaps: z.array(explainLocalGapSchema),
+  providerEvaluations: z.array(explainProviderEvaluationSchema),
   providers: z.array(z.string()),
   cleanupPaths: z.array(explainCleanupPathSchema),
   inlineIgnore: z
@@ -517,6 +545,42 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
       kind: g.kind,
       message: g.message,
       ...(g.at !== undefined ? { at: { ...g.at } } : {}),
+    })),
+    localGaps: exp.localGaps.map((lg) => ({
+      status: lg.status,
+      factTypeId: lg.factTypeId,
+      providerId: lg.providerId,
+      ...(lg.field !== undefined ? { field: lg.field } : {}),
+      gap: {
+        kind: lg.gap.kind,
+        message: lg.gap.message,
+        ...(lg.gap.at !== undefined ? { at: { ...lg.gap.at } } : {}),
+      },
+      ...(lg.subjectLocation !== undefined
+        ? { subjectLocation: { ...lg.subjectLocation } }
+        : {}),
+      ...(lg.resolvedBy !== undefined
+        ? {
+            resolvedBy: {
+              providerId: lg.resolvedBy.providerId,
+              operation: lg.resolvedBy.operation,
+              conclusion: lg.resolvedBy.conclusion,
+              ...(lg.resolvedBy.at !== undefined
+                ? { at: { ...lg.resolvedBy.at } }
+                : {}),
+            },
+          }
+        : {}),
+      ...(lg.impact !== undefined ? { impact: lg.impact } : {}),
+    })),
+    providerEvaluations: exp.providerEvaluations.map((pe) => ({
+      providerId: pe.providerId,
+      ...(pe.factTypeId !== undefined ? { factTypeId: pe.factTypeId } : {}),
+      status: pe.status,
+      ...(pe.reason !== undefined ? { reason: pe.reason } : {}),
+      ...(pe.subjectLocation !== undefined
+        ? { subjectLocation: { ...pe.subjectLocation } }
+        : {}),
     })),
     providers: [...exp.providers],
     cleanupPaths: exp.cleanupPaths.map((cp) => ({

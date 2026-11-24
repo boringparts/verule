@@ -344,6 +344,20 @@ export default {
       assert.equal(allSpecs[0]?.gaps[0]?.kind, "unresolved-fixture-field");
       assert.equal(targetedSpecs.length, 1);
       assert.deepEqual(targetedSpecs[0]?.value, allSpecs[0]?.value);
+
+      const explained = await session.explain({
+        ruleId: "fixture-source-spec-rule",
+        at: "src/source.ts:6:14",
+      });
+      assert.equal(explained.explanation.status, "blocked_by_gap");
+      assert.equal(explained.explanation.gaps.length, 1);
+      assert.equal(explained.explanation.localGaps.length, 1);
+      assert.equal(explained.explanation.localGaps[0]?.status, "unresolved");
+      assert.equal(explained.explanation.localGaps[0]?.field, "extra");
+      assert.equal(
+        explained.explanation.localGaps[0]?.providerId,
+        "third-party-fixture",
+      );
     } finally {
       await session.close();
       rmSync(root, { recursive: true, force: true });

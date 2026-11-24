@@ -43,6 +43,7 @@ import {
   type EngineFactExtractionOptions,
   type EngineNativeSubQueryTrace,
   type FactContribution,
+  type FactExplainTrace,
   type FactQueryOptions,
   type FactType,
   type LibraryAdapter,
@@ -1034,6 +1035,7 @@ export async function openSession(
       for (const gap of gaps) {
         collectedGaps.push(gap);
       }
+      collector.recordRuleGaps(ruleId, gaps);
     };
 
     const projectionQueries = createProjectionQueries({
@@ -1718,7 +1720,11 @@ export async function openSession(
           );
         }
         const mapped = toBranchCoverageItem(raw, targetRef);
-        collectedGaps.push(...mapped.gaps);
+        if (recordRuleQuery) {
+          recordGaps(mapped.gaps);
+        } else {
+          collectedGaps.push(...mapped.gaps);
+        }
         results.push(mapped);
       }
 
@@ -1806,6 +1812,8 @@ export async function openSession(
             );
           }
 
+          const explainMode =
+            extractOptions.explain ?? collector.isExplainEnabled();
           const queryStart = collector.isActive() ? performance.now() : 0;
           const batch = await client.request<EngineBatchResult>(
             "query.batch",
@@ -1830,6 +1838,7 @@ export async function openSession(
                   ...(extractOptions.condition !== undefined
                     ? { condition: extractOptions.condition }
                     : {}),
+                  ...(explainMode ? { explain: true } : {}),
                 },
               ],
             },
@@ -1848,6 +1857,7 @@ export async function openSession(
             readonly value: Value;
             readonly evidence?: readonly Evidence[];
             readonly gaps?: readonly Gap[];
+            readonly explainTrace?: FactExplainTrace;
           }[];
           const additionalInputs = batch.results[0]?.additionalInputs ?? [];
           const adapterInputs = batch.results[0]?.adapterInputs ?? [];
@@ -1892,6 +1902,9 @@ export async function openSession(
                 ? { evidence: item.evidence }
                 : {}),
               ...(item.gaps !== undefined ? { gaps: item.gaps } : {}),
+              ...(item.explainTrace !== undefined
+                ? { explainTrace: item.explainTrace }
+                : {}),
             };
           });
         },
@@ -2037,6 +2050,10 @@ export async function openSession(
         ? { limit: effectiveObserve.limit }
         : {}),
       nativeAdapters: currentNativeAdapters,
+      configuredAdapters: activeAdapters.map((adapter) => ({
+        id: adapter.id,
+        factTypeIds: adapter.provides.map((provider) => provider.factType.id),
+      })),
       ...(explainTarget !== undefined ? { explainTarget } : {}),
       configAndOpenMs: configLoadMs + openMs,
     });

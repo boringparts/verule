@@ -94,6 +94,36 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
   if (exp.providers.length > 0) {
     lines.push(`  providers: ${exp.providers.join(", ")}`);
   }
+  for (const evalEntry of exp.providerEvaluations) {
+    const factPart = evalEntry.factTypeId ? ` (${evalEntry.factTypeId})` : "";
+    const reasonPart = evalEntry.reason ? `: ${evalEntry.reason}` : "";
+    lines.push(
+      `  provider [${evalEntry.status}] ${evalEntry.providerId}${factPart}${reasonPart}`,
+    );
+  }
+  for (const gap of exp.gaps) {
+    const atSuffix = gap.at
+      ? ` (${gap.at.file}:${gap.at.line}:${gap.at.column})`
+      : "";
+    lines.push(`  gap [${gap.kind}]: ${gap.message}${atSuffix}`);
+  }
+  for (const local of exp.localGaps) {
+    const fieldPart = local.field ? ` field=${local.field}` : "";
+    const gapAt = local.gap.at
+      ? ` at ${local.gap.at.file}:${local.gap.at.line}:${local.gap.at.column}`
+      : "";
+    const resolvedPart = local.resolvedBy
+      ? ` -> resolved_by ${local.resolvedBy.providerId} (${local.resolvedBy.operation}: ${local.resolvedBy.conclusion}${
+          local.resolvedBy.at
+            ? ` at ${local.resolvedBy.at.file}:${local.resolvedBy.at.line}:${local.resolvedBy.at.column}`
+            : ""
+        })`
+      : "";
+    const impactPart = local.impact ? ` [${local.impact}]` : "";
+    lines.push(
+      `  localGap [${local.status}] ${local.factTypeId} (${local.providerId})${fieldPart}: ${local.gap.message}${gapAt}${resolvedPart}${impactPart}`,
+    );
+  }
   for (const cp of exp.cleanupPaths) {
     const sites = cp.cleanupLocations
       .map((loc) => `${loc.file}:${loc.line}:${loc.column}`)

@@ -231,3 +231,55 @@ export const derivedConsumerCacheRule = defineRule({
     }
   },
 });
+
+export const derivedConsumerIndependentFieldRule = defineRule({
+  id: "provider-session-independent-field",
+  run: async (ctx) => {
+    const facts = await ctx.facts(derivedConsumerFact);
+    for (const fact of facts) {
+      if (fact.value.fields.orderId !== "required") {
+        continue;
+      }
+      const at = fact.evidence.find((item) =>
+        item.message.includes(`Fixture consumer "${fact.value.consumerName}"`),
+      )?.at;
+      if (at === undefined) {
+        continue;
+      }
+      ctx.report({
+        at,
+        findingKey: `independent-order-id-${fact.value.consumerName}`,
+        message: `${fact.value.consumerName}: orderId is required`,
+        basis: [fact],
+      });
+    }
+  },
+});
+
+export const derivedConsumerCouponCheckRule = defineRule({
+  id: "provider-session-coupon-check",
+  run: async (ctx) => {
+    const facts = await ctx.facts(derivedConsumerFact);
+    for (const fact of facts) {
+      if (fact.value.unknownFields.includes("couponCode")) {
+        continue;
+      }
+      if (fact.value.fields.couponCode === "defaulted") {
+        const at = fact.evidence.find((item) =>
+          item.message.includes(
+            `Fixture consumer "${fact.value.consumerName}"`,
+          ),
+        )?.at;
+        if (at === undefined) {
+          continue;
+        }
+        ctx.report({
+          at,
+          findingKey: `coupon-defaulted-${fact.value.consumerName}`,
+          message: `${fact.value.consumerName}: couponCode defaulted`,
+          basis: [fact],
+        });
+      }
+    }
+  },
+});

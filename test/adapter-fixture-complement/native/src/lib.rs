@@ -6,7 +6,8 @@ use std::{
 use serde_json::{Value, json};
 use verule_adapter_api::{
     ADAPTER_ABI_VERSION, Adapter, AdapterError, AdapterManifest, Context, Evidence,
-    FactContribution, FactQuery, FactRequest, Gap, NodeKind, NodeRef,
+    ExplainGapResolution, ExplainGapResolutionStatus, ExplainLocalGap, FactContribution,
+    FactExplainTrace, FactQuery, FactRequest, Gap, NodeKind, NodeRef,
 };
 
 // Acceptance checks use this state to verify that snapshot updates reuse the loaded library.
@@ -116,7 +117,8 @@ fn extract_derived_consumer<'a>(
     if let Some(targets) = &request.targets {
         for &target in targets {
             if let Some(call) = resolve_consumer_call(target)?
-                && let Some(contribution) = build_consumer_contribution(context, target, call)?
+                && let Some(contribution) =
+                    build_consumer_contribution(context, target, call, request.explain)?
             {
                 contributions.push(contribution);
             }
@@ -127,7 +129,8 @@ fn extract_derived_consumer<'a>(
     let mut covered_calls = Vec::new();
     for &variable in &request.variables {
         if let Some(call) = resolve_consumer_call(variable)?
-            && let Some(contribution) = build_consumer_contribution(context, variable, call)?
+            && let Some(contribution) =
+                build_consumer_contribution(context, variable, call, request.explain)?
         {
             covered_calls.push(call);
             contributions.push(contribution);
@@ -138,7 +141,8 @@ fn extract_derived_consumer<'a>(
             continue;
         }
         if is_consume_fixture_source_call(call)?
-            && let Some(contribution) = build_consumer_contribution(context, call, call)?
+            && let Some(contribution) =
+                build_consumer_contribution(context, call, call, request.explain)?
         {
             contributions.push(contribution);
         }
@@ -195,12 +199,16 @@ struct DerivedConsumerState {
     has_dynamic_fields: bool,
     evidence: Vec<Evidence>,
     source_providers: BTreeSet<String>,
+    field_gap_origins: BTreeMap<String, ExplainLocalGap>,
+    shape_local_gaps: Vec<ExplainLocalGap>,
+    resolved_local_gaps: Vec<ExplainLocalGap>,
 }
 
 fn build_consumer_contribution<'a>(
     context: &'a Context<'_>,
     subject: NodeRef<'a>,
     call: NodeRef<'a>,
+    explain: bool,
 ) -> Result<Option<FactContribution<'a>>, AdapterError> {
     let args = call.arguments()?;
     let Some(&raw_source_arg) = args.first() else {
@@ -222,9 +230,9 @@ fn build_consumer_contribution<'a>(
         targets: Some(&[target_a]),
     })?;
 
-    let mut state = init_state_from_source_facts(&queried, source_arg)?;
+    let mut state = init_state_from_source_facts(&queried, source_arg, explain)?;
     if let Some(&override_arg) = args.get(1) {
-        apply_consumer_overrides(override_arg, &mut state)?;
+        apply_consumer_overrides(override_arg, explain, &mut state)?;
     }
 
     let consumer_name = match subject.kind()? {
@@ -236,7 +244,8 @@ fn build_consumer_contribution<'a>(
         _ => subject.text()?.unwrap_or_else(|| "consumer".to_string()),
     };
 
-    if let Some(at) = subject.location()? {
+    let subject_location = subject.location()?;
+    if let Some(at) = subject_location.clone() {
         state.evidence.push(Evidence {
             kind: "source".to_string(),
             message: format!(
@@ -262,6 +271,26 @@ fn build_consumer_contribution<'a>(
         state.has_dynamic_fields || !unknown_fields.is_empty() || !all_gaps.is_empty();
     let source_providers: Vec<String> = state.source_providers.into_iter().collect();
 
+    let mut local_gaps = Vec::new();
+    if explain {
+        local_gaps.extend(state.resolved_local_gaps);
+        for (field_name, mut unresolved) in state.field_gap_origins {
+            unresolved.status = ExplainGapResolutionStatus::Unresolved;
+            if unresolved.impact.is_none() {
+                unresolved.impact = Some(format!(
+                    "Field \"{field_name}\" remained unknown and affected derived consumer \"{consumer_name}\"."
+                ));
+            }
+            local_gaps.push(unresolved);
+        }
+        for mut shape_gap in state.shape_local_gaps {
+            if shape_gap.subject_location.is_none() {
+                shape_gap.subject_location.clone_from(&subject_location);
+            }
+            local_gaps.push(shape_gap);
+        }
+    }
+
     let mut contribution = FactContribution::new(
         subject,
         json!({
@@ -278,12 +307,45 @@ fn build_consumer_contribution<'a>(
     );
     contribution.evidence = state.evidence;
     contribution.gaps = all_gaps;
+    if explain && !local_gaps.is_empty() {
+        contribution.explain_trace = Some(FactExplainTrace { local_gaps });
+    }
     Ok(Some(contribution))
+}
+
+fn push_consumer_shape_gap(
+    state: &mut DerivedConsumerState,
+    explain: bool,
+    kind: &str,
+    message: String,
+    at: Option<verule_adapter_api::SourceLocation>,
+    impact: &str,
+) {
+    state.has_dynamic_fields = true;
+    let gap = Gap {
+        kind: kind.to_string(),
+        message,
+        at: at.clone(),
+    };
+    if explain {
+        state.shape_local_gaps.push(ExplainLocalGap {
+            status: ExplainGapResolutionStatus::Unresolved,
+            fact_type_id: "fixture.derived-consumer".to_string(),
+            provider_id: "third-party-fixture-complement".to_string(),
+            field: None,
+            gap: gap.clone(),
+            subject_location: at,
+            resolved_by: None,
+            impact: Some(impact.to_string()),
+        });
+    }
+    state.shape_gaps.push(gap);
 }
 
 fn init_state_from_source_facts(
     queried: &[verule_adapter_api::QueriedFact<'_>],
     source_arg: NodeRef<'_>,
+    explain: bool,
 ) -> Result<DerivedConsumerState, AdapterError> {
     let mut state = DerivedConsumerState {
         source_name: "unknown".to_string(),
@@ -294,15 +356,20 @@ fn init_state_from_source_facts(
         has_dynamic_fields: false,
         evidence: Vec::new(),
         source_providers: BTreeSet::new(),
+        field_gap_origins: BTreeMap::new(),
+        shape_local_gaps: Vec::new(),
+        resolved_local_gaps: Vec::new(),
     };
 
     let Some(fact) = queried.first() else {
-        state.has_dynamic_fields = true;
-        state.shape_gaps.push(Gap {
-            kind: "unresolved-fixture-source".to_string(),
-            message: "Could not resolve fixture source specification for consumer.".to_string(),
-            at: source_arg.location()?,
-        });
+        push_consumer_shape_gap(
+            &mut state,
+            explain,
+            "unresolved-fixture-source",
+            "Could not resolve fixture source specification for consumer.".to_string(),
+            source_arg.location()?,
+            "Upstream fixture source specification could not be resolved.",
+        );
         return Ok(state);
     };
 
@@ -323,14 +390,6 @@ fn init_state_from_source_facts(
             }
         }
     }
-    if fact
-        .value
-        .get("hasDynamicFields")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        state.has_dynamic_fields = true;
-    }
     for gap in &fact.gaps {
         let matched_field = state
             .unknown_fields
@@ -343,13 +402,71 @@ fn init_state_from_source_facts(
             state.shape_gaps.push(gap.clone());
         }
     }
+    // Preserve shape-level dynamic status even if all field-level unknowns are later overridden.
+    let source_has_dynamic = fact
+        .value
+        .get("hasDynamicFields")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !state.shape_gaps.is_empty()
+        || (source_has_dynamic && state.unknown_fields.is_empty() && state.field_gaps.is_empty())
+    {
+        state.has_dynamic_fields = true;
+    }
+
+    if explain {
+        record_source_explain_origins(fact, &mut state)?;
+    }
+
     state.evidence.extend(fact.evidence.clone());
     state.source_providers.extend(fact.providers.clone());
     Ok(state)
 }
 
+fn record_source_explain_origins(
+    fact: &verule_adapter_api::QueriedFact<'_>,
+    state: &mut DerivedConsumerState,
+) -> Result<(), AdapterError> {
+    let origin_location = fact.subject.location()?;
+    let origin_provider = if fact.providers.is_empty() {
+        "third-party-fixture".to_string()
+    } else {
+        fact.providers.join(",")
+    };
+    if let Some(trace) = &fact.explain_trace {
+        for local in &trace.local_gaps {
+            if let Some(field) = &local.field {
+                state.field_gap_origins.insert(field.clone(), local.clone());
+            } else {
+                state.shape_local_gaps.push(local.clone());
+            }
+        }
+    }
+    for (field, gaps) in &state.field_gaps {
+        if !state.field_gap_origins.contains_key(field)
+            && let Some(gap) = gaps.first()
+        {
+            state.field_gap_origins.insert(
+                field.clone(),
+                ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: "fixture.source-spec".to_string(),
+                    provider_id: origin_provider.clone(),
+                    field: Some(field.clone()),
+                    gap: gap.clone(),
+                    subject_location: origin_location.clone(),
+                    resolved_by: None,
+                    impact: None,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 fn apply_consumer_overrides(
     override_arg: NodeRef<'_>,
+    explain: bool,
     state: &mut DerivedConsumerState,
 ) -> Result<(), AdapterError> {
     let unwrapped = override_arg.unwrap_expression()?.unwrap_or(override_arg);
@@ -357,68 +474,112 @@ fn apply_consumer_overrides(
         return Ok(());
     }
     let Some(obj) = resolve_object_literal(unwrapped)? else {
-        state.has_dynamic_fields = true;
-        state.shape_gaps.push(Gap {
-            kind: "dynamic-fixture-fields".to_string(),
-            message: "Fixture consumer overrides could not be statically resolved.".to_string(),
-            at: unwrapped.location()?,
-        });
+        push_consumer_shape_gap(
+            state,
+            explain,
+            "dynamic-fixture-fields",
+            "Fixture consumer overrides could not be statically resolved.".to_string(),
+            unwrapped.location()?,
+            "Consumer overrides object could not be statically resolved.",
+        );
         return Ok(());
     };
     for prop in obj.properties()? {
-        if prop.kind()? != NodeKind::PropertyAssignment {
-            state.has_dynamic_fields = true;
-            state.shape_gaps.push(Gap {
-                kind: "dynamic-fixture-fields".to_string(),
-                message: "Fixture consumer overrides contain dynamic members.".to_string(),
-                at: prop.location()?,
+        apply_override_property(prop, explain, state)?;
+    }
+    Ok(())
+}
+
+fn apply_override_property(
+    prop: NodeRef<'_>,
+    explain: bool,
+    state: &mut DerivedConsumerState,
+) -> Result<(), AdapterError> {
+    if prop.kind()? != NodeKind::PropertyAssignment {
+        push_consumer_shape_gap(
+            state,
+            explain,
+            "dynamic-fixture-fields",
+            "Fixture consumer overrides contain dynamic members.".to_string(),
+            prop.location()?,
+            "Dynamic member in consumer overrides left shape incomplete.",
+        );
+        return Ok(());
+    }
+    let Some(key) = read_property_name(prop)? else {
+        push_consumer_shape_gap(
+            state,
+            explain,
+            "unresolved-fixture-field",
+            "Fixture consumer override has a dynamic property key.".to_string(),
+            prop.location()?,
+            "Dynamic property key in consumer overrides could not be resolved.",
+        );
+        return Ok(());
+    };
+    let init = match prop.safe_initializer()? {
+        Some(node) => Some(node),
+        None => prop.initializer()?,
+    };
+    if let Some(init_node) = init
+        && let Some(mode) = read_string_literal(init_node)?
+        && matches!(mode.as_str(), "required" | "optional" | "defaulted")
+    {
+        state.fields.insert(key.clone(), mode.clone());
+        state.unknown_fields.remove(&key);
+        state.field_gaps.remove(&key);
+        let prop_loc = prop.location()?;
+        if explain && let Some(mut origin) = state.field_gap_origins.remove(&key) {
+            origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+            origin.resolved_by = Some(ExplainGapResolution {
+                provider_id: "third-party-fixture-complement".to_string(),
+                operation: "override".to_string(),
+                conclusion: format!("{key}={mode}"),
+                at: prop_loc.clone(),
             });
-            continue;
+            origin.impact = Some(format!(
+                "Initial unknown on field \"{key}\" was resolved to \"{mode}\" by consumer override."
+            ));
+            state.resolved_local_gaps.push(origin);
         }
-        let Some(key) = read_property_name(prop)? else {
-            state.has_dynamic_fields = true;
-            state.shape_gaps.push(Gap {
-                kind: "unresolved-fixture-field".to_string(),
-                message: "Fixture consumer override has a dynamic property key.".to_string(),
-                at: prop.location()?,
+        if let Some(at) = prop_loc {
+            state.evidence.push(Evidence {
+                kind: "source".to_string(),
+                message: format!("Fixture consumer overrode field \"{key}\" to \"{mode}\"."),
+                at: Some(at),
+                model_id: None,
+                declaration: None,
             });
-            continue;
+        }
+    } else {
+        state.fields.remove(&key);
+        state.unknown_fields.insert(key.clone());
+        state.has_dynamic_fields = true;
+        let gap = Gap {
+            kind: "unresolved-fixture-field".to_string(),
+            message: format!(
+                "Fixture consumer override for field \"{key}\" could not be statically resolved."
+            ),
+            at: init.map_or_else(|| prop.location(), NodeRef::location)?,
         };
-        let init = match prop.safe_initializer()? {
-            Some(node) => Some(node),
-            None => prop.initializer()?,
-        };
-        if let Some(init_node) = init
-            && let Some(mode) = read_string_literal(init_node)?
-            && matches!(mode.as_str(), "required" | "optional" | "defaulted")
-        {
-            state.fields.insert(key.clone(), mode.clone());
-            state.unknown_fields.remove(&key);
-            state.field_gaps.remove(&key);
-            if let Some(at) = prop.location()? {
-                state.evidence.push(Evidence {
-                    kind: "source".to_string(),
-                    message: format!("Fixture consumer overrode field \"{key}\" to \"{mode}\"."),
-                    at: Some(at),
-                    model_id: None,
-                    declaration: None,
-                });
-            }
-        } else {
-            state.fields.remove(&key);
-            state.unknown_fields.insert(key.clone());
-            state.has_dynamic_fields = true;
-            state.field_gaps.insert(
+        if explain {
+            state.field_gap_origins.insert(
                 key.clone(),
-                vec![Gap {
-                    kind: "unresolved-fixture-field".to_string(),
-                    message: format!(
-                        "Fixture consumer override for field \"{key}\" could not be statically resolved."
-                    ),
-                    at: init.map_or_else(|| prop.location(), NodeRef::location)?,
-                }],
+                ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: "fixture.derived-consumer".to_string(),
+                    provider_id: "third-party-fixture-complement".to_string(),
+                    field: Some(key.clone()),
+                    gap: gap.clone(),
+                    subject_location: prop.location()?,
+                    resolved_by: None,
+                    impact: Some(format!(
+                        "Consumer override for field \"{key}\" remained unresolved."
+                    )),
+                },
             );
         }
+        state.field_gaps.insert(key, vec![gap]);
     }
     Ok(())
 }

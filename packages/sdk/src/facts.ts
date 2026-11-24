@@ -13,6 +13,7 @@ import {
   VeruleExecutionError,
   type DiagnosticLocation,
   type Evidence,
+  type ExplainLocalGap,
   type FactConflictDetails,
   type FactConflictParty,
   type Gap,
@@ -123,6 +124,7 @@ export type EngineFactExtractionOptions<
   readonly reportProviderId?: string;
   readonly targets?: readonly ProgramRef<SubjectKind>[];
   readonly condition?: Condition;
+  readonly explain?: boolean;
 };
 
 /** Read-only query context exposed to TypeScript `LibraryAdapter` providers. */
@@ -163,6 +165,11 @@ export type AdapterContext = {
   readAdditionalInput: RuleContext["readAdditionalInput"];
 };
 
+/** Optional explain trace populated only when `request.explain` is true. */
+export type FactExplainTrace = {
+  readonly localGaps?: readonly ExplainLocalGap[];
+};
+
 /** Request passed to a `FactProvider.extract` implementation. */
 export type FactExtractionRequest<
   SubjectKind extends ProgramObjectKind = ProgramObjectKind,
@@ -171,6 +178,7 @@ export type FactExtractionRequest<
   readonly factType: FactType<SubjectKind, Condition>;
   readonly targets?: readonly ProgramRef<SubjectKind>[];
   readonly condition?: Condition;
+  readonly explain?: boolean;
 };
 
 /** Single subject contribution returned by a `FactProvider.extract` call. */
@@ -183,6 +191,7 @@ export type FactContribution<
   readonly basis?: readonly DiagnosticBasis[];
   readonly evidence?: readonly Evidence[];
   readonly gaps?: readonly Gap[];
+  readonly explainTrace?: FactExplainTrace;
 };
 
 /** Provider implementation for one `FactType` inside a `LibraryAdapter`. */
@@ -396,6 +405,8 @@ function dedupeGaps(items: readonly Gap[]): readonly Gap[] {
   return out;
 }
 
+const factExplainLocalGaps = new WeakMap<object, readonly ExplainLocalGap[]>();
+
 type ProviderEntry = {
   readonly adapterId: string;
   readonly provider: FactProvider;
@@ -408,6 +419,7 @@ type SubjectAccumulator<SubjectKind extends ProgramObjectKind, Value> = {
   value: Value;
   evidence: Evidence[];
   gaps: Gap[];
+  localGaps: ExplainLocalGap[];
 };
 
 function buildFactConflictError<
@@ -494,6 +506,7 @@ function mergeContributions<
   snapshotId: number,
   condition: Condition | undefined,
   syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
+  recordExplain: boolean,
   perProvider: readonly {
     readonly adapterId: string;
     readonly contributions: readonly FactContribution<SubjectKind, Value>[];
@@ -510,6 +523,9 @@ function mergeContributions<
         ...extractBasisEvidence(contribution.basis, contribution.evidence),
       ];
       const incomingGaps = [...(contribution.gaps ?? [])];
+      const incomingLocalGaps = recordExplain
+        ? [...(contribution.explainTrace?.localGaps ?? [])]
+        : [];
       const existing = bySubject.get(handleId);
 
       if (!existing) {
@@ -521,6 +537,7 @@ function mergeContributions<
           value: contribution.value,
           evidence: incomingEvidence,
           gaps: incomingGaps,
+          localGaps: incomingLocalGaps,
         });
         continue;
       }
@@ -584,6 +601,9 @@ function mergeContributions<
           ...dedupeEvidence([...existing.evidence, ...incomingEvidence]),
         ];
         existing.gaps = [...dedupeGaps([...existing.gaps, ...incomingGaps])];
+        if (recordExplain && incomingLocalGaps.length > 0) {
+          existing.localGaps.push(...incomingLocalGaps);
+        }
       } else {
         const existingSerialized = stableSerializeValue(existing.value);
         const incomingSerialized = stableSerializeValue(contribution.value);
@@ -614,6 +634,9 @@ function mergeContributions<
           ...dedupeEvidence([...existing.evidence, ...incomingEvidence]),
         ];
         existing.gaps = [...dedupeGaps([...existing.gaps, ...incomingGaps])];
+        if (recordExplain && incomingLocalGaps.length > 0) {
+          existing.localGaps.push(...incomingLocalGaps);
+        }
       }
     }
   }
@@ -630,6 +653,38 @@ function mergeContributions<
       gaps: acc.gaps,
       providers: acc.providers,
     };
+    if (recordExplain) {
+      const subjectLocation = syntaxLocations.get(acc.subject as SyntaxRef);
+      const seen = new Set<string>();
+      const mergedLocalGaps: ExplainLocalGap[] = [];
+      for (const item of acc.localGaps) {
+        const key = stableSerializeValue(item);
+        if (!seen.has(key)) {
+          seen.add(key);
+          mergedLocalGaps.push(item);
+        }
+      }
+      for (const gap of acc.gaps) {
+        const alreadyTracked = mergedLocalGaps.some(
+          (item) =>
+            item.status === "unresolved" &&
+            stableSerializeValue(item.gap) === stableSerializeValue(gap),
+        );
+        if (!alreadyTracked) {
+          mergedLocalGaps.push({
+            status: "unresolved",
+            factTypeId: factType.id,
+            providerId: acc.providers.join(","),
+            gap,
+            ...(subjectLocation !== undefined ? { subjectLocation } : {}),
+            impact: "Remained unresolved during fact evaluation.",
+          });
+        }
+      }
+      if (mergedLocalGaps.length > 0) {
+        factExplainLocalGaps.set(fact, mergedLocalGaps);
+      }
+    }
     return registerProvenance(fact, acc.evidence);
   });
 }
@@ -654,16 +709,23 @@ export type ActiveFactQueryFrame = {
   readonly targetHandleIds: readonly string[] | undefined;
 };
 
+type CachedSubProviderTrace = {
+  readonly providerId: string;
+  readonly factTypeId: string;
+};
+
 type CachedFullEntry = {
   readonly results: readonly FactResult[];
   readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
   readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
+  readonly subProviders: readonly CachedSubProviderTrace[];
 };
 
 type CachedTargetEntry = {
   readonly item: FactResult | null;
   readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
   readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
+  readonly subProviders: readonly CachedSubProviderTrace[];
 };
 
 /** Per-session cache storing computed fact results across rules for the active snapshot. */
@@ -755,6 +817,7 @@ export async function executeFactQuery<
     adapterId: string,
     filePath: string,
   ) => void;
+  readonly onTransitiveSubProvider?: (trace: CachedSubProviderTrace) => void;
 }): Promise<readonly FactResult<SubjectKind, Value>[]> {
   const {
     factType,
@@ -773,6 +836,7 @@ export async function executeFactQuery<
     syntaxLocations,
     activeQueryStack = [],
     onTransitiveAdditionalInput,
+    onTransitiveSubProvider,
   } = params;
 
   assertActiveSnapshot();
@@ -855,6 +919,7 @@ export async function executeFactQuery<
         ? providersUsed.join(",")
         : "none";
 
+  const explainEnabled = collector.isExplainEnabled();
   const providerFilterKey = options?.providerId ?? "*";
   const conditionKey = stableSerializeValue(options?.condition ?? null);
   const baseKey = JSON.stringify([
@@ -863,12 +928,14 @@ export async function executeFactQuery<
     factType.id,
     providerFilterKey,
     conditionKey,
+    explainEnabled ? "explain" : "check",
   ]);
 
   const queryStart = collector.isActive() ? performance.now() : 0;
   let cacheStatus: "computed" | "reused";
   let results: readonly FactResult<SubjectKind, Value>[];
   let engineSubQueries: readonly EngineNativeSubQueryTrace[] = [];
+  let replayedSubProviders: readonly CachedSubProviderTrace[] = [];
 
   const replayInputs = (
     inputs: readonly CachedAdapterAdditionalInput[],
@@ -890,15 +957,32 @@ export async function executeFactQuery<
     readonly results: readonly FactResult<SubjectKind, Value>[];
     readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
     readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
+    readonly subProviders: readonly CachedSubProviderTrace[];
   }> => {
     if (matchedProviders.length === 0) {
-      return { results: [], additionalInputs: [], engineSubQueries: [] };
+      return {
+        results: [],
+        additionalInputs: [],
+        engineSubQueries: [],
+        subProviders: [],
+      };
     }
     const recordedInputs: CachedAdapterAdditionalInput[] = [];
     const seenRecorded = new Set<string>();
     const recordedEngineSubQueries: EngineNativeSubQueryTrace[] = [];
+    const recordedSubProviders: CachedSubProviderTrace[] = [];
+    const seenSubProviders = new Set<string>();
+    const recordSubProvider = (trace: CachedSubProviderTrace): void => {
+      const key = `${trace.providerId}\0${trace.factTypeId}`;
+      if (!seenSubProviders.has(key)) {
+        seenSubProviders.add(key);
+        recordedSubProviders.push(trace);
+      }
+      onTransitiveSubProvider?.(trace);
+    };
     const request: FactExtractionRequest<SubjectKind, Condition> = {
       factType: factType,
+      explain: explainEnabled,
       ...(requestedTargets !== undefined ? { targets: requestedTargets } : {}),
       ...(options?.condition !== undefined
         ? { condition: options.condition }
@@ -950,12 +1034,15 @@ export async function executeFactQuery<
           assertActiveSnapshot,
           createAdapterContext,
           replayAdapterAdditionalInput,
-          recordGaps,
+          recordGaps: () => {},
           collector,
           syntaxLocations,
           activeQueryStack: nextStack,
           onTransitiveAdditionalInput: (srcAdapterId, filePath) => {
             recordInput(filePath, srcAdapterId);
+          },
+          onTransitiveSubProvider: (trace) => {
+            recordSubProvider(trace);
           },
         });
       const adapterCtx = createAdapterContext(
@@ -989,10 +1076,12 @@ export async function executeFactQuery<
         snapshotId,
         options?.condition,
         syntaxLocations,
+        explainEnabled,
         perProvider,
       ),
       additionalInputs: recordedInputs,
       engineSubQueries: recordedEngineSubQueries,
+      subProviders: recordedSubProviders,
     };
   };
 
@@ -1010,6 +1099,7 @@ export async function executeFactQuery<
             ) ?? null,
           additionalInputs: computed.additionalInputs,
           engineSubQueries: computed.engineSubQueries,
+          subProviders: computed.subProviders,
         }),
         (err: unknown) => {
           factCache.deleteTarget(baseKey, target.handleId);
@@ -1033,6 +1123,7 @@ export async function executeFactQuery<
         ...sub,
         cacheStatus: "reused",
       }));
+      replayedSubProviders = loaded.subProviders;
     } else {
       cacheStatus = "computed";
       const fullPromise = runExtraction(undefined).then(
@@ -1046,6 +1137,7 @@ export async function executeFactQuery<
                 item,
                 additionalInputs: computed.additionalInputs,
                 engineSubQueries: computed.engineSubQueries,
+                subProviders: computed.subProviders,
               }),
             );
           }
@@ -1090,6 +1182,7 @@ export async function executeFactQuery<
               ...sub,
               cacheStatus: "reused" as const,
             })),
+            subProviders: loaded.subProviders,
           };
         }
         return factCache.getTarget(baseKey, target.handleId)!;
@@ -1097,6 +1190,9 @@ export async function executeFactQuery<
     );
     replayInputs(resolved.flatMap((entry) => entry.additionalInputs));
     engineSubQueries = resolved.flatMap((entry) => entry.engineSubQueries);
+    if (cacheStatus === "reused") {
+      replayedSubProviders = resolved.flatMap((entry) => entry.subProviders);
+    }
     results = resolved
       .map((entry) => entry.item)
       .filter((item): item is FactResult<SubjectKind, Value> => item !== null);
@@ -1125,14 +1221,19 @@ export async function executeFactQuery<
     );
     replayInputs(resolved.flatMap((entry) => entry.additionalInputs));
     engineSubQueries = resolved.flatMap((entry) => entry.engineSubQueries);
+    if (cacheStatus === "reused") {
+      replayedSubProviders = resolved.flatMap((entry) => entry.subProviders);
+    }
     results = resolved
       .map((entry) => entry.item)
       .filter((item): item is FactResult<SubjectKind, Value> => item !== null);
   }
 
-  for (const item of results) {
-    if (item.gaps.length > 0) {
-      recordGaps(item.gaps);
+  if (activeQueryStack.length === 0) {
+    for (const item of results) {
+      if (item.gaps.length > 0) {
+        recordGaps(item.gaps);
+      }
     }
   }
 
@@ -1147,6 +1248,21 @@ export async function executeFactQuery<
         : undefined;
       const subProviderLabel =
         sub.providers.length > 0 ? sub.providers.join(",") : "none";
+      if (explainEnabled) {
+        for (const pid of sub.providers) {
+          collector.recordProviderEvaluation({
+            ruleId,
+            evaluation: {
+              providerId: pid,
+              factTypeId: sub.factTypeId,
+              status: sub.cacheStatus === "reused" ? "reused" : "evaluated",
+              ...(sub.subjectLocations[0] !== undefined
+                ? { subjectLocation: sub.subjectLocations[0] }
+                : {}),
+            },
+          });
+        }
+      }
       collector.recordQuery({
         ruleId,
         op: `facts:${sub.factTypeId}`,
@@ -1170,6 +1286,68 @@ export async function executeFactQuery<
             }
           : {}),
       });
+    }
+
+    if (explainEnabled) {
+      for (const sub of replayedSubProviders) {
+        onTransitiveSubProvider?.(sub);
+        collector.recordProviderEvaluation({
+          ruleId,
+          evaluation: {
+            providerId: sub.providerId,
+            factTypeId: sub.factTypeId,
+            status: "reused",
+          },
+        });
+      }
+      for (const entry of matchedProviders) {
+        onTransitiveSubProvider?.({
+          providerId: entry.adapterId,
+          factTypeId: factType.id,
+        });
+        collector.recordProviderEvaluation({
+          ruleId,
+          evaluation: {
+            providerId: entry.adapterId,
+            factTypeId: factType.id,
+            status: cacheStatus === "reused" ? "reused" : "evaluated",
+          },
+        });
+      }
+      if (options?.providerId !== undefined) {
+        for (const adapter of adapters) {
+          if (
+            adapter.id !== options.providerId &&
+            adapter.provides.some((p) => p.factType.id === factType.id)
+          ) {
+            collector.recordProviderEvaluation({
+              ruleId,
+              evaluation: {
+                providerId: adapter.id,
+                factTypeId: factType.id,
+                status: "skipped",
+                reason: `Skipped due to providerId filter ("${options.providerId}").`,
+              },
+            });
+          }
+        }
+      }
+      if (activeQueryStack.length === 0) {
+        for (const item of results) {
+          const subjectLocation = syntaxLocations.get(
+            item.subject as SyntaxRef,
+          );
+          const localGaps = factExplainLocalGaps.get(item) ?? [];
+          if (item.gaps.length > 0 || localGaps.length > 0) {
+            collector.recordFactExplain({
+              ruleId,
+              ...(subjectLocation !== undefined ? { subjectLocation } : {}),
+              gaps: item.gaps,
+              localGaps,
+            });
+          }
+        }
+      }
     }
 
     const matchedLocations: DiagnosticLocation[] | undefined = explainTarget
@@ -1235,6 +1413,38 @@ function collectMatchedFactLocations<
     )?.at;
     if (evidenceLoc) {
       matched.push(evidenceLoc);
+      continue;
+    }
+    const gapLoc = result.gaps.find(
+      (gap) => gap.at && locationMatchesTarget(gap.at, explainTarget),
+    )?.at;
+    if (gapLoc) {
+      matched.push(gapLoc);
+      continue;
+    }
+    const localGaps = factExplainLocalGaps.get(result) ?? [];
+    const localGapMatch = localGaps.find(
+      (lg) =>
+        (lg.gap.at && locationMatchesTarget(lg.gap.at, explainTarget)) ||
+        (lg.subjectLocation &&
+          locationMatchesTarget(lg.subjectLocation, explainTarget)) ||
+        (lg.resolvedBy?.at &&
+          locationMatchesTarget(lg.resolvedBy.at, explainTarget)),
+    );
+    if (localGapMatch) {
+      const loc =
+        (localGapMatch.resolvedBy?.at &&
+        locationMatchesTarget(localGapMatch.resolvedBy.at, explainTarget)
+          ? localGapMatch.resolvedBy.at
+          : undefined) ??
+        (localGapMatch.subjectLocation &&
+        locationMatchesTarget(localGapMatch.subjectLocation, explainTarget)
+          ? localGapMatch.subjectLocation
+          : undefined) ??
+        localGapMatch.gap.at;
+      if (loc) {
+        matched.push(loc);
+      }
     }
   }
   return matched;

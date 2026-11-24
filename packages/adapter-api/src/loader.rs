@@ -150,6 +150,7 @@ impl NativeLibrary {
                 len: request.targets.map_or(0, <[u64]>::len),
             },
             has_targets: request.targets.is_some(),
+            explain: request.explain,
         };
         let mut invocation = InvocationHost::new(host);
         let api = FfiHostApi {
@@ -660,6 +661,7 @@ mod tests {
                 }],
                 gaps: Vec::new(),
                 providers: vec!["adapter-a".to_string()],
+                explain_trace: None,
             }])
         }
     }
@@ -689,6 +691,7 @@ mod tests {
                 len: 0,
             },
             has_targets: false,
+            explain: false,
         };
         let mut invocation = InvocationHost::new(&mut host);
         let api = FfiHostApi {

@@ -13,7 +13,6 @@ import type {
   CheckReport,
   FactType,
   NativeAdapterObservation,
-  NormalizedVeruleConfig,
   ObservationDetailEntry,
   SyntaxRef,
   VeruleExecutionError,
@@ -28,6 +27,8 @@ const nativeConfig =
   "packages/app/provider-session-overlay/app/verule.provider-session.native.config.ts";
 const compositionConfig =
   "packages/app/provider-session-overlay/app/verule.provider-session.composition.config.ts";
+const localGapsConfig =
+  "packages/app/provider-session-overlay/app/verule.provider-session.local-gaps.config.ts";
 const rootInputPath = "fixture.inputs.json";
 const sourceRelPath =
   "packages/app/provider-session-overlay/app/src/provider-session.ts";
@@ -73,7 +74,7 @@ async function runInstalledSdk(
 ): Promise<CheckReport> {
   const sdk = await host.loadSdk();
   const resolvedConfigPath = host.resolvePath(configPath);
-  const config = await host.loadConfig<NormalizedVeruleConfig>(configPath);
+  const config = await host.loadConfig(configPath);
   return sdk.runCheck({
     cwd: host.hostDir,
     adapterResolutionRoot: dirname(resolvedConfigPath),
@@ -274,8 +275,7 @@ void test("loads independent native providers together and updates facts across 
       const initialSource = host.readText(sourceRelPath);
       const sdk = await host.loadSdk();
       const configPath = host.resolvePath(nativeConfig);
-      const config =
-        await host.loadConfig<NormalizedVeruleConfig>(nativeConfig);
+      const config = await host.loadConfig(nativeConfig);
       const providerSessionRules = (await import(
         pathToFileURL(
           join(
@@ -361,7 +361,7 @@ void test("loads independent native providers together and updates facts across 
           assert.notEqual(retryInput, expectedInput);
           assert.equal(recovered[0]?.value.input, retryInput);
           assert.ok(
-            recovered[0]!.value.secondaryInvocation! >
+            recovered[0].value.secondaryInvocation! >
               fullProduct.value.secondaryInvocation!,
           );
         },
@@ -801,11 +801,10 @@ void test("composes third-party native facts across objects, traces A and B in t
         undefined,
       );
 
-      // Same-snapshot SDK session reuses cached results and traces explain without re-extracting.
+      // Same-snapshot SDK session re-evaluates on-demand with explain=true without reloading the snapshot, and reuses explain cache on subsequent explain.
       const sdk = await host.loadSdk();
       const configPath = host.resolvePath(compositionConfig);
-      const config =
-        await host.loadConfig<NormalizedVeruleConfig>(compositionConfig);
+      const config = await host.loadConfig(compositionConfig);
       const sdkSession = await sdk.openSession({
         cwd: host.hostDir,
         config,
@@ -824,6 +823,10 @@ void test("composes third-party native facts across objects, traces A and B in t
           ruleId: "provider-session-composition",
           observe: "detail",
         });
+        assert.equal(
+          sameSnapshotExplain.identity.snapshotDigest,
+          firstCheck.identity.snapshotDigest,
+        );
         assert.equal(sameSnapshotExplain.explanation.status, "reported");
         assert.deepEqual(sameSnapshotExplain.explanation.providers, [
           "third-party-fixture",
@@ -833,10 +836,26 @@ void test("composes third-party native facts across objects, traces A and B in t
           sameSnapshotExplain.observation?.engineExtractions[
             "third-party-fixture"
           ]?.extractions,
-          undefined,
+          1,
         );
         assert.equal(
           sameSnapshotExplain.observation?.engineExtractions[
+            "third-party-fixture-complement"
+          ]?.extractions,
+          1,
+        );
+        const reusedExplain = await sdkSession.explain({
+          at: consumerAt,
+          ruleId: "provider-session-composition",
+          observe: "detail",
+        });
+        assert.equal(
+          reusedExplain.observation?.engineExtractions["third-party-fixture"]
+            ?.extractions,
+          undefined,
+        );
+        assert.equal(
+          reusedExplain.observation?.engineExtractions[
             "third-party-fixture-complement"
           ]?.extractions,
           undefined,
@@ -935,6 +954,252 @@ void test("composes third-party native facts across objects, traces A and B in t
         host.writeText(compositionSourceRelPath, initialObjectASource);
         await watch.close();
       }
+    },
+  );
+});
+
+void test("distinguishes skipped providers, unresolved local gaps (while independent fields report), and override-resolved unknowns in same-snapshot explain", async () => {
+  await withAcceptanceHost(
+    {
+      overlay: "provider-session",
+      additionalPackages: [...packageNames],
+    },
+    async (host) => {
+      host.writeText(
+        compositionSourceRelPath,
+        [
+          "export function defineFixtureSource(",
+          "  name: string,",
+          '  fields: Readonly<Record<string, "required" | "optional" | "defaulted">>,',
+          ") {",
+          "  return { name, fields };",
+          "}",
+          "",
+          'declare function dynamicFieldSpec(): "required" | "optional" | "defaulted";',
+          "",
+          'export const sessionOrderSource = defineFixtureSource("order", {',
+          '  orderId: "required",',
+          "  couponCode: dynamicFieldSpec(),",
+          "});",
+          "",
+        ].join("\n"),
+      );
+
+      host.writeText(
+        compositionConsumerRelPath,
+        [
+          'import { sessionOrderSource } from "./provider-session-source.ts";',
+          "",
+          "export function consumeFixtureSource(",
+          "  source: unknown,",
+          '  overrides?: Readonly<Record<string, "required" | "optional" | "defaulted">>,',
+          ") {",
+          "  return { source, overrides };",
+          "}",
+          "",
+          "export function unrelatedHelper(value: string): string {",
+          "  return value;",
+          "}",
+          "",
+          "export const rawOrderConsumer = consumeFixtureSource(sessionOrderSource);",
+          "",
+          "export const sessionOrderConsumer = consumeFixtureSource(sessionOrderSource, {",
+          '  couponCode: "defaulted",',
+          "});",
+          "",
+          'export const unrelatedCall = unrelatedHelper("keep");',
+          "",
+        ].join("\n"),
+      );
+
+      const lineColOf = (relPath: string, needle: string): string => {
+        const text = host.readText(relPath);
+        const offset = text.indexOf(needle);
+        assert.notEqual(offset, -1, `missing "${needle}" in ${relPath}`);
+        const prefix = text.slice(0, offset);
+        const line = prefix.split("\n").length;
+        const column = offset - prefix.lastIndexOf("\n");
+        return `${relPath}:${line}:${column}`;
+      };
+
+      const rawConsumerAt = lineColOf(
+        compositionConsumerRelPath,
+        "rawOrderConsumer =",
+      );
+      const overriddenConsumerAt = lineColOf(
+        compositionConsumerRelPath,
+        "sessionOrderConsumer =",
+      );
+      const unrelatedCallAt = lineColOf(
+        compositionConsumerRelPath,
+        "unrelatedCall =",
+      );
+
+      // 1. Normal CLI check: independent field reports on BOTH consumers, coupon rule reports on overridden consumer,
+      //    and only rawOrderConsumer's unresolved couponCode gap enters CheckReport.gaps.
+      const normalCli = await host.check({ config: localGapsConfig });
+      assert.equal(normalCli.status, 1, normalCli.stderr + normalCli.stdout);
+      assert.deepEqual(
+        normalCli.report.diagnostics
+          .filter(
+            (d) =>
+              d.ruleId === "provider-session-independent-field" ||
+              d.ruleId === "provider-session-coupon-check",
+          )
+          .map((d) => d.message)
+          .toSorted(),
+        [
+          "rawOrderConsumer: orderId is required",
+          "sessionOrderConsumer: couponCode defaulted",
+          "sessionOrderConsumer: orderId is required",
+        ],
+      );
+      assert.equal(normalCli.report.gaps.length, 1);
+      assert.equal(normalCli.report.gaps[0]?.kind, "unresolved-fixture-field");
+      assert.equal(
+        normalCli.report.gaps[0]?.at?.file,
+        compositionSourceRelPath,
+      );
+      assert.equal(normalCli.report.gaps[0]?.at?.line, 12);
+
+      // 2. Installed SDK session: normal check() followed by targeted session.explain() on the SAME snapshot.
+      const sdk = await host.loadSdk();
+      const configPath = host.resolvePath(localGapsConfig);
+      const config = await host.loadConfig(localGapsConfig);
+      const session = await sdk.openSession({
+        cwd: host.hostDir,
+        config,
+        adapterResolutionRoot: dirname(configPath),
+      });
+      try {
+        const sdkCheck = await session.check();
+        assert.deepEqual(sdkCheck.diagnostics, normalCli.report.diagnostics);
+        assert.deepEqual(sdkCheck.gaps, normalCli.report.gaps);
+
+        // (a) + (b): Unresolved gap on rawOrderConsumer -> blocked_by_gap, gap points to Object A, drizzle is skipped.
+        const rawExplain = await session.explain({
+          ruleId: "provider-session-coupon-check",
+          at: rawConsumerAt,
+        });
+        assert.equal(
+          rawExplain.identity.snapshotDigest,
+          sdkCheck.identity.snapshotDigest,
+        );
+        assert.equal(rawExplain.explanation.status, "blocked_by_gap");
+        assert.equal(rawExplain.explanation.gaps.length, 1);
+        assert.equal(
+          rawExplain.explanation.gaps[0]?.at?.file,
+          compositionSourceRelPath,
+        );
+        assert.equal(rawExplain.explanation.gaps[0]?.at?.line, 12);
+        assert.equal(rawExplain.explanation.localGaps.length, 1);
+        assert.equal(rawExplain.explanation.localGaps[0]?.status, "unresolved");
+        assert.equal(
+          rawExplain.explanation.localGaps[0]?.factTypeId,
+          "fixture.source-spec",
+        );
+        assert.equal(
+          rawExplain.explanation.localGaps[0]?.providerId,
+          "third-party-fixture",
+        );
+        assert.equal(rawExplain.explanation.localGaps[0]?.field, "couponCode");
+        assert.ok(
+          rawExplain.explanation.providerEvaluations.some(
+            (ev) => ev.providerId === "drizzle" && ev.status === "skipped",
+          ),
+        );
+
+        // Same-snapshot full check with --at yields identical diagnostics and gaps as normal check.
+        const sameSnapshotFullExplain = await session.check({
+          at: overriddenConsumerAt,
+        });
+        assert.deepEqual(
+          sameSnapshotFullExplain.diagnostics,
+          sdkCheck.diagnostics,
+        );
+        assert.deepEqual(sameSnapshotFullExplain.gaps, sdkCheck.gaps);
+
+        // (c): Prior unknown on sessionOrderConsumer resolved by override -> no active gap, resolved_by_override traces A + B.
+        const overriddenExplain = await session.explain({
+          ruleId: "provider-session-coupon-check",
+          at: overriddenConsumerAt,
+        });
+        assert.equal(overriddenExplain.explanation.status, "reported");
+        assert.deepEqual(overriddenExplain.explanation.gaps, []);
+        assert.equal(overriddenExplain.explanation.localGaps.length, 1);
+        const resolvedGap = overriddenExplain.explanation.localGaps[0]!;
+        assert.equal(resolvedGap.status, "resolved_by_override");
+        assert.equal(resolvedGap.factTypeId, "fixture.source-spec");
+        assert.equal(resolvedGap.providerId, "third-party-fixture");
+        assert.equal(resolvedGap.field, "couponCode");
+        assert.equal(resolvedGap.gap.at?.file, compositionSourceRelPath);
+        assert.equal(resolvedGap.gap.at?.line, 12);
+        assert.equal(
+          resolvedGap.resolvedBy?.providerId,
+          "third-party-fixture-complement",
+        );
+        assert.equal(resolvedGap.resolvedBy?.operation, "override");
+        assert.equal(
+          resolvedGap.resolvedBy?.conclusion,
+          "couponCode=defaulted",
+        );
+        assert.equal(
+          resolvedGap.resolvedBy?.at?.file,
+          compositionConsumerRelPath,
+        );
+        assert.equal(resolvedGap.resolvedBy?.at?.line, 17);
+
+        // (a): Unrelated expression outside adapter responsibility is skipped without spurious gaps.
+        const unrelatedExplain = await session.explain({
+          ruleId: "provider-session-coupon-check",
+          at: unrelatedCallAt,
+        });
+        assert.equal(unrelatedExplain.explanation.status, "not_in_candidates");
+        assert.deepEqual(unrelatedExplain.explanation.gaps, []);
+        assert.deepEqual(unrelatedExplain.explanation.localGaps, []);
+      } finally {
+        await session.close();
+      }
+
+      // 3. Installed CLI `verule check --at` JSON and text outputs expose blocked_by_gap, resolved_by_override, and skipped providers.
+      const cliUnresolvedJson = await host.check({
+        config: localGapsConfig,
+        rule: "provider-session-coupon-check",
+        at: rawConsumerAt,
+      });
+      assert.equal(cliUnresolvedJson.status, 1);
+      assert.equal(
+        cliUnresolvedJson.report.explanation?.status,
+        "blocked_by_gap",
+      );
+      assert.equal(
+        cliUnresolvedJson.report.explanation?.localGaps[0]?.status,
+        "unresolved",
+      );
+
+      const cliOverriddenText = await host.runCli([
+        "check",
+        "--config",
+        localGapsConfig,
+        "--rule",
+        "provider-session-coupon-check",
+        "--at",
+        overriddenConsumerAt,
+      ]);
+      assert.equal(
+        cliOverriddenText.status,
+        1,
+        cliOverriddenText.stderr + cliOverriddenText.stdout,
+      );
+      assert.match(
+        cliOverriddenText.stdout,
+        /localGap \[resolved_by_override\] fixture\.source-spec \(third-party-fixture\) field=couponCode/u,
+      );
+      assert.match(
+        cliOverriddenText.stdout,
+        /resolved_by third-party-fixture-complement \(override: couponCode=defaulted/u,
+      );
+      assert.match(cliOverriddenText.stdout, /provider \[skipped\] drizzle/u);
     },
   );
 });

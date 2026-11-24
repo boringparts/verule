@@ -6,7 +6,8 @@ use std::{
 use serde_json::json;
 use verule_adapter_api::{
     ADAPTER_ABI_VERSION, Adapter, AdapterError, AdapterManifest, Context, Evidence,
-    FactContribution, FactRequest, Gap, NodeKind, NodeRef,
+    ExplainGapResolutionStatus, ExplainLocalGap, FactContribution, FactExplainTrace, FactRequest,
+    Gap, NodeKind, NodeRef, SourceLocation,
 };
 
 static INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -96,7 +97,8 @@ fn extract_source_spec<'a>(
     if let Some(targets) = &request.targets {
         for &target in targets {
             if let Some(call) = resolve_source_spec_call(target)?
-                && let Some(contribution) = build_source_spec_contribution(target, call)?
+                && let Some(contribution) =
+                    build_source_spec_contribution(target, call, request.explain)?
             {
                 contributions.push(contribution);
             }
@@ -107,7 +109,8 @@ fn extract_source_spec<'a>(
     let mut covered_calls = Vec::new();
     for &variable in &request.variables {
         if let Some(call) = resolve_source_spec_call(variable)?
-            && let Some(contribution) = build_source_spec_contribution(variable, call)?
+            && let Some(contribution) =
+                build_source_spec_contribution(variable, call, request.explain)?
         {
             covered_calls.push(call);
             contributions.push(contribution);
@@ -118,7 +121,7 @@ fn extract_source_spec<'a>(
             continue;
         }
         if is_define_fixture_source_call(call)?
-            && let Some(contribution) = build_source_spec_contribution(call, call)?
+            && let Some(contribution) = build_source_spec_contribution(call, call, request.explain)?
         {
             contributions.push(contribution);
         }
@@ -169,6 +172,7 @@ fn is_define_fixture_source_call(call: NodeRef<'_>) -> Result<bool, AdapterError
 fn build_source_spec_contribution<'a>(
     subject: NodeRef<'a>,
     call: NodeRef<'a>,
+    explain: bool,
 ) -> Result<Option<FactContribution<'a>>, AdapterError> {
     let args = call.arguments()?;
     if args.len() < 2 {
@@ -183,8 +187,10 @@ fn build_source_spec_contribution<'a>(
     let mut has_dynamic_fields = false;
     let mut evidence = Vec::new();
     let mut gaps = Vec::new();
+    let mut local_gaps = Vec::new();
+    let call_location = call.location()?;
 
-    if let Some(at) = call.location()? {
+    if let Some(at) = call_location.clone() {
         evidence.push(Evidence {
             kind: "source".to_string(),
             message: format!("Fixture source \"{source_name}\" defined here."),
@@ -198,21 +204,39 @@ fn build_source_spec_contribution<'a>(
         collect_source_spec_fields(
             &source_name,
             obj,
+            call_location.as_ref(),
+            explain,
             &mut fields,
             &mut unknown_fields,
             &mut has_dynamic_fields,
             &mut evidence,
             &mut gaps,
+            &mut local_gaps,
         )?;
     } else {
         has_dynamic_fields = true;
-        gaps.push(Gap {
+        let gap = Gap {
             kind: "dynamic-fixture-fields".to_string(),
             message: format!(
                 "Fixture source \"{source_name}\" fields expression could not be statically resolved."
             ),
             at: args[1].location()?,
-        });
+        };
+        if explain {
+            local_gaps.push(ExplainLocalGap {
+                status: ExplainGapResolutionStatus::Unresolved,
+                fact_type_id: "fixture.source-spec".to_string(),
+                provider_id: "third-party-fixture".to_string(),
+                field: None,
+                gap: gap.clone(),
+                subject_location: call_location.clone(),
+                resolved_by: None,
+                impact: Some(format!(
+                    "Fixture source \"{source_name}\" fields could not be statically resolved."
+                )),
+            });
+        }
+        gaps.push(gap);
     }
 
     let required_fields = collect_fields_by_mode(&fields, "required");
@@ -234,37 +258,77 @@ fn build_source_spec_contribution<'a>(
     );
     contribution.evidence = evidence;
     contribution.gaps = gaps;
+    if explain && !local_gaps.is_empty() {
+        contribution.explain_trace = Some(FactExplainTrace { local_gaps });
+    }
     Ok(Some(contribution))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Collects static fields, gaps, and optional explain traces in one pass."
+)]
 fn collect_source_spec_fields(
     source_name: &str,
     obj: NodeRef<'_>,
+    call_location: Option<&SourceLocation>,
+    explain: bool,
     fields: &mut BTreeMap<String, String>,
     unknown_fields: &mut BTreeSet<String>,
     has_dynamic_fields: &mut bool,
     evidence: &mut Vec<Evidence>,
     gaps: &mut Vec<Gap>,
+    local_gaps: &mut Vec<ExplainLocalGap>,
 ) -> Result<(), AdapterError> {
     for prop in obj.properties()? {
         if prop.kind()? != NodeKind::PropertyAssignment {
             *has_dynamic_fields = true;
-            gaps.push(Gap {
+            let gap = Gap {
                 kind: "dynamic-fixture-fields".to_string(),
                 message: format!(
                     "Fixture source \"{source_name}\" contains dynamic field members."
                 ),
                 at: prop.location()?,
-            });
+            };
+            if explain {
+                local_gaps.push(ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: "fixture.source-spec".to_string(),
+                    provider_id: "third-party-fixture".to_string(),
+                    field: None,
+                    gap: gap.clone(),
+                    subject_location: call_location.cloned(),
+                    resolved_by: None,
+                    impact: Some(format!(
+                        "Dynamic member in fixture source \"{source_name}\" left shape incomplete."
+                    )),
+                });
+            }
+            gaps.push(gap);
             continue;
         }
         let Some(key) = read_property_name(prop)? else {
             *has_dynamic_fields = true;
-            gaps.push(Gap {
+            let gap = Gap {
                 kind: "unresolved-fixture-field".to_string(),
                 message: format!("Fixture source \"{source_name}\" has a dynamic property key."),
                 at: prop.location()?,
-            });
+            };
+            if explain {
+                local_gaps.push(ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: "fixture.source-spec".to_string(),
+                    provider_id: "third-party-fixture".to_string(),
+                    field: None,
+                    gap: gap.clone(),
+                    subject_location: call_location.cloned(),
+                    resolved_by: None,
+                    impact: Some(format!(
+                        "Dynamic property key in fixture source \"{source_name}\" could not be resolved."
+                    )),
+                });
+            }
+            gaps.push(gap);
             continue;
         };
         let init = match prop.safe_initializer()? {
@@ -290,13 +354,28 @@ fn collect_source_spec_fields(
         } else {
             unknown_fields.insert(key.clone());
             *has_dynamic_fields = true;
-            gaps.push(Gap {
+            let gap = Gap {
                 kind: "unresolved-fixture-field".to_string(),
                 message: format!(
                     "Fixture source field \"{key}\" in \"{source_name}\" could not be statically resolved."
                 ),
                 at: init.map_or_else(|| prop.location(), NodeRef::location)?,
-            });
+            };
+            if explain {
+                local_gaps.push(ExplainLocalGap {
+                    status: ExplainGapResolutionStatus::Unresolved,
+                    fact_type_id: "fixture.source-spec".to_string(),
+                    provider_id: "third-party-fixture".to_string(),
+                    field: Some(key.clone()),
+                    gap: gap.clone(),
+                    subject_location: call_location.cloned(),
+                    resolved_by: None,
+                    impact: Some(format!(
+                        "Field \"{key}\" in \"{source_name}\" remained unknown after evaluation."
+                    )),
+                });
+            }
+            gaps.push(gap);
         }
     }
     Ok(())
