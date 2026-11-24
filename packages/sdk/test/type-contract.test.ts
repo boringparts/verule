@@ -4,18 +4,21 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { withTempHost } from "@verule/test-hosts";
+
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const tscBin = join(sdkRoot, "node_modules", ".bin", "tsc");
+const validConsumerFixturePath = fileURLToPath(
+  new URL("./fixtures/type-contract/valid-consumer.ts", import.meta.url),
+);
 
 function prepareExternalConsumer(root: string): void {
   const sdkPkgOut = join(root, "node_modules", "@verule", "sdk");
@@ -120,227 +123,18 @@ function runConsumerTsc(
 }
 
 void describe("@verule/sdk external TypeScript consumer contract", () => {
-  void it("compiles valid call -> signature -> instantiated parameter composition against built .d.ts", () => {
-    const root = mkdtempSync(join(tmpdir(), "verule-type-contract-ok-"));
-    try {
-      prepareExternalConsumer(root);
-
-      const validCode = [
-        'import { VeruleExecutionError, createAdditionalInputRegistry, defineAdapter, defineConfig, defineFactProvider, defineFactType, defineModel, defineRule, isSameInstance, type AdditionalInputEntry, type AdditionalInputRegistrar, type AdditionalInputSource, type CallEffectsResult, type CallRef, type DeclarationRef, type ExplainCleanupPath, type FactConflictDetails, type FactConflictParty, type InstanceCleanupScopeResult, type InstanceRef, type SignatureRef, type SyntaxRef, type TypeRef } from "@verule/sdk";',
-        "",
-        "const extModel = defineModel({",
-        '  id: "ext-model",',
-        "  instanceBehaviors: [",
-        "    {",
-        '      kind: "allocates-fresh-instance",',
-        '      match: { container: "IMenuService", member: "createMenu" },',
-        "    },",
-        "    {",
-        '      kind: "forwards-argument",',
-        '      match: { container: "Disposable", member: "_register" },',
-        "      argumentIndex: 0,",
-        "    },",
-        "  ],",
-        "  cleanupOperations: [",
-        "    {",
-        '      kind: "disposes-target",',
-        '      match: { member: "dispose" },',
-        '      target: "receiver",',
-        "    },",
-        "    {",
-        '      kind: "replaces-previous-value",',
-        '      match: { container: "MutableDisposable", member: "value" },',
-        '      target: "receiver",',
-        "    },",
-        "  ],",
-        "  lifecycleEvents: [",
-        "    {",
-        '      kind: "lifecycle-end-callback",',
-        '      match: { symbol: "onDidDisconnect" },',
-        "      callbackArgumentIndex: 0,",
-        "    },",
-        "  ],",
-        "});",
-        "",
-        'const registrar: AdditionalInputRegistrar = createAdditionalInputRegistry({ cwd: "/tmp/workspace" });',
-        'const adapterSource: AdditionalInputSource = { kind: "adapter", id: "demo-adapter" };',
-        'const regEntry: AdditionalInputEntry = registrar.registerAdditionalInput("allowed-packages.json", adapterSource);',
-        "void regEntry;",
-        "",
-        'const sampleFact = defineFactType<"syntax", { readonly strict?: boolean } | undefined, readonly string[]>({',
-        '  id: "demo.sample-fact",',
-        '  subjectKind: "syntax",',
-        "  merge: (existing, incoming) => {",
-        "    if (existing.value[0] === incoming.value[0]) {",
-        "      return { ok: true, value: [...existing.value, ...incoming.value] };",
-        "    }",
-        "    return {",
-        "      ok: false,",
-        "      conflict: {",
-        '        message: "Mismatched head tag",',
-        '        existingConclusion: existing.value[0] ?? "none",',
-        '        incomingConclusion: incoming.value[0] ?? "none",',
-        "      },",
-        "    };",
-        "  },",
-        "});",
-        "",
-        "function inspectConflict(err: VeruleExecutionError): readonly FactConflictParty[] | undefined {",
-        "  const details: FactConflictDetails | undefined = err.conflict;",
-        "  return details?.parties;",
-        "}",
-        "void inspectConflict;",
-        "const sampleAdapter = defineAdapter({",
-        '  id: "demo-adapter",',
-        "  provides: [",
-        "    defineFactProvider(sampleFact, async (ctx) => {",
-        '      const adapterInput: AdditionalInputEntry = ctx.registerAdditionalInput("allowed-packages.json");',
-        "      if (adapterInput.exists) {",
-        '        const raw: string = ctx.readAdditionalInput("allowed-packages.json");',
-        "        void raw;",
-        "      }",
-        '      const nodes = await ctx.findSyntax({ kinds: ["CallExpression"] });',
-        '      return nodes.map((n) => ({ subject: n.ref, value: ["ok"] }));',
-        "    }),",
-        "  ],",
-        "});",
-        "",
-        "const validRule = defineRule({",
-        '  id: "external-consumer-valid",',
-        "  run: async (ctx) => {",
-        '    const inputEntry: AdditionalInputEntry = ctx.registerAdditionalInput("allowed-packages.json");',
-        "    if (inputEntry.exists) {",
-        '      const raw: string = ctx.readAdditionalInput("allowed-packages.json");',
-        "      void raw;",
-        "    }",
-        "    const syntaxNodes = await ctx.findSyntax({",
-        '      range: { file: "src/app.ts", startLine: 1, endLine: 20 },',
-        '      kinds: ["CallExpression"],',
-        "    });",
-        "    const facts = await ctx.facts(sampleFact, {",
-        "      targets: syntaxNodes.map((n) => n.ref),",
-        '      providerId: "demo-adapter",',
-        "      condition: { strict: true },",
-        "    });",
-        "    void facts;",
-        "    const callResolutions = await ctx.resolveCalls(",
-        "      syntaxNodes.map((n) => n.ref),",
-        "      { select: { signature: true, location: true } },",
-        "    );",
-        "    const callRefs: CallRef[] = [];",
-        "    for (const row of callResolutions) {",
-        "      if (row.call !== null) {",
-        "        callRefs.push(row.call);",
-        "      }",
-        "    }",
-        "    const resolvedInstances = await ctx.resolveInstances(callRefs);",
-        "    const instRefs: InstanceRef[] = [];",
-        "    for (const instRow of resolvedInstances) {",
-        "      if (instRow.instance !== null) {",
-        "        instRefs.push(instRow.instance);",
-        "      }",
-        "    }",
-        "    const projectedInstances = await ctx.projectInstances(instRefs, {",
-        "      select: {",
-        "        instanceKey: true,",
-        "        originKind: true,",
-        "        allocationLocation: true,",
-        "        originSyntax: true,",
-        "        modelId: true,",
-        "        evidence: true,",
-        "      },",
-        "    });",
-        "    const firstInst = projectedInstances[0];",
-        "    if (firstInst !== undefined && firstInst.originSyntax !== null) {",
-        "      const originSyn: SyntaxRef = firstInst.originSyntax;",
-        "      void originSyn;",
-        "      void isSameInstance(firstInst.instance, instRefs[0]);",
-        "    }",
-        "    const callRows = await ctx.projectCalls(callRefs, {",
-        "      select: { signature: true, returnType: true },",
-        "    });",
-        "    const sigRefs: SignatureRef[] = [];",
-        "    for (const row of callRows) {",
-        "      if (row.signature !== null) {",
-        "        sigRefs.push(row.signature);",
-        "      }",
-        "    }",
-        "    const sigRows = await ctx.projectSignatures(sigRefs, {",
-        "      select: {",
-        "        instantiatedParameterTypes: [0],",
-        "        returnType: true,",
-        "        declaration: true,",
-        "      },",
-        "    });",
-        "    const firstSig = sigRows[0];",
-        "    if (firstSig !== undefined) {",
-        "      const param0 = firstSig.instantiatedParameterTypes[0];",
-        "      if (param0 !== undefined) {",
-        "        const sourceType: TypeRef = param0.type.ref;",
-        "        const targetType: TypeRef = firstSig.returnType.ref;",
-        "        const [assign] = await ctx.isAssignableTo([{ source: sourceType, target: targetType }]);",
-        "        if (assign?.assignable) {",
-        "          const decl: DeclarationRef | null = firstSig.declaration;",
-        "          if (decl !== null) {",
-        "            const [lookedUp] = await ctx.syntaxOf([decl], { select: { kind: true, location: true } });",
-        "            const syn: SyntaxRef | null = lookedUp?.syntax ?? null;",
-        "            if (syn !== null && lookedUp?.location != null) {",
-        "              const callers = await ctx.callersOf([decl]);",
-        "              const callees = await ctx.calleesOf(callRefs);",
-        "              const prop = await ctx.valuePropagation({",
-        '                propagation: "value",',
-        "                from: syn,",
-        "                to: [decl, ...callRefs],",
-        "              });",
-        "              void callers;",
-        "              void callees;",
-        "              if (prop.results[0]?.reachable) {",
-        '                ctx.report({ at: lookedUp.location, message: "ok" });',
-        "              }",
-        "            }",
-        "          }",
-        "        }",
-        "      }",
-        "    }",
-        "    const cleanupResults: readonly InstanceCleanupScopeResult[] = await ctx.instanceCleanup({",
-        "      scopes: callRefs,",
-        "      targets: instRefs,",
-        "    });",
-        "    const effectsResults: readonly CallEffectsResult[] = await ctx.callEffects({",
-        "      targets: callRefs,",
-        "    });",
-        "    const firstEffect = effectsResults[0]?.fieldWrites[0];",
-        "    if (firstEffect !== undefined) {",
-        "      const writeSyn: SyntaxRef = firstEffect.syntax;",
-        "      const recvSyn: SyntaxRef = firstEffect.receiverSyntax;",
-        "      await ctx.branchCoverage({ branches: [], targets: [writeSyn] });",
-        "      await ctx.resolveInstances([recvSyn]);",
-        "    }",
-        "    const firstCleanup = cleanupResults[0];",
-        "    if (firstCleanup !== undefined) {",
-        "      const disposedInst: InstanceRef | undefined = firstCleanup.disposedInstances[0]?.instance;",
-        "      void disposedInst;",
-        "    }",
-        "    const sampleExplainPath: ExplainCleanupPath | undefined = undefined;",
-        "    void sampleExplainPath;",
-        "  },",
-        "});",
-        "",
-        'export default defineConfig({ tsconfig: "tsconfig.json", adapters: [sampleAdapter], additionalInputs: ["allowed-packages.json"], models: [extModel], rules: [validRule] });',
-        "",
-      ].join("\n");
-
-      const result = runConsumerTsc(root, validCode);
+  void it("compiles valid call -> signature -> instantiated parameter composition against built .d.ts", async () => {
+    await withTempHost({}, (host) => {
+      prepareExternalConsumer(host.rootDir);
+      const validCode = readFileSync(validConsumerFixturePath, "utf8");
+      const result = runConsumerTsc(host.rootDir, validCode);
       assert.equal(result.ok, true, `Expected tsc to pass:\n${result.output}`);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
-  void it("rejects mismatched ProgramRef kinds and reads of unselected projection fields at compile time", () => {
-    const root = mkdtempSync(join(tmpdir(), "verule-type-contract-err-"));
-    try {
-      prepareExternalConsumer(root);
+  void it("rejects mismatched ProgramRef kinds and reads of unselected projection fields at compile time", async () => {
+    await withTempHost({}, (host) => {
+      prepareExternalConsumer(host.rootDir);
 
       const negativeCases: readonly {
         readonly name: string;
@@ -641,7 +435,7 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           "}",
           "",
         ].join("\n");
-        const result = runConsumerTsc(root, snippet);
+        const result = runConsumerTsc(host.rootDir, snippet);
         assert.equal(
           result.ok,
           false,
@@ -653,8 +447,6 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           `Unexpected diagnostic for "${testCase.name}":\n${result.output}`,
         );
       }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 });
