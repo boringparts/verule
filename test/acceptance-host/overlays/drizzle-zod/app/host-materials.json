@@ -10,6 +10,13 @@
     "src/row-projection.ts",
     "tsconfig.json",
     "tsconfig.multiple-sources.json",
+    "variants/case-a/row-projection.ts",
+    "variants/case-b/row-projection.ts",
+    "variants/case-cd/row-projection.ts",
+    "variants/case-e/row-projection.ts",
+    "variants/fake-select.ts",
+    "variants/integrated/verule.integrated-explain.config.ts",
+    "variants/integrated/verule.integrated-output-explain.config.ts",
     "verule.drizzle-zod.native.config.ts",
     "verule.multiple-sources.config.ts"
   ]

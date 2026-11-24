@@ -516,6 +516,9 @@ importers:
       '@types/node':
         specifier: ^26.0.0
         version: 26.6.6
+      '@verule/rules-reference':
+        specifier: 'catalog:'
+        version: link:../../rules-reference
 
   test/acceptance-host/data: {}
 
@@ -775,6 +778,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
+      '@verule/test-hosts':
+        specifier: workspace:*
+        version: link:../hosts
       '@verule/tooling-config':
         specifier: workspace:*
         version: link:../../packages/tooling-config

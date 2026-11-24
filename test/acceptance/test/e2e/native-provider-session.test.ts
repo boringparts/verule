@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
@@ -17,6 +18,7 @@ import type {
   SyntaxRef,
   VeruleExecutionError,
 } from "@verule/sdk";
+import { runTscTypecheck } from "@verule/test-hosts";
 
 const packageNames = [
   "@verule/adapter-fixture",
@@ -965,52 +967,17 @@ void test("distinguishes skipped providers, unresolved local gaps (while indepen
       additionalPackages: [...packageNames],
     },
     async (host) => {
-      host.writeText(
-        compositionSourceRelPath,
-        [
-          "export function defineFixtureSource(",
-          "  name: string,",
-          '  fields: Readonly<Record<string, "required" | "optional" | "defaulted">>,',
-          ") {",
-          "  return { name, fields };",
-          "}",
-          "",
-          'declare function dynamicFieldSpec(): "required" | "optional" | "defaulted";',
-          "",
-          'export const sessionOrderSource = defineFixtureSource("order", {',
-          '  orderId: "required",',
-          "  couponCode: dynamicFieldSpec(),",
-          "});",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "app",
+        "provider-session-overlay/variants/local-gaps/provider-session-source.ts",
+        host.resolvePath(compositionSourceRelPath),
       );
-
-      host.writeText(
-        compositionConsumerRelPath,
-        [
-          'import { sessionOrderSource } from "./provider-session-source.ts";',
-          "",
-          "export function consumeFixtureSource(",
-          "  source: unknown,",
-          '  overrides?: Readonly<Record<string, "required" | "optional" | "defaulted">>,',
-          ") {",
-          "  return { source, overrides };",
-          "}",
-          "",
-          "export function unrelatedHelper(value: string): string {",
-          "  return value;",
-          "}",
-          "",
-          "export const rawOrderConsumer = consumeFixtureSource(sessionOrderSource);",
-          "",
-          "export const sessionOrderConsumer = consumeFixtureSource(sessionOrderSource, {",
-          '  couponCode: "defaulted",',
-          "});",
-          "",
-          'export const unrelatedCall = unrelatedHelper("keep");',
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "app",
+        "provider-session-overlay/variants/local-gaps/provider-session-composition.ts",
+        host.resolvePath(compositionConsumerRelPath),
       );
+      await runTscTypecheck(host.hostDir, "packages/app/tsconfig.json");
 
       const lineColOf = (relPath: string, needle: string): string => {
         const text = host.readText(relPath);

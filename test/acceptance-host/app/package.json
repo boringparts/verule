@@ -30,7 +30,8 @@
     "@verule/sdk": "catalog:"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0"
+    "@types/node": "^26.0.0",
+    "@verule/rules-reference": "catalog:"
   },
   "engines": {
     "node": "^26.13.1"

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import { withAcceptanceHost } from "@verule/acceptance";
+import {
+  copyAcceptanceHostMaterial,
+  withAcceptanceHost,
+} from "@verule/acceptance";
 import {
   ValidatorSchemaFieldsFact,
   type ValidatorSchemaFieldsFactValue,
@@ -16,6 +19,7 @@ import {
   type ValidatorSubjectKind,
 } from "@verule/adapter-zod";
 import type { CheckReport, FactResult } from "@verule/sdk";
+import { runTscTypecheck } from "@verule/test-hosts";
 
 const adapterPackageNames = [
   "@verule/adapter-drizzle",
@@ -496,38 +500,18 @@ void test("loads both installed native adapters from the neutral static host and
       const originalSchema = host.readText(schemaRelPath);
       const fakeSelectRelPath = "packages/app/src/fake-select.ts";
       try {
-        host.writeText(
-          schemaRelPath,
-          [
-            originalSchema,
-            "",
-            "export const refinedWorkspaceSchema = createSelectSchema(workspace, {",
-            "  slug: (s) => s.optional(),",
-            '  name: (s) => s.default("Workspace"),',
-            "}).extend({",
-            '  plan: z.string().default("enterprise"),',
-            "});",
-            "",
-          ].join("\n"),
+        copyAcceptanceHostMaterial(
+          "drizzle-zod-data",
+          "variants/refined/drizzle-schema.ts",
+          host.resolvePath(schemaRelPath),
         );
-        host.writeText(
-          fakeSelectRelPath,
-          [
-            'import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";',
-            'import { z } from "zod";',
-            "",
-            'const localUsers = sqliteTable("local_users", {',
-            '  id: integer("id").primaryKey(),',
-            '  secret: text("secret").notNull(),',
-            "});",
-            "",
-            "function createSelectSchema(_table: unknown) {",
-            "  return z.object({ localOnly: z.string() });",
-            "}",
-            "export const fakeLocalSelectSchema = createSelectSchema(localUsers);",
-            "",
-          ].join("\n"),
+        copyAcceptanceHostMaterial(
+          "drizzle-zod-app",
+          "variants/fake-select.ts",
+          host.resolvePath(fakeSelectRelPath),
         );
+        await runTscTypecheck(host.hostDir, "packages/app/tsconfig.json");
+        await runTscTypecheck(host.hostDir, "packages/data/tsconfig.json");
 
         let schemaFieldsFacts: readonly FactResult<
           ValidatorSchemaSubjectKind,

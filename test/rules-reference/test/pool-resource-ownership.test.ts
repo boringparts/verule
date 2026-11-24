@@ -1,13 +1,4 @@
 import assert from "node:assert/strict";
-import {
-  cpSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -18,6 +9,12 @@ import {
   poolResourceOwnershipRule,
 } from "@verule/rules-reference";
 import { defineConfig, openSession, runCheck } from "@verule/sdk";
+import {
+  copyDirectory,
+  type PreparedTempHost,
+  withTempHost,
+  writeSyntheticPackage,
+} from "@verule/test-hosts";
 
 const fixturesRoot = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -27,43 +24,45 @@ const fixturesRoot = join(
 
 function withTempFixtureProject<T>(
   fixtureDirs: readonly string[],
-  fn: (rootDir: string) => Promise<T>,
+  fn: (host: PreparedTempHost) => Promise<T>,
 ): Promise<T> {
-  const rootDir = mkdtempSync(join(tmpdir(), "verule-pool-ownership-test-"));
-  for (const dir of fixtureDirs) {
-    cpSync(join(fixturesRoot, dir), join(rootDir, dir), { recursive: true });
-  }
-  writeFileSync(
-    join(rootDir, "tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2024",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-          rewriteRelativeImportExtensions: true,
-        },
-        include: ["**/*.ts"],
+  return withTempHost(
+    {
+      prefix: "verule-pool-ownership-test-",
+      setup: (host) => {
+        for (const dir of fixtureDirs) {
+          copyDirectory(join(fixturesRoot, dir), host.resolvePath(dir));
+        }
+        host.writeText(
+          "tsconfig.json",
+          JSON.stringify(
+            {
+              compilerOptions: {
+                strict: true,
+                target: "ES2024",
+                module: "NodeNext",
+                moduleResolution: "NodeNext",
+                rewriteRelativeImportExtensions: true,
+              },
+              include: ["**/*.ts"],
+            },
+            null,
+            2,
+          ),
+        );
       },
-      null,
-      2,
-    ),
-    "utf8",
+    },
+    fn,
   );
-
-  return fn(rootDir).finally(() => {
-    rmSync(rootDir, { recursive: true, force: true });
-  });
 }
 
 void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
   void it("flags coexisting child resources registered onto outer host container while accepting item-owned DisposableStore wrappers and direct single-item factories", async () => {
     await withTempFixtureProject(
       ["shared", "positive-outer-reg"],
-      async (rootDir) => {
+      async (host) => {
         const report = await runCheck({
-          cwd: rootDir,
+          cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
             models: [poolResourceOwnershipModel],
@@ -106,9 +105,9 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
   void it("discovers aliased ResourcePool imports and cross-file helper outer registrations without hardcoded lookupFiles, while ignoring cross-file item-owned stores", async () => {
     await withTempFixtureProject(
       ["shared", "cross-file-helper"],
-      async (rootDir) => {
+      async (host) => {
         const report = await runCheck({
-          cwd: rootDir,
+          cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
             models: [poolResourceOwnershipModel],
@@ -136,66 +135,62 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
   });
 
   void it("reports sibling resource leaks with wrongly-disposed evidence and retracts findings when fixed in openSession", async () => {
-    await withTempFixtureProject(
-      ["shared", "sibling-leak"],
-      async (rootDir) => {
-        const session = await openSession({
-          cwd: rootDir,
-          config: defineConfig({
-            tsconfig: "tsconfig.json",
-            models: [poolResourceOwnershipModel],
-            rules: [poolResourceOwnershipRule],
-          }),
-        });
-        try {
-          const initial = await session.check();
-          assert.equal(initial.status, "findings");
-          assert.deepEqual(
-            initial.diagnostics.map((d) => ({
-              file: d.at.file,
-              line: d.at.line,
-            })),
-            [{ file: "sibling-leak/sibling-leak.ts", line: 28 }],
-            JSON.stringify(initial.diagnostics),
-          );
-          const diag = initial.diagnostics[0]!;
-          assert.ok(diag.message.includes("primaryLabels"), diag.message);
-          assert.ok(
-            diag.evidence.some(
-              (e) =>
-                e.kind === "model" &&
-                e.at?.file === "sibling-leak/sibling-leak.ts" &&
-                e.at.line === 35,
-            ),
-            JSON.stringify(diag.evidence),
-          );
-          assert.ok(
-            diag.evidence.some(
-              (e) =>
-                e.kind === "source" &&
-                e.at?.file === "sibling-leak/sibling-leak.ts" &&
-                e.at.line === 25,
-            ),
-            JSON.stringify(diag.evidence),
-          );
+    await withTempFixtureProject(["shared", "sibling-leak"], async (host) => {
+      const session = await openSession({
+        cwd: host.rootDir,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          models: [poolResourceOwnershipModel],
+          rules: [poolResourceOwnershipRule],
+        }),
+      });
+      try {
+        const initial = await session.check();
+        assert.equal(initial.status, "findings");
+        assert.deepEqual(
+          initial.diagnostics.map((d) => ({
+            file: d.at.file,
+            line: d.at.line,
+          })),
+          [{ file: "sibling-leak/sibling-leak.ts", line: 28 }],
+          JSON.stringify(initial.diagnostics),
+        );
+        const diag = initial.diagnostics[0]!;
+        assert.ok(diag.message.includes("primaryLabels"), diag.message);
+        assert.ok(
+          diag.evidence.some(
+            (e) =>
+              e.kind === "model" &&
+              e.at?.file === "sibling-leak/sibling-leak.ts" &&
+              e.at.line === 35,
+          ),
+          JSON.stringify(diag.evidence),
+        );
+        assert.ok(
+          diag.evidence.some(
+            (e) =>
+              e.kind === "source" &&
+              e.at?.file === "sibling-leak/sibling-leak.ts" &&
+              e.at.line === 25,
+          ),
+          JSON.stringify(diag.evidence),
+        );
 
-          const targetPath = join(rootDir, "sibling-leak", "sibling-leak.ts");
-          const updatedSource = readFileSync(targetPath, "utf8").replace(
-            "dispose: () => primaryLabels.dispose(),",
-            "dispose: () => { primaryLabels.dispose(); leakedLabels.dispose(); },",
-          );
-          writeFileSync(targetPath, updatedSource, "utf8");
-          await session.update({
-            changed: ["sibling-leak/sibling-leak.ts"],
-          });
-          const afterFix = await session.check();
-          assert.equal(afterFix.status, "clean");
-          assert.equal(afterFix.diagnostics.length, 0);
-        } finally {
-          await session.close();
-        }
-      },
-    );
+        host.replaceText(
+          "sibling-leak/sibling-leak.ts",
+          "dispose: () => primaryLabels.dispose(),",
+          "dispose: () => { primaryLabels.dispose(); leakedLabels.dispose(); },",
+        );
+        await session.update({
+          changed: ["sibling-leak/sibling-leak.ts"],
+        });
+        const afterFix = await session.check();
+        assert.equal(afterFix.status, "clean");
+        assert.equal(afterFix.diagnostics.length, 0);
+      } finally {
+        await session.close();
+      }
+    });
   });
 
   void it("surfaces missing-instance-model gaps for unmodeled external cleanup without crashing", async () => {
@@ -220,62 +215,43 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
       },
     });
 
-    await withTempFixtureProject(
-      ["shared", "external-gap"],
-      async (rootDir) => {
-        // Materialize the checked `.d.ts` fixture as an external package in `node_modules`
-        // so `isExternal === true` triggers `missing-instance-model`.
-        const pkgDir = join(
-          rootDir,
-          "node_modules",
-          "@fixture",
-          "external-gap",
-        );
-        mkdirSync(pkgDir, { recursive: true });
-        writeFileSync(
-          join(pkgDir, "package.json"),
-          JSON.stringify({
-            name: "@fixture/external-gap",
-            version: "1.0.0",
-            types: "./index.d.ts",
-          }),
-          "utf8",
-        );
-        const dtsPath = join(rootDir, "external-gap", "external-gap.d.ts");
-        writeFileSync(
-          join(pkgDir, "index.d.ts"),
-          readFileSync(dtsPath, "utf8"),
-          "utf8",
-        );
-        rmSync(dtsPath);
-        const consumerPath = join(rootDir, "external-gap", "missing-model.ts");
-        writeFileSync(
-          consumerPath,
-          readFileSync(consumerPath, "utf8").replace(
-            '"./external-gap.ts"',
-            '"@fixture/external-gap"',
-          ),
-          "utf8",
-        );
+    await withTempFixtureProject(["shared", "external-gap"], async (host) => {
+      // Materialize the checked `.d.ts` fixture as an external package in `node_modules`
+      // so `isExternal === true` triggers `missing-instance-model`.
+      writeSyntheticPackage(host.rootDir, "@fixture/external-gap", {
+        packageJson: {
+          name: "@fixture/external-gap",
+          version: "1.0.0",
+          types: "./index.d.ts",
+        },
+        files: {
+          "index.d.ts": host.readText("external-gap/external-gap.d.ts"),
+        },
+      });
+      host.removePath("external-gap/external-gap.d.ts");
+      host.replaceText(
+        "external-gap/missing-model.ts",
+        '"./external-gap.ts"',
+        '"@fixture/external-gap"',
+      );
 
-        const report = await runCheck({
-          cwd: rootDir,
-          config: defineConfig({
-            tsconfig: "tsconfig.json",
-            models: [customModel],
-            rules: [poolResourceOwnershipRule],
-          }),
-        });
+      const report = await runCheck({
+        cwd: host.rootDir,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          models: [customModel],
+          rules: [poolResourceOwnershipRule],
+        }),
+      });
 
-        assert.ok(
-          report.gaps.some(
-            (g) =>
-              g.kind === "missing-instance-model" &&
-              g.at?.file === "external-gap/missing-model.ts",
-          ),
-          JSON.stringify(report.gaps),
-        );
-      },
-    );
+      assert.ok(
+        report.gaps.some(
+          (g) =>
+            g.kind === "missing-instance-model" &&
+            g.at?.file === "external-gap/missing-model.ts",
+        ),
+        JSON.stringify(report.gaps),
+      );
+    });
   });
 });

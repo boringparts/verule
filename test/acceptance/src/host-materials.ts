@@ -9,6 +9,17 @@ export type AcceptanceHostOverlay =
   | "queue"
   | "zod";
 
+export type AcceptanceHostMaterialSource =
+  | "app"
+  | "data"
+  | "drizzle-app"
+  | "drizzle-data"
+  | "drizzle-zod-app"
+  | "drizzle-zod-data"
+  | "provider-session-data"
+  | "zod-app"
+  | "zod-data";
+
 const baseAppPackage = "@verule/acceptance-host-app";
 const baseDataPackage = "@verule/acceptance-host-data";
 
@@ -28,6 +39,18 @@ const overlayPackages: Record<
     app: "@verule/acceptance-host-zod-app",
     data: "@verule/acceptance-host-zod-data",
   },
+};
+
+const materialPackages: Record<AcceptanceHostMaterialSource, string> = {
+  app: baseAppPackage,
+  data: baseDataPackage,
+  "drizzle-app": overlayPackages.drizzle.app,
+  "drizzle-data": overlayPackages.drizzle.data,
+  "drizzle-zod-app": overlayPackages["drizzle-zod"].app,
+  "drizzle-zod-data": overlayPackages["drizzle-zod"].data,
+  "provider-session-data": "@verule/acceptance-host-provider-session-data",
+  "zod-app": overlayPackages.zod.app,
+  "zod-data": overlayPackages.zod.data,
 };
 
 function resolveHostMaterial(
@@ -141,7 +164,15 @@ function copyNeutralHost(hostDir: string): {
     (relativePath) =>
       !relativePath.startsWith("host-root/") &&
       !relativePath.startsWith("provider-session-overlay/") &&
-      !relativePath.startsWith("scenarios/"),
+      !relativePath.startsWith("scenarios/") &&
+      !relativePath.startsWith("variants/") &&
+      relativePath !== "package.json" &&
+      relativePath !== "host-package.json",
+  );
+  copyHostMaterialFile(
+    baseAppPackage,
+    "host-package.json",
+    join(appDir, "package.json"),
   );
   copyHostMaterialFiles(baseDataPackage, dataDir, () => true);
   return { appDir, dataDir };
@@ -159,6 +190,7 @@ function copySpecializedHost(
     appDir,
     (relativePath) =>
       !relativePath.startsWith("host-root/") &&
+      !relativePath.startsWith("variants/") &&
       relativePath !== "package.json" &&
       relativePath !== "host-package.json",
   );
@@ -167,7 +199,11 @@ function copySpecializedHost(
     "host-package.json",
     join(appDir, "package.json"),
   );
-  copyHostMaterialFiles(packages.data, dataDir, () => true);
+  copyHostMaterialFiles(
+    packages.data,
+    dataDir,
+    (relativePath) => !relativePath.startsWith("variants/"),
+  );
   copyHostMaterialFiles(
     packages.app,
     hostDir,
@@ -242,7 +278,7 @@ function copyQueueHost(hostDir: string): {
   );
   copyHostMaterialFile(
     baseAppPackage,
-    "scenarios/queue/verule.config.template",
+    "scenarios/queue/verule.config.ts",
     join(appDir, "verule.config.ts"),
   );
   copyHostMaterialFile(
@@ -256,6 +292,37 @@ function copyQueueHost(hostDir: string): {
     join(dataDir, "package.json"),
   );
   return { appDir, dataDir };
+}
+
+/**
+ * Copies a single manifest-listed host material file into `destinationPath`.
+ */
+export function copyAcceptanceHostMaterial(
+  source: AcceptanceHostMaterialSource,
+  materialPath: string,
+  destinationPath: string,
+): void {
+  copyHostMaterialFile(materialPackages[source], materialPath, destinationPath);
+}
+
+/**
+ * Reads a manifest-listed host material file as UTF-8 text via package exports.
+ */
+export function readAcceptanceHostMaterial(
+  source: AcceptanceHostMaterialSource,
+  materialPath: string,
+): string {
+  const packageName = materialPackages[source];
+  if (!readHostMaterials(packageName).includes(materialPath)) {
+    throw new Error(
+      'Host material "' +
+        materialPath +
+        '" is not exported by ' +
+        packageName +
+        ".",
+    );
+  }
+  return readFileSync(resolveHostMaterial(packageName, materialPath), "utf8");
 }
 
 /**

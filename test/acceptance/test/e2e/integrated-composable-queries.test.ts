@@ -3,10 +3,12 @@ import { dirname } from "node:path";
 import { test } from "node:test";
 
 import {
+  copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
 import type { CheckReport } from "@verule/sdk";
+import { runTscTypecheck } from "@verule/test-hosts";
 
 const drizzleZodConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
 const integratedExplainConfigPath =
@@ -98,104 +100,35 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       ],
     },
     async (host) => {
-      host.writeText(
-        integratedExplainConfigPath,
-        [
-          'import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";',
-          'import { defineConfig } from "@verule/sdk";',
-          "",
-          "export default defineConfig({",
-          '  tsconfig: "packages/app/tsconfig.json",',
-          "  adapters: [",
-          '    "@verule/adapter-drizzle",',
-          '    "@verule/adapter-zod",',
-          '    "@verule/adapter-fixture",',
-          "  ],",
-          "  rules: [rowProjectionSatisfiesValidatorRule],",
-          "});",
-          "",
-        ].join("\n"),
-      );
-
-      const originalSchema = host.readText(schemaRelPath);
-      const originalProjections = host.readText(projectionsRelPath);
-      const originalDataIndex = host.readText(dataIndexRelPath);
-
-      host.writeText(
-        projectionsRelPath,
-        [
-          originalProjections,
-          "",
-          "export function getUserWithStatusNoAge() {",
-          "  return db",
-          "    .select({",
-          "      id: users.id,",
-          "      fullName: users.fullName,",
-          "      status: users.status,",
-          "    })",
-          "    .from(users)",
-          "    .get();",
-          "}",
-          "",
-        ].join("\n"),
-      );
-
-      host.writeText(
-        dataIndexRelPath,
-        [
-          originalDataIndex.replace(
-            '  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
-            '  getUserWithStatusNoAge,\n  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
-          ),
-        ].join("\n"),
-      );
-      host.replaceText(
-        dataIndexRelPath,
-        '  userSchema,\n} from "./drizzle-schema.ts";',
-        '  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/integrated/verule.integrated-explain.config.ts",
+        host.resolvePath(integratedExplainConfigPath),
       );
 
       // Case A: runtime-only field validator on static column `age` without subsequent override.
-      host.writeText(
-        schemaRelPath,
-        [
-          originalSchema,
-          "",
-          "declare function runtimeFieldValidator(): z.ZodType<number>;",
-          "",
-          "export const runtimeAgeSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator(),",
-          "});",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-a/drizzle-projections.ts",
+        host.resolvePath(projectionsRelPath),
       );
-
-      host.writeText(
-        rowProjectionRelPath,
-        [
-          "import {",
-          "  getUserBriefAgain,",
-          "  getUserWithStatusNoAge,",
-          "  runtimeAgeSchema,",
-          '} from "@verule/acceptance-host-drizzle-zod-data";',
-          "",
-          "export async function checkRuntimeValidators() {",
-          "  const missingStatusAndAge = await getUserBriefAgain();",
-          "  const missingOnlyAge = await getUserWithStatusNoAge();",
-          "  return {",
-          "    missingStaticCol:",
-          "      missingStatusAndAge === undefined",
-          "        ? undefined",
-          "        : runtimeAgeSchema.parse(missingStatusAndAge),",
-          "    onlyUnknownCol:",
-          "      missingOnlyAge === undefined",
-          "        ? undefined",
-          "        : runtimeAgeSchema.parse(missingOnlyAge),",
-          "  };",
-          "}",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-a/index.ts",
+        host.resolvePath(dataIndexRelPath),
       );
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-a/drizzle-schema.ts",
+        host.resolvePath(schemaRelPath),
+      );
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/case-a/row-projection.ts",
+        host.resolvePath(rowProjectionRelPath),
+      );
+      await runTscTypecheck(host.hostDir, "packages/app/tsconfig.json");
+      await runTscTypecheck(host.hostDir, "packages/data/tsconfig.json");
 
       const runtimeValidatorLocation = lineColOf(
         host,
@@ -324,40 +257,15 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       );
 
       // Case B: subsequent `.extend({ age: z.number().default(21) })` resolves the local unknown.
-      host.writeText(
-        schemaRelPath,
-        [
-          originalSchema,
-          "",
-          "declare function runtimeFieldValidator(): z.ZodType<number>;",
-          "",
-          "export const runtimeAgeSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator(),",
-          "}).extend({",
-          "  age: z.number().default(21),",
-          "});",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-b/drizzle-schema.ts",
+        host.resolvePath(schemaRelPath),
       );
-      host.writeText(
-        rowProjectionRelPath,
-        [
-          "import {",
-          "  getUserWithStatusNoAge,",
-          "  runtimeAgeSchema,",
-          '} from "@verule/acceptance-host-drizzle-zod-data";',
-          "",
-          "export async function checkOverriddenRuntimeValidator() {",
-          "  const missingOnlyAge = await getUserWithStatusNoAge();",
-          "  return {",
-          "    overridden:",
-          "      missingOnlyAge === undefined",
-          "        ? undefined",
-          "        : runtimeAgeSchema.parse(missingOnlyAge),",
-          "  };",
-          "}",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/case-b/row-projection.ts",
+        host.resolvePath(rowProjectionRelPath),
       );
 
       const extendOverrideLine = Number(
@@ -522,99 +430,27 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       // Case C & D: sound input vs output semantics for field-modifier `.default(21)`, `.and(...)`, and `.pipe(...)` on `createSelectSchema`.
       const integratedOutputExplainConfigPath =
         "packages/app/verule.integrated-output-explain.config.ts";
-      host.writeText(
-        integratedOutputExplainConfigPath,
-        [
-          'import { ValidatorOutputFieldsFact } from "@verule/adapter-zod";',
-          'import { defineConfig, defineRule } from "@verule/sdk";',
-          "",
-          "const validatorOutputProbeRule = defineRule({",
-          '  id: "validator-output-fields-probe",',
-          "  run: async (ctx) => {",
-          '    const outputs = await ctx.facts(ValidatorOutputFieldsFact, { condition: { scope: "calls" } });',
-          "    for (const fact of outputs) {",
-          '      if (!fact.value.presentFields.includes("age")) {',
-          "        const calls = await ctx.syntaxOf([fact.subject], { select: { location: true } });",
-          "        const loc = calls[0]?.location;",
-          "        if (loc) {",
-          "          ctx.report({",
-          "            at: loc,",
-          '            message: `Expected output field "age" to be present on ${fact.value.schemaName ?? "schema"}.`,',
-          "            basis: [fact],",
-          "          });",
-          "        }",
-          "      }",
-          "    }",
-          "  },",
-          "});",
-          "",
-          "export default defineConfig({",
-          '  tsconfig: "packages/app/tsconfig.json",',
-          "  adapters: [",
-          '    "@verule/adapter-drizzle",',
-          '    "@verule/adapter-zod",',
-          '    "@verule/adapter-fixture",',
-          "  ],",
-          "  rules: [validatorOutputProbeRule],",
-          "});",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/integrated/verule.integrated-output-explain.config.ts",
+        host.resolvePath(integratedOutputExplainConfigPath),
       );
-
-      host.replaceText(
-        dataIndexRelPath,
-        '  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
-        '  andDefaultedSchema,\n  andRequiredSchema,\n  modifierDefaultedSchema,\n  pipeOverriddenSchema,\n  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-cd/index.ts",
+        host.resolvePath(dataIndexRelPath),
       );
-      host.writeText(
-        schemaRelPath,
-        [
-          originalSchema,
-          "",
-          "declare function runtimeFieldValidator(): z.ZodType<number>;",
-          "",
-          "export const modifierDefaultedSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator().default(21),",
-          "});",
-          "",
-          "export const andDefaultedSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator(),",
-          "}).and(z.object({ age: z.number().default(21) }));",
-          "",
-          "export const andRequiredSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator(),",
-          "}).and(z.object({ age: z.number() }));",
-          "",
-          "export const pipeOverriddenSchema = createSelectSchema(users, {",
-          "  age: runtimeFieldValidator(),",
-          "}).pipe(z.object({ id: z.number(), fullName: z.string(), status: z.string().nullable(), age: z.number().default(21) }));",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-cd/drizzle-schema.ts",
+        host.resolvePath(schemaRelPath),
       );
-      host.writeText(
-        rowProjectionRelPath,
-        [
-          "import {",
-          "  andDefaultedSchema,",
-          "  andRequiredSchema,",
-          "  getUserWithStatusNoAge,",
-          "  modifierDefaultedSchema,",
-          "  pipeOverriddenSchema,",
-          '} from "@verule/acceptance-host-drizzle-zod-data";',
-          "",
-          "export async function checkCombinatorOverrides() {",
-          "  const missingOnlyAge = await getUserWithStatusNoAge();",
-          "  if (missingOnlyAge === undefined) return undefined;",
-          "  return {",
-          "    mod: modifierDefaultedSchema.parse(missingOnlyAge),",
-          "    andDef: andDefaultedSchema.parse(missingOnlyAge),",
-          "    andReq: andRequiredSchema.parse(missingOnlyAge),",
-          "    pipe: pipeOverriddenSchema.parse(missingOnlyAge),",
-          "  };",
-          "}",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/case-cd/row-projection.ts",
+        host.resolvePath(rowProjectionRelPath),
       );
+      await runTscTypecheck(host.hostDir, "packages/app/tsconfig.json");
 
       // Input rule check: andRequiredSchema reports missing `age`, while andDefaultedSchema and pipeOverriddenSchema keep unresolved gaps on `age`.
       const combinatorInputCheck = await host.check({
@@ -765,54 +601,20 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
 
       // Case E: `.extend({ age: runtimeFieldValidator() })` removes base `age` from `createSelectSchema(users)`
       // and chained `.extend({ age: z.number().default(21) })` resolves `age` via `resolved_by_override`.
-      host.writeText(
-        dataIndexRelPath,
-        originalDataIndex
-          .replace(
-            '  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
-            '  getUserWithStatusNoAge,\n  getUserWithoutAge,\n} from "./drizzle-projections.ts";',
-          )
-          .replace(
-            '  userSchema,\n} from "./drizzle-schema.ts";',
-            '  extendReResolvedSchema,\n  extendUnknownSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
-          ),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-e/index.ts",
+        host.resolvePath(dataIndexRelPath),
       );
-      host.writeText(
-        schemaRelPath,
-        [
-          originalSchema,
-          "",
-          "declare function runtimeFieldValidator(): z.ZodType<number>;",
-          "",
-          "export const extendUnknownSchema = createSelectSchema(users).extend({",
-          "  age: runtimeFieldValidator(),",
-          "});",
-          "",
-          "export const extendReResolvedSchema = extendUnknownSchema.extend({",
-          "  age: z.number().default(21),",
-          "});",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-data",
+        "variants/case-e/drizzle-schema.ts",
+        host.resolvePath(schemaRelPath),
       );
-      host.writeText(
-        rowProjectionRelPath,
-        [
-          "import {",
-          "  extendReResolvedSchema,",
-          "  extendUnknownSchema,",
-          "  getUserWithStatusNoAge,",
-          '} from "@verule/acceptance-host-drizzle-zod-data";',
-          "",
-          "export async function checkExtendUnknownOverrides() {",
-          "  const missingOnlyAge = await getUserWithStatusNoAge();",
-          "  if (missingOnlyAge === undefined) return undefined;",
-          "  return {",
-          "    unknownExtend: extendUnknownSchema.parse(missingOnlyAge),",
-          "    reResolvedExtend: extendReResolvedSchema.parse(missingOnlyAge),",
-          "  };",
-          "}",
-          "",
-        ].join("\n"),
+      copyAcceptanceHostMaterial(
+        "drizzle-zod-app",
+        "variants/case-e/row-projection.ts",
+        host.resolvePath(rowProjectionRelPath),
       );
 
       const extendRuntimeLine = Number(
@@ -1132,25 +934,10 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
           "provider-composition-initial",
         );
 
-        host.writeText(
-          compositionSourceRelPath,
-          [
-            "export function defineFixtureSource(",
-            "  name: string,",
-            '  fields: Readonly<Record<string, "required" | "optional" | "defaulted">>,',
-            ") {",
-            "  return { name, fields };",
-            "}",
-            "",
-            'declare function dynamicFieldSpec(): "required" | "optional" | "defaulted";',
-            "",
-            'export const sessionOrderSource = defineFixtureSource("order", {',
-            '  orderId: "optional",',
-            '  notes: "required",',
-            "  promoCode: dynamicFieldSpec(),",
-            "});",
-            "",
-          ].join("\n"),
+        copyAcceptanceHostMaterial(
+          "app",
+          "provider-session-overlay/variants/composition-dynamic/provider-session-source.ts",
+          host.resolvePath(compositionSourceRelPath),
         );
 
         const watchEdited = await watch.nextReport();

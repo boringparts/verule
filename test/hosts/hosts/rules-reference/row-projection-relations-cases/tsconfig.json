@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "skipLibCheck": true,
+    "paths": {
+      "@fixture/db": ["./packages/db/src/index.ts"],
+      "@fixture/validators": ["./packages/validators/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*.ts"]
+}

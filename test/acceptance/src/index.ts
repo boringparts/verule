@@ -24,6 +24,9 @@ export {
 } from "./host-lifecycle.ts";
 export {
   copyAcceptanceHost,
+  copyAcceptanceHostMaterial,
+  readAcceptanceHostMaterial,
+  type AcceptanceHostMaterialSource,
   type AcceptanceHostOverlay,
 } from "./host-materials.ts";
 export {

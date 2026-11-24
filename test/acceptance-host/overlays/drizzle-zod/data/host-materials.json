@@ -6,6 +6,15 @@
     "src/drizzle-projections.ts",
     "src/drizzle-schema.ts",
     "src/index.ts",
-    "tsconfig.json"
+    "tsconfig.json",
+    "variants/case-a/drizzle-projections.ts",
+    "variants/case-a/drizzle-schema.ts",
+    "variants/case-a/index.ts",
+    "variants/case-b/drizzle-schema.ts",
+    "variants/case-cd/drizzle-schema.ts",
+    "variants/case-cd/index.ts",
+    "variants/case-e/drizzle-schema.ts",
+    "variants/case-e/index.ts",
+    "variants/refined/drizzle-schema.ts"
   ]
 }
