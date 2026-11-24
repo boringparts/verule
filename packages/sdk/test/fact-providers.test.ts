@@ -327,7 +327,7 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
                     at: firstEv.at,
                     message: `Route requires roles [${item.value.roles.join(", ")}]`,
                     findingKey: "merged-auth-roles",
-                    evidence: item.evidence,
+                    basis: [item],
                   });
                 }
               }
@@ -592,7 +592,7 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
               at,
               message: `Validator "${spec.value.schemaName ?? "unknown"}" must require "email" (via ${spec.providers.join(", ")})`,
               findingKey: "missing-email-requirement",
-              evidence: spec.evidence,
+              basis: [spec],
             });
           }
         }

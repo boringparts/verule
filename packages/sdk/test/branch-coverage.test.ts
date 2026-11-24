@@ -298,7 +298,7 @@ void describe("@verule/sdk branchCoverage", () => {
                 message:
                   "execute() can be reached without passing authorization.",
                 findingKey: "auth-bypass",
-                evidence: item.evidence,
+                basis: [item],
               });
             }
           }

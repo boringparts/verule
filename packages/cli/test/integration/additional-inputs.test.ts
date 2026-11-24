@@ -193,7 +193,7 @@ void test("verule session, check --session, and watch update diagnostics immedia
       "              at: call.location,",
       '              message: `Disallowed package "${pkg}"`,',
       "              findingKey: `pkg:${pkg}`,",
-      "              evidence: [{ kind: 'source', message: `Used ${pkg}`, at: call.location }],",
+      "              basis: [{ kind: 'source', message: `Used ${pkg}`, at: call.location }],",
       "            });",
       "          }",
       "        }",

@@ -93,7 +93,7 @@ export default {
             ctx.report({
               at: call.location,
               message: "Disallowed string sink call",
-              evidence: [{ kind: "type", message: "Argument narrowed to string" }],
+              basis: [{ kind: "type", message: "Argument narrowed to string" }],
             });
           } else {
             ctx.checkpoint("require-string", call, "exclude", () => {

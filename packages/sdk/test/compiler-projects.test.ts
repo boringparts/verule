@@ -169,7 +169,7 @@ void describe("@verule/sdk multi-project scope and merging", () => {
             at: call.location,
             message: `Resolved @runtime mode is ${ty.typeText}`,
             findingKey: `runtime-${String(ty.literalValue ?? "unknown")}`,
-            evidence: [
+            basis: [
               {
                 kind: "type",
                 message: `@runtime resolved to ${ty.typeText}`,
@@ -195,7 +195,7 @@ void describe("@verule/sdk multi-project scope and merging", () => {
             at: call.location,
             message: "Shared checkMode call must be audited",
             findingKey: "shared-audit",
-            evidence: [
+            basis: [
               {
                 kind: "source",
                 message: "Called checkMode in shared.ts",
@@ -221,7 +221,7 @@ void describe("@verule/sdk multi-project scope and merging", () => {
             at: call.location,
             message: "Same message across projects",
             findingKey: `key-for-${ctx.project.projectId}`,
-            evidence: [
+            basis: [
               {
                 kind: "note",
                 message: "Same evidence across projects",
@@ -247,7 +247,7 @@ void describe("@verule/sdk multi-project scope and merging", () => {
             at: call.location,
             message: "Same message and key across projects",
             findingKey: "same-key",
-            evidence: [
+            basis: [
               {
                 kind: "note",
                 message: `Evidence from ${ctx.project.projectId}`,
@@ -410,7 +410,7 @@ void describe("@verule/sdk multi-project scope and merging", () => {
                   at: first.location,
                   message: "Cross-entry shared finding",
                   findingKey: "cross-entry",
-                  evidence: [{ kind: "note", message: "Same evidence" }],
+                  basis: [{ kind: "note", message: "Same evidence" }],
                 });
               },
             }),

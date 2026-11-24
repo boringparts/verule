@@ -182,7 +182,7 @@ void test("check exits 1 when rules report violations and distinguishes failures
                 ctx.report({
                   at: sinks[i].location,
                   message: "Disallowed string call",
-                  evidence: [{ kind: "type", message: "Argument narrowed to string" }],
+                  basis: [{ kind: "type", message: "Argument narrowed to string" }],
                 });
               }
             }
@@ -361,13 +361,13 @@ void test("check reports multi-project scope, entry chains, divergent types, and
         "            at: call.location,",
         "            message: `Runtime resolved to ${ty.typeText}`,",
         '            findingKey: "runtime-divergent",',
-        '            evidence: [{ kind: "type", message: `type=${ty.typeText}`, at: call.location }],',
+        '            basis: [{ kind: "type", message: `type=${ty.typeText}`, at: call.location }],',
         "          });",
         "          ctx.report({",
         "            at: call.location,",
         '            message: "Shared sink call",',
         '            findingKey: "shared-sink",',
-        '            evidence: [{ kind: "source", message: "Shared call site", at: call.location }],',
+        '            basis: [{ kind: "source", message: "Shared call site", at: call.location }],',
         "          });",
         "        }",
         "      },",

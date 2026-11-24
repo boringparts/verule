@@ -186,15 +186,15 @@ void describe("@verule/sdk selected query evidence", () => {
             selectedPath,
             restrictedLoader.callSyntax,
             customNote,
-            // Duplicate selectedPath to verify deduplication preserves first-seen order.
+            // Repeated query results and notes retain their first-seen positions.
             selectedPath,
+            customNote,
           ];
 
           ctx.report({
             at: matchedSink.callLoc,
             message: "Restricted data reaches sink().",
             basis,
-            evidence: [customNote],
           });
         },
       });

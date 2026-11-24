@@ -151,7 +151,7 @@ void test("verule check distinguishes clean, gaps-only, findings-with-gaps, and 
                 ctx.report({
                   at: deliveredDecl.location,
                   message: "Secret reached sink across TS -> JS -> TS",
-                  evidence: prop.results[0].evidence,
+                  basis: [prop.results[0]],
                 });
               }
             },
@@ -174,7 +174,7 @@ void test("verule check distinguishes clean, gaps-only, findings-with-gaps, and 
                 ctx.report({
                   at: gap.at ?? dynCall.location,
                   message: "Escalated dynamic gap: " + gap.message,
-                  evidence: [{ kind: "note", message: gap.kind, at: gap.at }],
+                  basis: [{ kind: "note", message: gap.kind, at: gap.at }],
                 });
               }
             },

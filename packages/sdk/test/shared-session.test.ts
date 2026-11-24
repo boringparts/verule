@@ -72,7 +72,7 @@ function createModeConfig(disallowedMode: string, version = "1") {
             at: targetCall.location,
             message: `Disallowed mode "${forbidden}" (v${policy?.version ?? "0"})`,
             findingKey: `mode:${forbidden}`,
-            evidence: [
+            basis: [
               {
                 kind: "type",
                 message: `Argument narrowed to ${ty.typeText}`,

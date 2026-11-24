@@ -190,6 +190,7 @@ export type FactContribution<
   readonly subject: ProgramRef<SubjectKind>;
   readonly value: Value;
   readonly basis?: readonly DiagnosticBasis[];
+  /** Evidence supplied directly by the provider, appended after any selected basis. */
   readonly evidence?: readonly Evidence[];
   readonly gaps?: readonly Gap[];
   readonly explainTrace?: FactExplainTrace;

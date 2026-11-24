@@ -257,8 +257,8 @@ export type DiagnosticInput = {
   readonly at: DiagnosticLocation;
   readonly message: string;
   readonly findingKey?: string;
+  /** Selected query results and explicit evidence, in diagnostic display order. */
   readonly basis?: readonly DiagnosticBasis[];
-  readonly evidence?: readonly Evidence[];
 };
 
 export type Diagnostic = {

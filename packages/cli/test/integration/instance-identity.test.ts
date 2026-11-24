@@ -191,10 +191,7 @@ void test("verule check distinguishes resource instances across factories/models
                   ctx.report({
                     at: releaseCall.location,
                     message: "release() targets a different instance than this._current.",
-                    evidence: [
-                      ...expectedRes.evidence,
-                      ...releasedRes.evidence,
-                    ],
+                    basis: [expectedRes, releasedRes],
                   });
                 }
               }

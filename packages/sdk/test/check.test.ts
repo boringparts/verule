@@ -104,7 +104,7 @@ void describe("@verule/sdk check execution", () => {
               at: targetCall.location,
               message: "sink() received a narrowed string value",
               findingKey: "narrowed-string",
-              evidence: [
+              basis: [
                 {
                   kind: "type",
                   message: `Second argument narrowed to ${typeInfo.typeText}`,
@@ -140,7 +140,7 @@ void describe("@verule/sdk check execution", () => {
               at: targetCall.location,
               message: 'sink() called with narrowed literal mode "fast"',
               findingKey: "fast-mode",
-              evidence: [
+              basis: [
                 {
                   kind: "type",
                   message: `First argument narrowed to ${typeInfo.typeText}`,

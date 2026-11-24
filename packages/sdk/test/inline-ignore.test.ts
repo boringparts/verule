@@ -113,7 +113,7 @@ void describe("@verule/sdk inline ignore directives", () => {
           ctx.report({
             at: invokeCall.location,
             message: "Consumer calls function containing dangerous()",
-            evidence: [
+            basis: [
               {
                 kind: "source",
                 message: "Transitive dangerous() call",
@@ -285,7 +285,7 @@ void describe("@verule/sdk inline ignore directives", () => {
               at: call.location,
               message: `register() disallowed in ${ctx.project.projectId} (finding 1)`,
               findingKey: "register-1",
-              evidence: [
+              basis: [
                 {
                   kind: "note",
                   message: `Project ${ctx.project.projectId}`,

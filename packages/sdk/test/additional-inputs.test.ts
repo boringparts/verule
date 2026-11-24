@@ -115,7 +115,7 @@ void describe("@verule/sdk additional inputs", () => {
                 at: call.location,
                 message: `Package "${pkg}" is not in allowed-packages.json`,
                 findingKey: `disallowed-pkg:${pkg}`,
-                evidence: [
+                basis: [
                   {
                     kind: "source",
                     message: `Package "${pkg}" imported/used here`,
@@ -294,7 +294,7 @@ void describe("@verule/sdk additional inputs", () => {
               at: call.location,
               message: `Package "${pkg}" violates manifest policy`,
               findingKey: `manifest:${pkg}`,
-              evidence: [
+              basis: [
                 {
                   kind: "source",
                   message: `Call uses package "${pkg}"`,
@@ -566,7 +566,7 @@ void describe("@verule/sdk additional inputs", () => {
               at: loc,
               message: "Payload missing policy-required field tenantId",
               findingKey: "missing:tenantId",
-              evidence: fact.evidence,
+              basis: [fact],
             });
           }
         }

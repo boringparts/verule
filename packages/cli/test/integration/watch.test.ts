@@ -226,7 +226,7 @@ void test("verule watch --output ndjson aligns every round with independent veru
       "              at: sinks[i].location,",
       "              message: `Disallowed mode ${String(forbidden)} (v${model?.version ?? '0'})`,",
       "              findingKey: `mode:${String(forbidden)}`,",
-      "              evidence: [{ kind: 'type', message: `Narrowed to ${ty.typeText}`, at: sinks[i].location }],",
+      "              basis: [{ kind: 'type', message: `Narrowed to ${ty.typeText}`, at: sinks[i].location }],",
       "            });",
       "          }",
       "        }",

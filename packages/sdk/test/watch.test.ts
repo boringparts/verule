@@ -78,7 +78,7 @@ function createModeRulesAndModel(
             at: targetCall.location,
             message: `sink() called with disallowed mode "${forbidden}" (model v${policy?.version ?? "0"})`,
             findingKey: `disallowed-mode:${forbidden}`,
-            evidence: [
+            basis: [
               {
                 kind: "type",
                 message: `Argument narrowed to ${ty.typeText}`,

@@ -489,7 +489,7 @@ void describe("@verule/sdk typed call projection", () => {
             at: numCall.location,
             message: "Matched numeric overload",
             findingKey: "numeric-overload",
-            evidence: [
+            basis: [
               {
                 kind: "type",
                 message: `Selected overload at line ${String(sigRows[1]!.location?.line)}`,

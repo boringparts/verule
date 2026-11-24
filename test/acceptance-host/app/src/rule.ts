@@ -105,8 +105,10 @@ export const neutralProductReviewRule = defineRule({
       ctx.report({
         at: call.location,
         message: "Review products loaded across the package boundary.",
-        basis: [productQuery, matchedPriceRead.read, matchedFlow],
-        evidence: [
+        basis: [
+          productQuery,
+          matchedPriceRead.read,
+          matchedFlow,
           {
             kind: "note",
             message:

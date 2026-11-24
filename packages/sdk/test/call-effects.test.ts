@@ -338,7 +338,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
           ctx.report({
             at: res1.targetResults[0]!.allocationLocation!,
             message: `Resource A (${res1.targetResults[0]!.instanceKey}) was not disposed; callback disposed B (${wrong.instanceKey}) instead.`,
-            evidence: [...res1.evidence, ...wrong.evidence],
+            basis: [res1.targetResults[0]!, wrong],
           });
         }
 
@@ -748,7 +748,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
             (b) =>
               b.conditionText.includes("parsed.ok") && b.direction === "false",
           );
-          const [cov] = await ctx.branchCoverage({
+          const coverage = await ctx.branchCoverage({
             function: fn.ref,
             branches: okGuardBranch ? [okGuardBranch.ref] : [],
             targets: [handlerCall.ref],
@@ -772,7 +772,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
                 })
               : null;
 
-          const branchStatus = cov?.status ?? "unknown";
+          const branchStatus = coverage[0]?.status ?? "unknown";
           const rawPropagated = rawProp.reachableTargets.length > 0;
           const parsedDataPropagated =
             (dataProp?.reachableTargets.length ?? 0) > 0;
@@ -793,10 +793,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
               message: rawPropagated
                 ? "handler() was reached after validation succeeded, but received raw unvalidated input instead of parsed.data."
                 : "handler() did not receive validated output.",
-              evidence: [
-                ...(cov?.evidence ?? []),
-                ...(rawProp.results[0]?.evidence ?? []),
-              ],
+              basis: [...coverage, ...rawProp.results],
             });
           }
         }
@@ -957,7 +954,7 @@ void describe("@verule/sdk call-effects and instanceCleanup", () => {
             ctx.report({
               at: postCallClear.location,
               message: `Post-callback QUEUED clear in ${fnName} is not guarded by !(job.flags & ALLOW_RECURSE).`,
-              evidence: [...eff.evidence, ...cov!.evidence],
+              basis: [postCallClear, cov!],
             });
           }
         }

@@ -183,7 +183,7 @@ const cleanupRule = defineRule({
           message: wrong
             ? \`Closed A (\${tr.instanceKey}) but disposed B (\${wrong.instanceKey}) instead.\`
             : \`Resource A (\${tr.instanceKey}) was not disposed.\`,
-          evidence: [...cleanup.evidence, ...(wrong?.evidence ?? [])],
+          basis: wrong ? [tr, wrong] : [tr],
         });
       }
     }
@@ -230,14 +230,14 @@ const schedulerRule = defineRule({
     for (const [idx, fn] of fns.entries()) {
       if (!fn.text.includes("flushJob")) continue;
       const eff = effects[idx];
-      const hasRequeue = eff.fieldWrites.some((w) => w.propertyName === "flags" && w.operator === "|=");
+      const requeue = eff.fieldWrites.find((w) => w.propertyName === "flags" && w.operator === "|=");
       const clearWrite = eff.fieldWrites.find((w) => w.propertyName === "flags" && w.operator === "&=" && w.viaCall === null);
-      if (!hasRequeue || !clearWrite) continue;
+      if (!requeue || !clearWrite) continue;
 
       const guardBranches = branchesList[idx].branches.filter((b) => b.conditionText.includes("ALLOW_RECURSE") && b.direction === "true");
       const [cov] = await ctx.branchCoverage({ function: fn.ref, branches: guardBranches.map((b) => b.ref), targets: [clearWrite.syntax] });
       if (cov?.status !== "covered") {
-        ctx.report({ at: clearWrite.location, message: "Post-callback flag clear is missing ALLOW_RECURSE guard.", evidence: eff.evidence });
+        ctx.report({ at: clearWrite.location, message: "Post-callback flag clear is missing ALLOW_RECURSE guard.", basis: cov ? [requeue, clearWrite, cov] : [requeue, clearWrite] });
       }
     }
   },

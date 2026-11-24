@@ -173,7 +173,7 @@ void test("verule check traces ESM import vs CJS require conditional exports and
                 ctx.report({
                   at: outDecl.location,
                   message: "Conditional export returned a cloned copy instead of the original instance.",
-                  evidence: [...outInst.evidence, ...(implRes?.evidence ?? [])],
+                  basis: implRes ? [outInst, implRes] : [outInst],
                 });
               }
             },

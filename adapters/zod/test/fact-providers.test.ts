@@ -150,7 +150,7 @@ void describe("@verule/adapter-zod provider replacement, complementation, and co
             at,
             message: `Validator requires "age" via [${item.providers.join(", ")}]`,
             findingKey: "requires-age",
-            evidence: item.evidence,
+            basis: [item],
           });
         }
       },

@@ -1994,7 +1994,7 @@ export async function openSession(
           ...(input.findingKey !== undefined
             ? { findingKey: input.findingKey }
             : {}),
-          evidence: extractBasisEvidence(input.basis, input.evidence),
+          evidence: extractBasisEvidence(input.basis),
         });
       },
       checkpoint: (

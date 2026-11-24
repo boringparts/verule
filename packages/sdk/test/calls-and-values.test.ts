@@ -742,7 +742,7 @@ void describe("@verule/sdk call graph and value propagation", () => {
           ctx.report({
             at: relayCall.location,
             message: "Origin propagates through relay()",
-            evidence: prop.results[0].evidence,
+            basis: [prop.results[0]],
           });
         }
       },
@@ -896,7 +896,7 @@ void describe("@verule/sdk call graph and value propagation", () => {
                 ctx.report({
                   at: safeDecl.location,
                   message: "Secret reached knownSink result",
-                  evidence: prop.results[0].evidence,
+                  basis: [prop.results[0]],
                 });
               }
             }
@@ -908,9 +908,7 @@ void describe("@verule/sdk call graph and value propagation", () => {
                     ctx.report({
                       at: gap.at,
                       message: `Unresolved dynamic target escalated to error: ${gap.message}`,
-                      evidence: [
-                        { kind: "note", message: gap.kind, at: gap.at },
-                      ],
+                      basis: [{ kind: "note", message: gap.kind, at: gap.at }],
                     });
                   }
                 }
