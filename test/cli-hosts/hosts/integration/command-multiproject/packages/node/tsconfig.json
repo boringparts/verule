@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "tsBuildInfoFile": "./.tsbuildinfo",
+    "strict": false,
+    "strictNullChecks": true,
+    "allowJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@runtime": ["./src/node.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "../shared/shared.ts"]
+}

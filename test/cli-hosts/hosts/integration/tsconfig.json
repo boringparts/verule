@@ -1,0 +1,8 @@
+{
+  "extends": "@verule/tooling-config/node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["*/*.ts", "*/*.mts"]
+}
