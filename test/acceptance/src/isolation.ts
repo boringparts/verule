@@ -21,6 +21,9 @@ export type BareVeruleRunResult = {
   readonly status: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly durationMs?: number;
+  readonly timedOut?: boolean;
+  readonly signal?: NodeJS.Signals | null;
   readonly isolation?: IsolationEvidence;
 };
 
@@ -71,8 +74,12 @@ function runAsyncExec(
   readonly status: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly durationMs: number;
+  readonly timedOut: boolean;
+  readonly signal: NodeJS.Signals | null;
 }> {
   return new Promise((resolveResult) => {
+    const startedAt = performance.now();
     execFile(
       command,
       args,
@@ -84,14 +91,27 @@ function runAsyncExec(
         maxBuffer: maxOutputBytes,
       },
       (error, stdout, stderr) => {
+        const durationMs = performance.now() - startedAt;
         if (error === null) {
-          resolveResult({ status: 0, stdout, stderr });
+          resolveResult({
+            status: 0,
+            stdout,
+            stderr,
+            durationMs,
+            timedOut: false,
+            signal: null,
+          });
           return;
         }
+        const timedOut =
+          error.killed === true && !error.message.includes("maxBuffer");
         resolveResult({
           status: typeof error.code === "number" ? error.code : 1,
           stdout,
           stderr: stderr.length > 0 ? stderr : error.message,
+          durationMs,
+          timedOut,
+          signal: error.signal ?? null,
         });
       },
     );

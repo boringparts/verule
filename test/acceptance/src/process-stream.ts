@@ -58,6 +58,7 @@ export type CliCheckResult = {
   readonly report: CheckReport;
   readonly stdout: string;
   readonly stderr: string;
+  readonly durationMs?: number;
   readonly isolation?: IsolationEvidence;
 };
 
@@ -115,6 +116,7 @@ export function parseCheckJsonResult(result: {
   readonly status: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly durationMs?: number;
   readonly isolation?: IsolationEvidence;
 }): CliCheckResult {
   if (result.status !== 0 && result.status !== 1) {
@@ -160,6 +162,9 @@ export function parseCheckJsonResult(result: {
     report: parsed.data as CheckReport,
     stdout: result.stdout,
     stderr: result.stderr,
+    ...(result.durationMs === undefined
+      ? {}
+      : { durationMs: result.durationMs }),
     ...(result.isolation === undefined ? {} : { isolation: result.isolation }),
   };
 }

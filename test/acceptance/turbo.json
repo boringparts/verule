@@ -43,6 +43,13 @@
       "cache": false,
       "tags": ["work:repair"]
     },
+    "perf": {
+      "dependsOn": ["build"],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:on-demand"]
+    },
     "test": {
       "dependsOn": [],
       "inputs": ["$TURBO_DEFAULT$"],
