@@ -225,26 +225,7 @@ void test("verule watch --output ndjson aligns every round with independent veru
     // 7b. Modify imported rules file -> reloads rule
     host.writeText(
       "verule.rules.ts",
-      [
-        'import { defineRule, type Rule } from "@verule/sdk";',
-        "",
-        "export function createRules(): readonly Rule[] {",
-        "  return [",
-        "    defineRule({",
-        '      id: "disallow-mode-v2",',
-        "      run: async (ctx) => {",
-        '        const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });',
-        "        for (const c of calls) {",
-        '          if (c.text.startsWith("sink(")) {',
-        '            ctx.report({ at: c.location, message: "sink called" });',
-        "          }",
-        "        }",
-        "      },",
-        "    }),",
-        "  ];",
-        "}",
-        "",
-      ].join("\n"),
+      host.readText("variants/verule.rules.v2.ts"),
     );
     const r9 = await assertMatchesColdCheck(9, "findings");
     assert.equal(r9.identity.rules[0]?.id, "disallow-mode-v2");
