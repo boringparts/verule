@@ -224,7 +224,10 @@ function copyProviderSessionHost(hostDir: string): {
   return { appDir, dataDir };
 }
 
-/** Copies only the selected manifest-listed resources into a disposable host tree. */
+/**
+ * Copies only the selected manifest-listed host materials into a disposable
+ * out-of-repo host directory.
+ */
 export function copyAcceptanceHost(
   hostDir: string,
   overlay?: AcceptanceHostOverlay,

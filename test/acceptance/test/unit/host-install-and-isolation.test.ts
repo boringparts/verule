@@ -18,6 +18,7 @@ import {
   installArtifactPackages,
   type PackedArtifact,
   runBareVeruleInHost,
+  spawnBareVeruleInHost,
   verifyHostArtifactResolution,
 } from "../../src/index.ts";
 
@@ -116,7 +117,7 @@ function createFakeVeruleTarballs(
     },
     {
       "dist/cli.js":
-        "#!/usr/bin/env node\nimport { getEngineVersion } from '@verule/sdk';\nif (process.argv.includes('--version')) { console.log('verule 0.0.0'); } else { console.log(`verule 0.0.0 (engine ${await getEngineVersion()})`); }\n",
+        "#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport { getEngineVersion } from '@verule/sdk';\nif (process.env.VERULE_SHARED_PROBE) { writeFileSync(process.env.VERULE_SHARED_PROBE, 'shared-ok'); process.stdout.write(readFileSync(process.env.VERULE_SHARED_PROBE, 'utf8') + '\\n'); }\nif (process.argv.includes('--version')) { console.log('verule 0.0.0'); } else { console.log(`verule 0.0.0 (engine ${await getEngineVersion()})`); }\n",
     },
     ["dist/cli.js"],
   );
@@ -332,4 +333,79 @@ process.exit(result.status ?? 1);
   assert.ok(cacheHomes.every((path) => path !== callerCacheHome));
   assert.ok(cacheHomes.every((path) => !existsSync(path)));
   assert.equal(process.env.XDG_CACHE_HOME, originalXdgCacheHome);
+});
+
+void test("spawns an isolated bare verule child with sharedReadWritePaths outside hostDir", async () => {
+  using fixture = mkdtempDisposableSync(join(tmpdir(), "verule-spawn-iso-"));
+  const devRepoDir = join(fixture.path, "dev-repo");
+  const sharedDir = join(fixture.path, "shared-runtime");
+  const hostDir = join(fixture.path, "host");
+  const bundleDir = join(fixture.path, "bundle");
+  for (const dir of [devRepoDir, sharedDir, hostDir, bundleDir]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
+  writeFileSync(
+    join(hostDir, "package.json"),
+    '{"name":"spawn-iso-host","private":true,"type":"module"}\n',
+  );
+
+  const bundle = createFakeVeruleTarballs(bundleDir, "0.0.0-spawn");
+  const installOutcome = await installArtifactPackages({
+    checkoutDir: hostDir,
+    packageManager: "pnpm",
+    artifacts: bundle.artifacts,
+  });
+  assert.equal(installOutcome.status, "ready");
+
+  const spawned = await spawnBareVeruleInHost({
+    checkoutDir: hostDir,
+    args: ["--version"],
+    isolated: true,
+    blockedPaths: [devRepoDir],
+    sharedReadWritePaths: [sharedDir],
+    env: {
+      ...process.env,
+      VERULE_SHARED_PROBE: join(sharedDir, "probe.txt"),
+    },
+  });
+  assert.equal(spawned.isolation?.controlProbeBlocked, true);
+  let stdout = "";
+  let stderr = "";
+  spawned.child.stdout?.setEncoding("utf8");
+  spawned.child.stdout?.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  spawned.child.stderr?.setEncoding("utf8");
+  spawned.child.stderr?.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  const exitCode = await new Promise<number | null>(
+    (resolveExit, rejectExit) => {
+      spawned.child.once("error", rejectExit);
+      spawned.child.once("close", (code) => resolveExit(code));
+    },
+  );
+  assert.equal(exitCode, 0, stderr);
+  assert.equal(stdout, "shared-ok\nverule 0.0.0\n");
+  assert.equal(readFileSync(join(sharedDir, "probe.txt"), "utf8"), "shared-ok");
+
+  const sharedWriteCheck = await runBareVeruleInHost({
+    checkoutDir: hostDir,
+    args: [],
+    isolated: true,
+    blockedPaths: [devRepoDir],
+    sharedReadWritePaths: [sharedDir],
+    env: {
+      ...process.env,
+      VERULE_SHARED_PROBE: join(sharedDir, "probe-run.txt"),
+    },
+  });
+  assert.equal(sharedWriteCheck.status, 0, sharedWriteCheck.stderr);
+  assert.equal(sharedWriteCheck.isolation?.controlProbeBlocked, true);
+  assert.equal(
+    readFileSync(join(sharedDir, "probe-run.txt"), "utf8"),
+    "shared-ok",
+  );
 });

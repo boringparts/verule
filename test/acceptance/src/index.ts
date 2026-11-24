@@ -13,13 +13,49 @@ export {
   type InstallArtifactPackagesResult,
 } from "./host-install.ts";
 export {
+  prepareAcceptanceHost,
+  withAcceptanceHost,
+  type HostCheckOptions,
+  type HostRunCliOptions,
+  type PrepareAcceptanceHostOptions,
+  type PreparedAcceptanceHost,
+  type StartHostSessionOptions,
+  type StartHostWatchOptions,
+} from "./host-lifecycle.ts";
+export {
+  copyAcceptanceHost,
+  type AcceptanceHostOverlay,
+} from "./host-materials.ts";
+export {
   resolveDefaultBlockedPaths,
   runBareVeruleInHost,
+  spawnBareVeruleInHost,
   type BareVeruleRunResult,
   type IsolationEvidence,
   type IsolationMode,
   type RunBareVeruleOptions,
+  type SpawnBareVeruleOptions,
+  type SpawnedBareVerule,
 } from "./isolation.ts";
+export {
+  parseCheckJsonResult,
+  startSharedSessionProcess,
+  startWatchProcess,
+  type AcceptanceSharedSession,
+  type AcceptanceWatchSession,
+  type CliCheckResult,
+  type NdjsonEnvelope,
+  type ProcessExitSummary,
+  type SessionCheckOptions,
+  type SessionReadyRecord,
+  type StartSharedSessionProcessOptions,
+  type StartWatchProcessOptions,
+  type WatchFailureRecord,
+  type WatchMemoryStats,
+  type WatchRecomputationScope,
+  type WatchReportRecord,
+  type WatchStreamEvent,
+} from "./process-stream.ts";
 export {
   startArtifactRegistry,
   type ScopedRegistryServer,
@@ -27,6 +63,9 @@ export {
 export type { PackageManager } from "./types.ts";
 export {
   verifyHostArtifactResolution,
+  verifyInstalledNativeLibrary,
   type HostResolutionAudit,
+  type VerifiedNativeLibrary,
   type VerifyHostResolutionOptions,
+  type VerifyInstalledNativeLibraryOptions,
 } from "./verify.ts";
