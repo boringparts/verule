@@ -1,4 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import {
+  type ChildProcess,
+  execFile,
+  execFileSync,
+  spawn,
+} from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -25,12 +30,34 @@ export type RunBareVeruleOptions = {
   readonly isolated?: boolean;
   readonly pnpmStoreDir?: string;
   readonly blockedPaths?: readonly string[];
+  readonly sharedReadWritePaths?: readonly string[];
+  readonly allowNet?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
 };
 
+export type SpawnBareVeruleOptions = {
+  readonly checkoutDir: string;
+  readonly args: readonly string[];
+  readonly isolated?: boolean;
+  readonly pnpmStoreDir?: string;
+  readonly blockedPaths?: readonly string[];
+  readonly sharedReadWritePaths?: readonly string[];
+  readonly allowNet?: boolean;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+};
+
+export type SpawnedBareVerule = {
+  readonly child: ChildProcess;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly isolation?: IsolationEvidence;
+  cleanup(): void;
+};
+
 const maxOutputBytes = 16 * 1024 * 1024;
 const defaultTimeoutMs = 30_000;
+const bwrapProbeCache = new Map<string, Promise<boolean>>();
 
 function runAsyncExec(
   command: string,
@@ -120,15 +147,20 @@ function resolvePnpmStorePath(
   }
 }
 
-async function canUseBwrap(
+function canUseBwrap(
   blockedPaths: readonly string[],
   cwd: string,
 ): Promise<boolean> {
   if (process.platform !== "linux") {
-    return false;
+    return Promise.resolve(false);
+  }
+  const cacheKey = blockedPaths.join("\0");
+  const cached = bwrapProbeCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
   }
   const tmpfsArgs = blockedPaths.flatMap((path) => ["--tmpfs", path]);
-  const probe = await runAsyncExec(
+  const probePromise = runAsyncExec(
     "bwrap",
     [
       "--ro-bind",
@@ -143,18 +175,24 @@ async function canUseBwrap(
       "true",
     ],
     { cwd, env: process.env, timeoutMs: 5_000 },
-  );
-  return probe.status === 0;
+  )
+    .then((probe) => probe.status === 0)
+    .catch(() => false);
+  bwrapProbeCache.set(cacheKey, probePromise);
+  return probePromise;
 }
 
 function buildNodePermissionOptions(options: {
   readonly checkoutRealpath: string;
   readonly isolatedTmpDir: string;
+  readonly sharedReadWritePaths: readonly string[];
+  readonly allowNet: boolean;
   readonly pnpmStorePath?: string;
 }): string {
   const readAllowed = new Set<string>([
     options.checkoutRealpath,
     options.isolatedTmpDir,
+    ...options.sharedReadWritePaths,
     dirname(process.execPath),
     dirname(realpathSync(process.execPath)),
   ]);
@@ -175,11 +213,18 @@ function buildNodePermissionOptions(options: {
     readAllowed.add(options.pnpmStorePath);
   }
 
-  const writeAllowed = [options.checkoutRealpath, options.isolatedTmpDir];
+  const writeAllowed = [
+    ...new Set([
+      options.checkoutRealpath,
+      options.isolatedTmpDir,
+      ...options.sharedReadWritePaths,
+    ]),
+  ];
   const flags = [
     "--permission",
     ...[...readAllowed].map((path) => `--allow-fs-read=${path}`),
     ...writeAllowed.map((path) => `--allow-fs-write=${path}`),
+    ...(options.allowNet ? ["--allow-net"] : []),
     "--allow-child-process",
     "--allow-worker",
   ];
@@ -190,7 +235,6 @@ async function runControlProbe(options: {
   readonly mode: IsolationMode;
   readonly blockedPaths: readonly string[];
   readonly checkoutRealpath: string;
-  readonly isolatedTmpDir: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly bwrapPrefixArgs: readonly string[];
 }): Promise<{ readonly blocked: boolean; readonly errorMessage: string }> {
@@ -244,14 +288,20 @@ async function runControlProbe(options: {
   };
 }
 
-/**
- * Runs the host-installed bare `verule` command from `checkoutDir`, optionally
- * isolating filesystem reads so the inspected process cannot access the
- * development repository.
- */
-export async function runBareVeruleInHost(
-  options: RunBareVeruleOptions,
-): Promise<BareVeruleRunResult> {
+type PreparedBareVeruleExecution = {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly isolation?: IsolationEvidence;
+  cleanup(): void;
+};
+
+async function prepareBareVeruleExecution(
+  options: Omit<RunBareVeruleOptions, "timeoutMs"> & {
+    readonly dieWithParent?: boolean;
+  },
+): Promise<PreparedBareVeruleExecution> {
   const checkoutRealpath = realpathSync(options.checkoutDir);
   const binDir = join(checkoutRealpath, "node_modules", ".bin");
   const baseEnv = options.env ?? process.env;
@@ -259,14 +309,15 @@ export async function runBareVeruleInHost(
     ...baseEnv,
     PATH: `${binDir}${delimiter}${baseEnv.PATH ?? ""}`,
   };
-  const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
 
   if (options.isolated !== true) {
-    return runAsyncExec("verule", options.args, {
+    return {
+      command: "verule",
+      args: options.args,
       cwd: checkoutRealpath,
       env: envWithPath,
-      timeoutMs,
-    });
+      cleanup(): void {},
+    };
   }
 
   const blockedPaths = [
@@ -276,15 +327,26 @@ export async function runBareVeruleInHost(
         .map((path) => realpathSync(path)),
     ),
   ];
+  const sharedReadWritePaths = [
+    ...new Set(
+      (options.sharedReadWritePaths ?? [])
+        .filter((path) => existsSync(path))
+        .map((path) => realpathSync(path)),
+    ),
+  ];
   const isolatedTmpDir = realpathSync(
     mkdtempSync(join(tmpdir(), "verule-isolated-tmp-")),
   );
+  const cleanup = (): void => {
+    rmSync(isolatedTmpDir, { recursive: true, force: true });
+  };
 
   try {
     const useBwrap = await canUseBwrap(blockedPaths, checkoutRealpath);
     const mode: IsolationMode = useBwrap ? "bwrap" : "node-permission";
     const bwrapPrefixArgs = useBwrap
       ? [
+          ...(options.dieWithParent === true ? ["--die-with-parent"] : []),
           "--ro-bind",
           "/",
           "/",
@@ -298,6 +360,7 @@ export async function runBareVeruleInHost(
           "--bind",
           isolatedTmpDir,
           isolatedTmpDir,
+          ...sharedReadWritePaths.flatMap((path) => ["--bind", path, path]),
           ...blockedPaths.flatMap((path) => ["--tmpfs", path]),
         ]
       : [];
@@ -318,6 +381,8 @@ export async function runBareVeruleInHost(
           NODE_OPTIONS: buildNodePermissionOptions({
             checkoutRealpath,
             isolatedTmpDir,
+            sharedReadWritePaths,
+            allowNet: options.allowNet === true,
             ...(pnpmStorePath === undefined ? {} : { pnpmStorePath }),
           }),
           TMPDIR: isolatedTmpDir,
@@ -327,7 +392,6 @@ export async function runBareVeruleInHost(
       mode,
       blockedPaths,
       checkoutRealpath,
-      isolatedTmpDir,
       env: isolatedEnv,
       bwrapPrefixArgs,
     });
@@ -338,26 +402,99 @@ export async function runBareVeruleInHost(
     }
 
     const command = useBwrap ? "bwrap" : "verule";
-    const commandArgs = useBwrap
+    const args = useBwrap
       ? [...bwrapPrefixArgs, "--", resolve(binDir, "verule"), ...options.args]
       : options.args;
 
-    const result = await runAsyncExec(command, commandArgs, {
+    return {
+      command,
+      args,
       cwd: checkoutRealpath,
       env: isolatedEnv,
-      timeoutMs,
-    });
-
-    return {
-      ...result,
       isolation: {
         mode,
         blockedPaths,
         controlProbeBlocked: probe.blocked,
         controlProbeError: probe.errorMessage,
       },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+/**
+ * Runs the host-installed bare `verule` command from `checkoutDir`, optionally
+ * isolating filesystem reads so the inspected process cannot access the
+ * development repository.
+ */
+export async function runBareVeruleInHost(
+  options: RunBareVeruleOptions,
+): Promise<BareVeruleRunResult> {
+  const prepared = await prepareBareVeruleExecution(options);
+  const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
+  try {
+    const result = await runAsyncExec(prepared.command, prepared.args, {
+      cwd: prepared.cwd,
+      env: prepared.env,
+      timeoutMs,
+    });
+
+    return {
+      ...result,
+      ...(prepared.isolation === undefined
+        ? {}
+        : { isolation: prepared.isolation }),
     };
   } finally {
-    rmSync(isolatedTmpDir, { recursive: true, force: true });
+    prepared.cleanup();
   }
+}
+
+/**
+ * Spawns a long-lived host-installed bare `verule` command (`watch` or
+ * `session`) with piped `stdio` and optional dev-repo read isolation.
+ */
+export async function spawnBareVeruleInHost(
+  options: SpawnBareVeruleOptions,
+): Promise<SpawnedBareVerule> {
+  const prepared = await prepareBareVeruleExecution({
+    ...options,
+    dieWithParent: true,
+  });
+
+  let child: ChildProcess;
+  try {
+    child = spawn(prepared.command, prepared.args, {
+      cwd: prepared.cwd,
+      env: prepared.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    prepared.cleanup();
+    throw error;
+  }
+
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    prepared.cleanup();
+  };
+  child.once("close", cleanup);
+  child.once("error", cleanup);
+
+  return {
+    child,
+    command: prepared.command,
+    args: prepared.args,
+    ...(prepared.isolation === undefined
+      ? {}
+      : { isolation: prepared.isolation }),
+    cleanup,
+  };
 }

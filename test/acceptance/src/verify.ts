@@ -286,3 +286,122 @@ export async function verifyHostArtifactResolution(
     ...symlinkAudit,
   };
 }
+
+export type VerifiedNativeLibrary = {
+  readonly packageName: string;
+  readonly providerId: string;
+  readonly descriptorPath: string;
+  readonly path: string;
+  readonly sha256: string;
+};
+
+export type VerifyInstalledNativeLibraryOptions = {
+  readonly checkoutDir: string;
+  readonly packageName: string;
+  readonly artifact?: PackedArtifact;
+  readonly resolutionBaseDir?: string;
+  readonly expectedProviderId?: string;
+};
+
+function currentNativePlatformKey(): string {
+  return `${process.platform}-${process.arch}`;
+}
+
+/**
+ * Verifies that an installed native adapter resolves its descriptor and native
+ * library inside `checkoutDir` with an optional digest check against its `.tgz`.
+ */
+export function verifyInstalledNativeLibrary(
+  options: VerifyInstalledNativeLibraryOptions,
+): VerifiedNativeLibrary {
+  const checkoutRealpath = realpathSync(options.checkoutDir);
+  const resolutionRoot = options.resolutionBaseDir ?? checkoutRealpath;
+  const hostRequire = createRequire(join(resolutionRoot, "package.json"));
+  const descriptorPath = realpathSync(
+    hostRequire.resolve(`${options.packageName}/verule-native`),
+  );
+  if (!isInsideDirectory(descriptorPath, checkoutRealpath)) {
+    throw new Error(
+      `Resolved ${options.packageName}/verule-native outside host checkout: ${descriptorPath}`,
+    );
+  }
+
+  const descriptorRaw: unknown = JSON.parse(
+    readFileSync(descriptorPath, "utf8"),
+  );
+  if (
+    typeof descriptorRaw !== "object" ||
+    descriptorRaw === null ||
+    !("id" in descriptorRaw) ||
+    typeof descriptorRaw.id !== "string"
+  ) {
+    throw new Error(`Invalid native descriptor in ${descriptorPath}`);
+  }
+  const providerId = descriptorRaw.id;
+  if (
+    options.expectedProviderId !== undefined &&
+    providerId !== options.expectedProviderId
+  ) {
+    throw new Error(
+      `Expected native adapter ${options.packageName} id "${options.expectedProviderId}", got "${providerId}"`,
+    );
+  }
+
+  const platformKey = currentNativePlatformKey();
+  const exportSubpath =
+    platformKey in descriptorRaw
+      ? (descriptorRaw as Record<string, unknown>)[platformKey]
+      : undefined;
+  if (typeof exportSubpath !== "string" || !exportSubpath.startsWith("./")) {
+    throw new Error(
+      `Missing ${platformKey} entry in native descriptor ${descriptorPath}`,
+    );
+  }
+
+  const targetSpecifier = `${options.packageName}/${exportSubpath.slice(2)}`;
+  const libraryPath = realpathSync(hostRequire.resolve(targetSpecifier));
+  if (!isInsideDirectory(libraryPath, checkoutRealpath)) {
+    throw new Error(
+      `Resolved native library for ${options.packageName} outside host checkout: ${libraryPath}`,
+    );
+  }
+
+  const installedSha256 = createHash("sha256")
+    .update(readFileSync(libraryPath))
+    .digest("hex");
+
+  if (options.artifact !== undefined) {
+    const artifactExports = options.artifact.manifest.exports as
+      | Record<string, unknown>
+      | undefined;
+    const archiveLibraryPath = artifactExports?.[`./${exportSubpath.slice(2)}`];
+    if (typeof archiveLibraryPath !== "string") {
+      throw new Error(
+        `Missing ./${exportSubpath.slice(2)} export in packed artifact ${options.packageName}`,
+      );
+    }
+    const packedBytes = execFileSync(
+      "tar",
+      [
+        "-xOf",
+        options.artifact.filename,
+        `package/${archiveLibraryPath.replace(/^\.\//u, "")}`,
+      ],
+      { encoding: "buffer" },
+    );
+    const packedSha256 = createHash("sha256").update(packedBytes).digest("hex");
+    if (installedSha256 !== packedSha256) {
+      throw new Error(
+        `Installed native library SHA-256 ${installedSha256} for ${options.packageName} does not match packed artifact ${packedSha256}`,
+      );
+    }
+  }
+
+  return {
+    packageName: options.packageName,
+    providerId,
+    descriptorPath,
+    path: libraryPath,
+    sha256: installedSha256,
+  };
+}

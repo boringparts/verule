@@ -1,34 +1,16 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 
 import {
-  installArtifactPackages,
-  packWorkspaceArtifacts,
-  runBareVeruleInHost,
-  verifyHostArtifactResolution,
+  type PreparedAcceptanceHost,
+  withAcceptanceHost,
 } from "@verule/acceptance";
 import { INLINE_IGNORE_RULE_ID } from "@verule/sdk";
 import type { CheckReport, VeruleConfig } from "@verule/sdk";
 
-import { copyAcceptanceHost } from "./support/host-fixtures.ts";
-
-type CliEnvelope = {
-  readonly kind: string;
-  readonly variant: string;
-  readonly data: CheckReport;
-};
+const configPath = "packages/app/verule.config.ts";
+const reviewPath = "packages/app/src/review.ts";
+const cachePath = "packages/app/src/cache.ts";
 
 function findSourceTarget(source: string, token: string): string {
   const offset = source.indexOf(token);
@@ -39,93 +21,41 @@ function findSourceTarget(source: string, token: string): string {
   return `${line}:${column}`;
 }
 
-async function runInstalledSdk(hostDir: string): Promise<CheckReport> {
-  const hostRequire = createRequire(join(hostDir, "package.json"));
-  const sdkPath = realpathSync(hostRequire.resolve("@verule/sdk"));
-  const sdk: typeof import("@verule/sdk") = await import(
-    pathToFileURL(sdkPath).href
-  );
-  const configPath = pathToFileURL(
-    join(hostDir, "packages/app/verule.config.ts"),
-  ).href;
-  const configModule = (await import(configPath)) as {
-    readonly default: VeruleConfig;
-  };
-  assert.deepEqual(configModule.default.adapters, []);
-  return sdk.runCheck({ cwd: hostDir, config: configModule.default });
+async function runInstalledSdk(
+  host: PreparedAcceptanceHost,
+): Promise<CheckReport> {
+  const sdk = await host.loadSdk();
+  const config = await host.loadConfig<VeruleConfig>(configPath);
+  assert.deepEqual(config.adapters, []);
+  return sdk.runCheck({ cwd: host.hostDir, config });
 }
 
 void test("runs the packed CLI on the neutral cross-package host", async (t) => {
-  const environmentDir = mkdtempSync(join(tmpdir(), "verule-neutral-host-"));
-  const hostDir = join(environmentDir, "host");
-  const storeDir = join(environmentDir, "pnpm-store");
-  mkdirSync(join(hostDir, "packages"), { recursive: true });
-  mkdirSync(storeDir);
-  copyAcceptanceHost(hostDir);
+  await withAcceptanceHost({}, async (host) => {
+    const cliArtifact = host.artifact("@verule/cli");
+    const engineArtifact = host.artifact("@verule/engine");
+    assert.ok(engineArtifact.binarySha256);
+    assert.equal(host.audit.cliVersion, cliArtifact.version);
+    assert.equal(host.audit.engineBinarySha256, engineArtifact.binarySha256);
+    assert.ok(host.audit.workspaceSymlinkCount > 0);
 
-  const env = process.env;
-  const bundle = await packWorkspaceArtifacts();
-
-  try {
-    const cliArtifact = bundle.artifacts.find(
-      (artifact) => artifact.name === "@verule/cli",
-    );
-    const engineArtifact = bundle.artifacts.find(
-      (artifact) => artifact.name === "@verule/engine",
-    );
-    assert.ok(cliArtifact);
-    assert.ok(engineArtifact?.binarySha256);
-
-    const installation = await installArtifactPackages({
-      checkoutDir: hostDir,
-      packageManager: "pnpm",
-      artifacts: bundle.artifacts,
-      storeDir,
-      env,
-    });
-    assert.equal(installation.status, "ready", JSON.stringify(installation));
-
-    const audit = await verifyHostArtifactResolution({
-      checkoutDir: hostDir,
-      artifacts: bundle.artifacts,
-      allowedStorePaths: [storeDir],
-    });
-    assert.equal(audit.cliVersion, cliArtifact.version);
-    assert.equal(audit.engineBinarySha256, engineArtifact.binarySha256);
-    assert.ok(audit.workspaceSymlinkCount > 0);
-
-    const reviewPath = join(hostDir, "packages/app/src/review.ts");
-    const reviewSource = readFileSync(reviewPath, "utf8");
-    const result = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
-    });
+    const reviewSource = host.readText(reviewPath);
+    const result = await host.check({ config: configPath });
     assert.equal(result.status, 1, result.stderr);
     assert.equal(result.isolation?.controlProbeBlocked, true);
-    const envelope = JSON.parse(result.stdout) as CliEnvelope;
-    assert.equal(envelope.kind, "data");
-    assert.equal(envelope.variant, "findings");
+    assert.equal(result.variant, "findings");
     assert.equal(
-      envelope.data.diagnostics.length,
+      result.report.diagnostics.length,
       1,
-      JSON.stringify(envelope.data.diagnostics),
+      JSON.stringify(result.report.diagnostics),
     );
     assert.equal(
-      envelope.data.diagnostics[0]?.ruleId,
+      result.report.diagnostics[0]?.ruleId,
       "neutral-product-review",
-      JSON.stringify(envelope.data.diagnostics),
+      JSON.stringify(result.report.diagnostics),
     );
     assert.ok(
-      envelope.data.diagnostics[0]?.evidence.some(
+      result.report.diagnostics[0]?.evidence.some(
         (item) =>
           item.at?.file === "packages/data/src/product.ts" &&
           item.message ===
@@ -133,129 +63,83 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       ),
     );
     assert.ok(
-      envelope.data.diagnostics[0]?.evidence.some(
+      result.report.diagnostics[0]?.evidence.some(
         (item) =>
           item.at?.file === "packages/app/src/review.ts" &&
           item.message === "The returned product reaches its price validation.",
       ),
     );
     assert.equal(
-      envelope.data.diagnostics[0]?.at.file,
+      result.report.diagnostics[0]?.at.file,
       "packages/app/src/review.ts",
     );
     assert.ok(
-      envelope.data.diagnostics[0]?.evidence.some(
+      result.report.diagnostics[0]?.evidence.some(
         (item) => item.at?.file === "packages/data/src/product.ts",
       ),
     );
-    assert.deepEqual(await runInstalledSdk(hostDir), envelope.data);
+    assert.deepEqual(await runInstalledSdk(host), result.report);
     assert.ok(
-      envelope.data.gaps.some(
+      result.report.gaps.some(
         (gap) =>
           gap.kind === "dynamic-callee" &&
           gap.at?.file === "packages/app/src/review.ts",
       ),
     );
 
-    const disconnectedSource = reviewSource.replace(
+    host.replaceText(
+      reviewPath,
       "const product = getProduct(id);",
       'const loadedProduct = getProduct(id);\n  const product = { id, name: "Local product", price: 1 };',
     );
-    assert.notEqual(disconnectedSource, reviewSource);
-    writeFileSync(reviewPath, disconnectedSource, "utf8");
-    const disconnectedRun = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
-    });
+    const disconnectedRun = await host.check({ config: configPath });
     assert.equal(disconnectedRun.status, 0, disconnectedRun.stderr);
-    const disconnectedEnvelope = JSON.parse(
-      disconnectedRun.stdout,
-    ) as CliEnvelope;
-    assert.deepEqual(disconnectedEnvelope.data.diagnostics, []);
-    assert.deepEqual(await runInstalledSdk(hostDir), disconnectedEnvelope.data);
-    writeFileSync(reviewPath, reviewSource, "utf8");
+    assert.deepEqual(disconnectedRun.report.diagnostics, []);
+    assert.deepEqual(await runInstalledSdk(host), disconnectedRun.report);
+    host.writeText(reviewPath, reviewSource);
 
-    const cachePath = join(hostDir, "packages/app/src/cache.ts");
-    const cacheSource = readFileSync(cachePath, "utf8");
+    const cacheSource = host.readText(cachePath);
     const cachedCall = findSourceTarget(cacheSource, "getCachedProduct(id)");
-    const explanationRun = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--rule",
-        "neutral-product-review",
-        "--at",
-        `packages/app/src/cache.ts:${cachedCall}`,
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
+    const explanationRun = await host.check({
+      config: configPath,
+      rule: "neutral-product-review",
+      at: `${cachePath}:${cachedCall}`,
     });
     assert.equal(explanationRun.status, 1, explanationRun.stderr);
-    const explanationEnvelope = JSON.parse(
-      explanationRun.stdout,
-    ) as CliEnvelope;
     assert.equal(
-      explanationEnvelope.data.explanation?.status,
+      explanationRun.report.explanation?.status,
       "not_in_candidates",
     );
     assert.equal(
-      explanationEnvelope.data.explanation?.excludedByQuery?.op,
+      explanationRun.report.explanation?.excludedByQuery?.op,
       "findSyntax",
     );
+
     const suppressedCall = findSourceTarget(
       reviewSource,
       'getProduct("legacy")',
     );
     const suppressedLine = Number(suppressedCall.split(":")[0]);
-    const suppressedExplanation = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--rule",
-        "neutral-product-review",
-        "--at",
-        `packages/app/src/review.ts:${suppressedCall}`,
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
+    const suppressedExplanation = await host.check({
+      config: configPath,
+      rule: "neutral-product-review",
+      at: `${reviewPath}:${suppressedCall}`,
     });
     assert.equal(
       suppressedExplanation.status,
       1,
       suppressedExplanation.stderr + suppressedExplanation.stdout,
     );
-    const suppressedEnvelope = JSON.parse(
-      suppressedExplanation.stdout,
-    ) as CliEnvelope;
     assert.equal(
-      suppressedEnvelope.data.explanation?.status,
+      suppressedExplanation.report.explanation?.status,
       "suppressed_by_ignore",
     );
     assert.equal(
-      suppressedEnvelope.data.explanation?.inlineIgnore?.reason,
+      suppressedExplanation.report.explanation?.inlineIgnore?.reason,
       "Keep this legacy lookup covered during migration.",
     );
     assert.ok(
-      envelope.data.inlineIgnores?.some(
+      result.report.inlineIgnores?.some(
         (entry) =>
           entry.status === "suppressed" &&
           entry.ruleId === "neutral-product-review" &&
@@ -263,71 +147,34 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       ),
     );
 
-    writeFileSync(
+    host.replaceText(
       reviewPath,
-      reviewSource.replace(
-        'const product = getProduct("legacy");',
-        'const product = getCachedProduct("legacy");',
-      ),
-      "utf8",
+      'const product = getProduct("legacy");',
+      'const product = getCachedProduct("legacy");',
     );
-    const unusedIgnoreRun = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
-    });
+    const unusedIgnoreRun = await host.check({ config: configPath });
     assert.equal(unusedIgnoreRun.status, 1, unusedIgnoreRun.stderr);
-    const unusedIgnoreEnvelope = JSON.parse(
-      unusedIgnoreRun.stdout,
-    ) as CliEnvelope;
     assert.ok(
-      unusedIgnoreEnvelope.data.diagnostics.some(
+      unusedIgnoreRun.report.diagnostics.some(
         (diagnostic) => diagnostic.ruleId === INLINE_IGNORE_RULE_ID,
       ),
     );
     assert.ok(
-      unusedIgnoreEnvelope.data.inlineIgnores?.some(
+      unusedIgnoreRun.report.inlineIgnores?.some(
         (entry) => entry.status === "unused",
       ),
     );
-    assert.deepEqual(await runInstalledSdk(hostDir), unusedIgnoreEnvelope.data);
+    assert.deepEqual(await runInstalledSdk(host), unusedIgnoreRun.report);
 
-    const unusedSource = readFileSync(reviewPath, "utf8");
-    writeFileSync(
+    host.replaceText(
       reviewPath,
-      unusedSource.replace(
-        'const product = getCachedProduct("legacy");',
-        'const product = getProduct("legacy"); const repeatedProduct = getProduct("legacy"); if (product.price <= 0 || repeatedProduct.price <= 0) { invoke(product); }',
-      ),
-      "utf8",
+      'const product = getCachedProduct("legacy");',
+      'const product = getProduct("legacy"); const repeatedProduct = getProduct("legacy"); if (product.price <= 0 || repeatedProduct.price <= 0) { invoke(product); }',
     );
-    const ambiguousIgnoreRun = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
-    });
+    const ambiguousIgnoreRun = await host.check({ config: configPath });
     assert.equal(ambiguousIgnoreRun.status, 1, ambiguousIgnoreRun.stderr);
-    const ambiguousIgnoreEnvelope = JSON.parse(
-      ambiguousIgnoreRun.stdout,
-    ) as CliEnvelope;
     assert.equal(
-      ambiguousIgnoreEnvelope.data.diagnostics.filter(
+      ambiguousIgnoreRun.report.diagnostics.filter(
         (diagnostic) =>
           diagnostic.ruleId === "neutral-product-review" &&
           diagnostic.at.file === "packages/app/src/review.ts" &&
@@ -336,57 +183,38 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       2,
     );
     assert.ok(
-      ambiguousIgnoreEnvelope.data.diagnostics.some(
+      ambiguousIgnoreRun.report.diagnostics.some(
         (diagnostic) => diagnostic.ruleId === INLINE_IGNORE_RULE_ID,
       ),
     );
     assert.ok(
-      ambiguousIgnoreEnvelope.data.inlineIgnores?.some(
+      ambiguousIgnoreRun.report.inlineIgnores?.some(
         (entry) => entry.status === "ambiguous",
       ),
     );
-    assert.deepEqual(
-      await runInstalledSdk(hostDir),
-      ambiguousIgnoreEnvelope.data,
-    );
+    assert.deepEqual(await runInstalledSdk(host), ambiguousIgnoreRun.report);
 
-    writeFileSync(reviewPath, reviewSource, "utf8");
+    host.writeText(reviewPath, reviewSource);
     const activeCall = "const product = getProduct(id);";
     assert.equal(reviewSource.split(activeCall).length - 1, 1);
-    writeFileSync(
+    host.replaceText(
       reviewPath,
-      reviewSource.replace(activeCall, "const product = getCachedProduct(id);"),
-      "utf8",
+      activeCall,
+      "const product = getCachedProduct(id);",
     );
-    const revokedRun = await runBareVeruleInHost({
-      checkoutDir: hostDir,
-      args: [
-        "check",
-        "--config",
-        "packages/app/verule.config.ts",
-        "--output",
-        "json",
-      ],
-      isolated: true,
-      pnpmStoreDir: storeDir,
-      env,
-    });
+    const revokedRun = await host.check({ config: configPath });
     assert.equal(revokedRun.status, 0, revokedRun.stderr);
-    const revokedEnvelope = JSON.parse(revokedRun.stdout) as CliEnvelope;
-    assert.equal(revokedEnvelope.variant, "clean");
-    assert.deepEqual(revokedEnvelope.data.diagnostics, []);
-    assert.deepEqual(await runInstalledSdk(hostDir), revokedEnvelope.data);
+    assert.equal(revokedRun.variant, "clean");
+    assert.deepEqual(revokedRun.report.diagnostics, []);
+    assert.deepEqual(await runInstalledSdk(host), revokedRun.report);
 
     const sourceFiles = new Set(
-      envelope.data.projects.flatMap((project) => project.sourceFiles),
+      result.report.projects.flatMap((project) => project.sourceFiles),
     );
     assert.ok(sourceFiles.has("packages/app/src/review.ts"));
     assert.ok(sourceFiles.has("packages/data/src/product.ts"));
     t.diagnostic(
-      `Packed CLI ${cliArtifact.version}; engine SHA-256 ${audit.engineBinarySha256}; isolation ${result.isolation?.mode}`,
+      `Packed CLI ${cliArtifact.version}; engine SHA-256 ${host.audit.engineBinarySha256}; isolation ${result.isolation?.mode}`,
     );
-  } finally {
-    bundle.dispose();
-    rmSync(environmentDir, { recursive: true, force: true });
-  }
+  });
 });
