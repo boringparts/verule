@@ -22,6 +22,7 @@ struct FieldState {
     from_default: Option<bool>,
     evidence: Vec<Evidence>,
     gaps: Vec<Gap>,
+    local_gaps: Vec<ExplainLocalGap>,
 }
 
 struct RefineEntry<'a> {
@@ -312,7 +313,21 @@ fn build_schema_contribution<'a>(
     for (name, field) in fields {
         if !field.resolved {
             has_dynamic_fields = true;
-            if explain && let Some(first_gap) = field.gaps.first() {
+        }
+        if explain {
+            if !field.local_gaps.is_empty() {
+                for mut lg in field.local_gaps {
+                    if lg.field.is_none() {
+                        lg.field = Some(name.clone());
+                    }
+                    if lg.subject_location.is_none() {
+                        lg.subject_location = call_loc.clone();
+                    }
+                    local_gaps.push(lg);
+                }
+            } else if !field.resolved
+                && let Some(first_gap) = field.gaps.first()
+            {
                 local_gaps.push(ExplainLocalGap {
                     status: ExplainGapResolutionStatus::Unresolved,
                     fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
@@ -442,6 +457,7 @@ fn ingest_table_fact(
                 from_default: Some(false),
                 evidence: dedupe(col_evidence),
                 gaps: Vec::new(),
+                local_gaps: Vec::new(),
             },
         );
     }
@@ -513,6 +529,17 @@ fn apply_single_refinement(
         entry.prop_location.clone().or(call_loc),
     ));
 
+    let mut field_local_gaps = Vec::new();
+    if let Some(trace) = matched.and_then(|fact| fact.explain_trace.as_ref()) {
+        for lg in &trace.local_gaps {
+            let mut cloned = lg.clone();
+            if cloned.field.is_none() {
+                cloned.field = Some(entry.name.clone());
+            }
+            field_local_gaps.push(cloned);
+        }
+    }
+
     if let Some(fact) = matched
         && fact.value.get("resolved").and_then(Value::as_bool) == Some(true)
     {
@@ -574,6 +601,7 @@ fn apply_single_refinement(
                 from_default: Some(from_default),
                 evidence: dedupe(evidence),
                 gaps: fact.gaps.clone(),
+                local_gaps: field_local_gaps,
             },
         );
         return;
@@ -611,6 +639,7 @@ fn apply_single_refinement(
             from_default: None,
             evidence: dedupe(evidence),
             gaps,
+            local_gaps: field_local_gaps,
         },
     );
 }
@@ -806,6 +835,7 @@ fn mark_field_unresolved(
                 message: format!("Refinement for field \"{name}\" has no inspectable expression."),
                 at: location,
             }],
+            local_gaps: Vec::new(),
         },
     );
 }

@@ -20,7 +20,7 @@
     },
     "format:check": {
       "dependsOn": ["//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -33,7 +33,7 @@
     },
     "lint": {
       "dependsOn": ["^lint", "//#toolchain:prepare"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -45,7 +45,7 @@
       "tags": ["work:repair"]
     },
     "typecheck": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "!native/target/**"],
       "outputs": [],
       "tags": ["quality:light"]
     }

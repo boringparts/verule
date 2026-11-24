@@ -1312,4 +1312,142 @@ void describe("@verule/adapter-zod", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("records resolved_by_override localGaps for runtimeFieldValidator().default(21), .and(), and .pipe() overrides", async () => {
+    const root = createTempProject({
+      "src/combinators.ts": [
+        'import { z } from "zod";',
+        "",
+        "declare function runtimeFieldValidator(): z.ZodType<number>;",
+        "",
+        "export const modifierOverrideSchema = z.object({",
+        "  id: z.string(),",
+        "  age: runtimeFieldValidator().default(21),",
+        "});",
+        "",
+        "export const andBaseSchema = z.object({",
+        "  id: z.string(),",
+        "  age: runtimeFieldValidator(),",
+        "});",
+        "",
+        "export const andOverrideSchema = andBaseSchema.and(",
+        "  z.object({ age: z.number().default(21) }),",
+        ");",
+        "",
+        "export const pipeOverrideSchema = andBaseSchema.pipe(",
+        "  z.object({ id: z.string(), age: z.number().default(21) }),",
+        ");",
+        "",
+        "export function validateCombinators(input: unknown) {",
+        "  return {",
+        "    modifier: modifierOverrideSchema.parse(input),",
+        "    and: andOverrideSchema.parse(input),",
+        "    pipe: pipeOverrideSchema.parse(input),",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    symlinkSync(
+      join(packageRoot, "node_modules", "zod"),
+      join(root, "node_modules", "zod"),
+      "dir",
+    );
+
+    let inputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorInputFieldsFactValue
+    >[] = [];
+
+    const rule = defineRule({
+      id: "inspect-modifier-and-combinator-overrides",
+      run: async (ctx) => {
+        inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: ["@verule/adapter-zod"],
+        rules: [rule],
+      }),
+    });
+
+    try {
+      const checkReport = await session.check();
+      assert.equal(checkReport.status, "clean");
+      assert.deepEqual(checkReport.gaps, []);
+
+      for (const schemaName of [
+        "modifierOverrideSchema",
+        "andOverrideSchema",
+        "pipeOverrideSchema",
+      ]) {
+        const fact = inputResults.find(
+          (f) => f.value.schemaName === schemaName,
+        );
+        assert.ok(fact, `Expected fact for ${schemaName}`);
+        assert.deepEqual(fact.gaps, []);
+        assert.deepEqual(fact.value.defaultedFields, ["age"]);
+      }
+
+      const modExplain = await session.explain({
+        ruleId: "inspect-modifier-and-combinator-overrides",
+        at: "src/combinators.ts:25:15",
+      });
+      assert.ok(
+        modExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 7 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".default()" &&
+            lg.resolvedBy.at?.line === 7,
+        ),
+        JSON.stringify(modExplain.explanation.localGaps),
+      );
+
+      const andExplain = await session.explain({
+        ruleId: "inspect-modifier-and-combinator-overrides",
+        at: "src/combinators.ts:26:10",
+      });
+      assert.ok(
+        andExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 12 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".and()" &&
+            lg.resolvedBy.at?.line === 16,
+        ),
+        JSON.stringify(andExplain.explanation.localGaps),
+      );
+
+      const pipeExplain = await session.explain({
+        ruleId: "inspect-modifier-and-combinator-overrides",
+        at: "src/combinators.ts:27:11",
+      });
+      assert.ok(
+        pipeExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 12 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".pipe()" &&
+            lg.resolvedBy.at?.line === 20,
+        ),
+        JSON.stringify(pipeExplain.explanation.localGaps),
+      );
+    } finally {
+      await session.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

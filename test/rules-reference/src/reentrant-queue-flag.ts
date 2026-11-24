@@ -134,22 +134,55 @@ function isQueuedSetWrite(
   );
 }
 
-function isPostCallbackReentrantGuardBranch(
+function stripBalancedOuterParens(text: string): string {
+  let current = text.trim();
+  while (current.startsWith("(") && current.endsWith(")")) {
+    let depth = 0;
+    let balancedOuter = true;
+    for (let i = 0; i < current.length; i += 1) {
+      const ch = current[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0 && i < current.length - 1) {
+          balancedOuter = false;
+          break;
+        }
+      }
+    }
+    if (!balancedOuter || depth !== 0) break;
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+function isZeroCheckCondition(conditionText: string): boolean {
+  const normalized = stripBalancedOuterParens(
+    conditionText.replaceAll(/\s+/g, " ").trim(),
+  );
+  if (normalized.startsWith("!") && !normalized.startsWith("!=")) {
+    return !isZeroCheckCondition(normalized.slice(1));
+  }
+  return (
+    /(?:===|==)\s*(?:0|false)$/u.test(normalized) ||
+    /^(?:0|false)\s*(?:===|==)/u.test(normalized)
+  );
+}
+
+function isReentrantSafeGuardBranch(
   branch: BranchEdgeInfo,
-  invocationEnd: number,
   contract: ResolvedContract,
 ): boolean {
   if (
-    branch.location.start < invocationEnd ||
     !branch.conditionText.includes(contract.reentrantFlagName) ||
     !branch.conditionText.includes(contract.flagProperty)
   ) {
     return false;
   }
-  const isNegated = branch.conditionText.trimStart().startsWith("!");
+  const isZeroCheck = isZeroCheckCondition(branch.conditionText);
   return (
-    (isNegated && branch.direction === "true") ||
-    (!isNegated && branch.direction === "false")
+    (isZeroCheck && branch.direction === "true") ||
+    (!isZeroCheck && branch.direction === "false")
   );
 }
 
@@ -420,40 +453,119 @@ async function analyzeCandidateFunction(
       continue;
     }
 
-    const latestInvocation = priorInvocations.toSorted(
+    const orderedInvocations = priorInvocations.toSorted(
       (a, b) => b.outerCallLocation.end - a.outerCallLocation.end,
-    )[0]!;
+    );
 
     const scopeRef = candidate.write.cfgScope ?? fn.ref;
     const [branchGroup] = await ctx.listBranches([scopeRef]);
-    const guardBranches = (branchGroup?.branches ?? []).filter((b) =>
-      isPostCallbackReentrantGuardBranch(
-        b,
-        latestInvocation.outerCallLocation.end,
-        contract,
-      ),
+    const allBranches = branchGroup?.branches ?? [];
+    const allSafeBranches = allBranches.filter((b) =>
+      isReentrantSafeGuardBranch(b, contract),
     );
 
-    const [coverage] = await ctx.branchCoverage({
+    const [overallCoverage] = await ctx.branchCoverage({
       scope: scopeRef,
-      branches: guardBranches.map((b) => b.ref),
+      branches: allSafeBranches.map((b) => b.ref),
       targets: [candidate.write.syntax],
     });
-    if (coverage === undefined) continue;
+    if (overallCoverage === undefined) continue;
+
+    const isConfinedToOppositeGuardBranch = async (
+      inv: (typeof orderedInvocations)[number],
+    ): Promise<boolean> => {
+      for (const safeBranch of allSafeBranches) {
+        if (
+          safeBranch.location.start >= inv.outerCallLocation.end ||
+          inv.outerCallLocation.end > safeBranch.statementLocation.end
+        ) {
+          continue;
+        }
+        const oppositeBranch = allBranches.find(
+          (b) =>
+            b.condition.handleId === safeBranch.condition.handleId &&
+            b.direction !== safeBranch.direction,
+        );
+        if (oppositeBranch === undefined) continue;
+
+        const [[oppToInv], [safeToWrite]] = await Promise.all([
+          ctx.branchCoverage({
+            scope: scopeRef,
+            branches: [oppositeBranch.ref],
+            targets: [inv.callbackArgument],
+          }),
+          ctx.branchCoverage({
+            scope: scopeRef,
+            branches: [safeBranch.ref],
+            targets: [candidate.write.syntax],
+          }),
+        ]);
+        if (
+          oppToInv?.status === "covered" &&
+          safeToWrite?.status === "covered"
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let reportCoverage = overallCoverage;
+    let offendingInvocation: (typeof orderedInvocations)[number] | undefined;
+
+    if (overallCoverage.status === "covered") {
+      for (const inv of orderedInvocations) {
+        const postSafeBranches = allSafeBranches.filter(
+          (b) => b.location.start >= inv.outerCallLocation.end,
+        );
+        if (postSafeBranches.length > 0) {
+          const [postCoverage] = await ctx.branchCoverage({
+            scope: scopeRef,
+            branches: postSafeBranches.map((b) => b.ref),
+            targets: [candidate.write.syntax],
+          });
+          if (postCoverage?.status === "covered") {
+            continue;
+          }
+          if (await isConfinedToOppositeGuardBranch(inv)) {
+            continue;
+          }
+          reportCoverage = postCoverage ?? overallCoverage;
+          offendingInvocation = inv;
+          break;
+        }
+        if (await isConfinedToOppositeGuardBranch(inv)) {
+          continue;
+        }
+        offendingInvocation = inv;
+        break;
+      }
+    } else {
+      for (const inv of orderedInvocations) {
+        if (!(await isConfinedToOppositeGuardBranch(inv))) {
+          offendingInvocation = inv;
+          break;
+        }
+      }
+      offendingInvocation ??= orderedInvocations[0]!;
+    }
 
     ctx.checkpoint(
       "branch-guard-coverage",
       candidate.write.syntax,
-      coverage.status === "covered" ? "exclude" : "pass",
+      offendingInvocation === undefined ? "exclude" : "pass",
       () => ({
         contractId: contract.contractId,
-        status: coverage.status,
-        guardBranches: guardBranches.map((b) => b.conditionText),
-        gaps: coverage.gaps,
+        status: reportCoverage.status,
+        guardBranches: allSafeBranches.map((b) => b.conditionText),
+        gaps: reportCoverage.gaps,
       }),
     );
 
-    if (coverage.status === "covered") continue;
+    if (offendingInvocation === undefined) continue;
+
+    const latestInvocation = offendingInvocation;
+    const coverage = reportCoverage;
 
     const preClears = candidates.filter(
       (other) =>

@@ -21,6 +21,7 @@ const zodAdapter = defineAdapter({
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
     defineFactProvider(ValidatorOutputFieldsFact, (ctx, request) =>
@@ -32,6 +33,7 @@ const zodAdapter = defineAdapter({
         ...(request.condition !== undefined
           ? { condition: request.condition }
           : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
     defineFactProvider(ValidatorFieldFact, (ctx, request) =>
@@ -40,6 +42,7 @@ const zodAdapter = defineAdapter({
         providerId: "zod",
         reportProviderId: "zod",
         ...(request.targets !== undefined ? { targets: request.targets } : {}),
+        ...(request.explain !== undefined ? { explain: request.explain } : {}),
       }),
     ),
   ],

@@ -44,7 +44,7 @@
     },
     "test": {
       "dependsOn": [],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
