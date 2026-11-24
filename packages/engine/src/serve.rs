@@ -264,6 +264,7 @@ pub struct SnapshotState {
     pub field_write_index: FxHashMap<String, Arc<FieldWriteIndex>>,
     pub package_impl_cache: PackageImplCache,
     pub native_adapters: NativeAdapterRegistry,
+    pub native_fact_cache: crate::native_adapter::NativeFactCache,
     pub next_handle_id: u64,
 }
 
@@ -672,6 +673,7 @@ impl EngineServer {
                 field_write_index: FxHashMap::default(),
                 package_impl_cache: PackageImplCache::default(),
                 native_adapters,
+                native_fact_cache: crate::native_adapter::NativeFactCache::default(),
                 next_handle_id: 0,
             },
         );
@@ -776,6 +778,7 @@ impl EngineServer {
                 field_write_index: FxHashMap::default(),
                 package_impl_cache: PackageImplCache::default(),
                 native_adapters,
+                native_fact_cache: crate::native_adapter::NativeFactCache::default(),
                 next_handle_id: 0,
             },
         );

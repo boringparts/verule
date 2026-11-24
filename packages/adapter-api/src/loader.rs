@@ -9,12 +9,12 @@ use std::{
 use libloading::Library;
 
 use crate::{
-    ADAPTER_ABI_VERSION, AdapterError, AdapterManifest, HostAccess, HostValue, NativeAdapterOutput,
-    NativeFactRequest, NodeOperation,
+    ADAPTER_ABI_VERSION, AdapterError, AdapterManifest, HostAccess, HostFactQuery, HostValue,
+    NativeAdapterOutput, NativeFactRequest, NodeOperation,
     ffi::{
-        self, FfiHostApi, FfiLocation, FfiManifestSlice, FfiNodeList, FfiReply, FfiRequest,
-        FfiSlice, REPLY_DECLARATION, REPLY_ERROR, REPLY_KIND, REPLY_LOCATION, REPLY_NODE,
-        REPLY_NODES, REPLY_NONE, REPLY_TEXT,
+        self, FfiFactQuery, FfiHostApi, FfiLocation, FfiManifestSlice, FfiNodeList, FfiReply,
+        FfiRequest, FfiSlice, REPLY_DECLARATION, REPLY_ERROR, REPLY_FACTS, REPLY_KIND,
+        REPLY_LOCATION, REPLY_NODE, REPLY_NODES, REPLY_NONE, REPLY_TEXT,
     },
 };
 
@@ -160,6 +160,7 @@ impl NativeLibrary {
             register_additional_input: Some(register_additional_input_callback),
             finish: Some(finish_callback),
             fail: Some(fail_callback),
+            query_facts: Some(query_facts_callback),
         };
         let status = unsafe { (self.entry)(&raw const api, &raw const wire_request) };
         if status != 0 {
@@ -270,6 +271,12 @@ impl<'a> InvocationHost<'a> {
                     reply.flags = 1;
                     reply.bytes = FfiSlice::from_bytes(&self.last_bytes);
                 }
+            }
+            HostValue::Facts(facts) => {
+                self.last_bytes = serde_json::to_vec(&facts).map_err(|error| error.to_string())?;
+                reply.tag = REPLY_FACTS;
+                reply.flags = 1;
+                reply.bytes = FfiSlice::from_bytes(&self.last_bytes);
             }
         }
         Ok(reply)
@@ -439,6 +446,98 @@ unsafe extern "C" fn fail_callback(context: *mut c_void, message: FfiSlice) {
 }
 
 #[allow(unsafe_code)]
+unsafe extern "C" fn query_facts_callback(
+    context: *mut c_void,
+    query_ptr: *const FfiFactQuery,
+) -> FfiReply {
+    let Some(invocation) = (unsafe { context.cast::<InvocationHost<'_>>().as_mut() }) else {
+        return FfiReply {
+            tag: REPLY_ERROR,
+            flags: 0,
+            handle: 0,
+            nodes: FfiNodeList {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            bytes: FfiSlice::empty(),
+            location: FfiLocation {
+                file: FfiSlice::empty(),
+                line: 0,
+                column: 0,
+                end_line: 0,
+                end_column: 0,
+                start: 0,
+                end: 0,
+            },
+        };
+    };
+    let Some(wire) = (unsafe { query_ptr.as_ref() }) else {
+        return invocation.error_reply("fact query pointer was null".to_string());
+    };
+    let fact_type_id = match unsafe { read_string(wire.fact_type_id) } {
+        Ok(value) => value,
+        Err(message) => return invocation.error_reply(message),
+    };
+    let provider_id = if wire.has_provider_id {
+        match unsafe { read_string(wire.provider_id) } {
+            Ok(value) => Some(value),
+            Err(message) => return invocation.error_reply(message),
+        }
+    } else {
+        None
+    };
+    let condition_text = match unsafe { read_string(wire.condition) } {
+        Ok(value) => value,
+        Err(message) => return invocation.error_reply(message),
+    };
+    let condition = if condition_text.is_empty() {
+        None
+    } else {
+        match serde_json::from_str(&condition_text) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return invocation
+                    .error_reply(format!("fact query condition is not JSON: {error}"));
+            }
+        }
+    };
+    let targets = if wire.has_targets {
+        match unsafe { read_node_list(wire.targets) } {
+            Ok(list) => Some(list),
+            Err(message) => return invocation.error_reply(message),
+        }
+    } else {
+        None
+    };
+    let host_query = HostFactQuery {
+        fact_type_id,
+        provider_id,
+        condition,
+        targets,
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| invocation.host.query_facts(host_query)));
+    match result {
+        Ok(Ok(facts)) => match invocation.reply(HostValue::Facts(facts)) {
+            Ok(reply) => reply,
+            Err(message) => invocation.error_reply(message),
+        },
+        Ok(Err(message)) => invocation.error_reply(message),
+        Err(panic) => invocation.error_reply(panic_message(panic.as_ref())),
+    }
+}
+
+#[allow(unsafe_code)]
+unsafe fn read_node_list(list: FfiNodeList) -> Result<Vec<u64>, String> {
+    if list.len == 0 {
+        return Ok(Vec::new());
+    }
+    if list.data.is_null() {
+        return Err("adapter passed a null node-list pointer with nonzero length".to_string());
+    }
+    Ok(unsafe { slice::from_raw_parts(list.data, list.len) }.to_vec())
+}
+
+#[allow(unsafe_code)]
 unsafe fn read_bytes<'a>(bytes: FfiSlice) -> Result<&'a [u8], String> {
     if bytes.len == 0 {
         return Ok(&[]);
@@ -463,4 +562,168 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
         return message.clone();
     }
     "host callback panicked with a non-string payload".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        Adapter, AdapterManifest, Context, Evidence, FactContribution, FactQuery, FactRequest,
+        HostQueriedFact,
+    };
+
+    #[derive(Default)]
+    struct QueryingAdapter;
+
+    impl Adapter for QueryingAdapter {
+        fn manifest(&self) -> AdapterManifest {
+            AdapterManifest {
+                abi_version: ADAPTER_ABI_VERSION,
+                id: "adapter-b".to_string(),
+                version: "1.0.0".to_string(),
+                fact_type_ids: vec!["b.derived".to_string()],
+            }
+        }
+
+        fn extract<'a>(
+            &self,
+            context: &'a Context<'_>,
+            request: &FactRequest<'a>,
+        ) -> Result<Vec<FactContribution<'a>>, AdapterError> {
+            let err = context.query_facts(&FactQuery {
+                fact_type_id: "   ",
+                provider_id: None,
+                condition: None,
+                targets: None,
+            });
+            assert!(err.is_err(), "empty fact_type_id should fail before FFI");
+
+            let queried = context.query_facts(&FactQuery {
+                fact_type_id: "a.source",
+                provider_id: Some("adapter-a"),
+                condition: Some(json!({ "strict": true })),
+                targets: Some(&request.calls),
+            })?;
+            assert_eq!(queried.len(), 1);
+            let item = &queried[0];
+            assert_eq!(item.subject.text()?.as_deref(), Some("objA"));
+            assert_eq!(item.providers, vec!["adapter-a".to_string()]);
+
+            let mut out =
+                FactContribution::new(request.calls[0], json!({ "fromA": item.value.clone() }));
+            out.evidence.extend(item.evidence.clone());
+            Ok(vec![out])
+        }
+    }
+
+    struct MockHost {
+        seen_queries: Vec<HostFactQuery>,
+    }
+
+    impl HostAccess for MockHost {
+        fn read_node(
+            &mut self,
+            node_id: u64,
+            operation: NodeOperation,
+        ) -> Result<HostValue, String> {
+            match (node_id, operation) {
+                (10, NodeOperation::ProgramReference) => {
+                    Ok(HostValue::Text(Some("syn:1:10".to_string())))
+                }
+                (10 | 20, NodeOperation::Location) => Ok(HostValue::Location(None)),
+                (20, NodeOperation::Text) => Ok(HostValue::Text(Some("objA".to_string()))),
+                _ => Ok(HostValue::None),
+            }
+        }
+
+        fn read_additional_input(&mut self, _path: &str) -> Result<String, String> {
+            Err("unused".to_string())
+        }
+
+        fn register_additional_input(&mut self, _path: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn query_facts(&mut self, query: HostFactQuery) -> Result<Vec<HostQueriedFact>, String> {
+            self.seen_queries.push(query);
+            Ok(vec![HostQueriedFact {
+                subject_node_id: 20,
+                value: json!({ "spec": "required" }),
+                evidence: vec![Evidence {
+                    kind: "source".to_string(),
+                    message: "source A".to_string(),
+                    at: None,
+                    model_id: None,
+                    declaration: None,
+                }],
+                gaps: Vec::new(),
+                providers: vec!["adapter-a".to_string()],
+            }])
+        }
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn round_trips_query_facts_across_c_abi() {
+        let mut host = MockHost {
+            seen_queries: Vec::new(),
+        };
+        let calls = [10_u64];
+        let wire_request = FfiRequest {
+            fact_type_id: FfiSlice::from_bytes(b"b.derived"),
+            provider_id: FfiSlice::from_bytes(b"adapter-b"),
+            project_id: FfiSlice::from_bytes(b"proj-1"),
+            condition: FfiSlice::empty(),
+            calls: FfiNodeList {
+                data: calls.as_ptr(),
+                len: calls.len(),
+            },
+            variables: FfiNodeList {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            targets: FfiNodeList {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            has_targets: false,
+        };
+        let mut invocation = InvocationHost::new(&mut host);
+        let api = FfiHostApi {
+            abi_version: ADAPTER_ABI_VERSION,
+            context: std::ptr::from_mut(&mut invocation).cast::<c_void>(),
+            read_node: Some(read_node_callback),
+            read_additional_input: Some(read_additional_input_callback),
+            register_additional_input: Some(register_additional_input_callback),
+            finish: Some(finish_callback),
+            fail: Some(fail_callback),
+            query_facts: Some(query_facts_callback),
+        };
+        let status = unsafe {
+            ffi::invoke_adapter::<QueryingAdapter>(&raw const api, &raw const wire_request)
+        };
+        assert_eq!(status, 0, "error: {:?}", invocation.error);
+        let bytes = invocation.output.expect("adapter output");
+        let parsed: NativeAdapterOutput = serde_json::from_slice(&bytes).expect("parse output");
+        assert_eq!(parsed.contributions.len(), 1);
+        assert_eq!(parsed.contributions[0].subject, "syn:1:10");
+        assert_eq!(
+            parsed.contributions[0].value,
+            json!({ "fromA": { "spec": "required" } })
+        );
+        assert_eq!(parsed.contributions[0].evidence[0].message, "source A");
+        assert_eq!(host.seen_queries.len(), 1);
+        assert_eq!(host.seen_queries[0].fact_type_id, "a.source");
+        assert_eq!(
+            host.seen_queries[0].provider_id.as_deref(),
+            Some("adapter-a")
+        );
+        assert_eq!(
+            host.seen_queries[0].condition,
+            Some(json!({ "strict": true }))
+        );
+        assert_eq!(host.seen_queries[0].targets, Some(vec![10]));
+    }
 }

@@ -144,14 +144,26 @@ impl ObserveCollector {
         candidate_count: usize,
         raw_details: Vec<EngineStepDetail>,
     ) {
-        self.push_step_metrics(op, "engine", step_start, candidate_count, raw_details);
+        self.push_step_metrics(
+            op,
+            "engine",
+            "computed",
+            step_start,
+            candidate_count,
+            raw_details,
+        );
     }
 
-    pub fn record_provider_step(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Observation recording takes step identity, cache status, timing, and detail items."
+    )]
+    pub fn record_provider_step_with_cache(
         &mut self,
         op: &'static str,
         provider: &str,
         engine_provider_id: &str,
+        cache_status: &'static str,
         step_start: Option<Instant>,
         candidate_count: usize,
         raw_details: Vec<EngineStepDetail>,
@@ -159,19 +171,29 @@ impl ObserveCollector {
         if !self.is_active() {
             return;
         }
-        let stats = self
-            .provider_extractions
-            .entry(engine_provider_id.to_string())
-            .or_default();
-        stats.extractions += 1;
-        stats.candidates += candidate_count;
-        self.push_step_metrics(op, provider, step_start, candidate_count, raw_details);
+        if cache_status == "computed" {
+            let stats = self
+                .provider_extractions
+                .entry(engine_provider_id.to_string())
+                .or_default();
+            stats.extractions += 1;
+            stats.candidates += candidate_count;
+        }
+        self.push_step_metrics(
+            op,
+            provider,
+            cache_status,
+            step_start,
+            candidate_count,
+            raw_details,
+        );
     }
 
     fn push_step_metrics(
         &mut self,
         op: &'static str,
         provider: &str,
+        cache_status: &'static str,
         step_start: Option<Instant>,
         candidate_count: usize,
         raw_details: Vec<EngineStepDetail>,
@@ -220,7 +242,7 @@ impl ObserveCollector {
         self.steps.push(EngineStepMetrics {
             op,
             provider: provider.to_string(),
-            cache_status: "computed",
+            cache_status,
             duration_ms,
             candidate_count,
             details,

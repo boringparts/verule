@@ -171,3 +171,63 @@ export const drizzleProviderRule = defineRule({
     });
   },
 });
+
+type DerivedConsumerValue = {
+  readonly consumerName: string;
+  readonly sourceName: string;
+  readonly fields: Readonly<Record<string, string>>;
+  readonly requiredFields: readonly string[];
+  readonly optionalFields: readonly string[];
+  readonly defaultedFields: readonly string[];
+  readonly unknownFields: readonly string[];
+  readonly hasDynamicFields: boolean;
+  readonly sourceProviders: readonly string[];
+};
+
+const derivedConsumerFact = defineFactType<
+  "syntax" | "call" | "declaration",
+  undefined,
+  DerivedConsumerValue
+>({
+  id: "fixture.derived-consumer",
+  subjectKind: ["syntax", "call", "declaration"],
+});
+
+export const derivedConsumerCompositionRule = defineRule({
+  id: "provider-session-composition",
+  run: async (ctx) => {
+    const facts = await ctx.facts(derivedConsumerFact);
+    const fact = facts.find(
+      (candidate) =>
+        candidate.value.sourceName === "order" &&
+        candidate.value.consumerName === "sessionOrderConsumer",
+    );
+    if (fact === undefined) {
+      throw new Error(
+        "The consumer fact provider did not return a derived consumer fact for sessionOrderConsumer.",
+      );
+    }
+    const at = fact.evidence.find((item) =>
+      item.message.includes('Fixture consumer "sessionOrderConsumer"'),
+    )?.at;
+    if (at === undefined) {
+      throw new Error("The consumer fact returned no subject evidence.");
+    }
+    ctx.report({
+      at,
+      findingKey: "provider-session-composition-fact",
+      message: JSON.stringify(fact.value),
+      basis: [fact],
+    });
+  },
+});
+
+export const derivedConsumerCacheRule = defineRule({
+  id: "provider-session-composition-cache",
+  run: async (ctx) => {
+    const facts = await ctx.facts(derivedConsumerFact);
+    if (facts.length === 0) {
+      throw new Error("Expected cached derived consumer facts.");
+    }
+  },
+});
