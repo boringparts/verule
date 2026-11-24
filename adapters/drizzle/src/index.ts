@@ -1,6 +1,12 @@
 export {
+  DrizzleTableColumnsFact,
   QueryRowProjectionFact,
+  buildDrizzleTableColumnsValue,
   buildQueryRowProjectionValue,
+  type DrizzleTableColumnInfo,
+  type DrizzleTableColumnsCondition,
+  type DrizzleTableColumnsFactValue,
+  type DrizzleTableSubjectKind,
   type QueryRowCardinality,
   type QueryRowColumnInfo,
   type QueryRowColumnKind,

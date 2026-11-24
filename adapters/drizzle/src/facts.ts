@@ -354,3 +354,167 @@ export const QueryRowProjectionFact = defineFactType<
   subjectKind: ["syntax", "call", "declaration"],
   merge: mergeRowProjections,
 });
+
+export type DrizzleTableSubjectKind = "syntax" | "call" | "declaration";
+
+export type DrizzleTableColumnsCondition = {
+  readonly tableName?: string;
+};
+
+export type DrizzleTableColumnInfo = {
+  /** TypeScript property name declared on the Drizzle table object. */
+  readonly name: string;
+  /** Underlying SQL column name declared in Drizzle (defaults to `name`). */
+  readonly sqlName: string;
+  readonly nullable: boolean;
+  readonly primaryKey: boolean;
+  readonly hasDefault: boolean;
+  readonly evidence?: readonly Evidence[];
+};
+
+export type DrizzleTableColumnsFactValue = {
+  readonly library: "drizzle";
+  /** TypeScript declaration name when bound to a variable, otherwise SQL table name. */
+  readonly tableName: string;
+  /** SQL table name literal passed to the Drizzle table builder when statically known. */
+  readonly sqlTableName?: string;
+  /** Sorted statically known TypeScript column property names on this table. */
+  readonly columnNames: readonly string[];
+  readonly columns: Readonly<Record<string, DrizzleTableColumnInfo>>;
+  /** True when spreads or computed keys prevent enumerating every column statically. */
+  readonly hasDynamicColumns: boolean;
+};
+
+/** Normalizes and sorts Drizzle table column metadata into a deterministic fact value. */
+export function buildDrizzleTableColumnsValue(params: {
+  readonly tableName: string;
+  readonly sqlTableName?: string;
+  readonly columns: Readonly<Record<string, DrizzleTableColumnInfo>>;
+  readonly hasDynamicColumns: boolean;
+}): DrizzleTableColumnsFactValue {
+  const sortedColumns: Record<string, DrizzleTableColumnInfo> = {};
+  for (const key of Object.keys(params.columns).toSorted(compareCodepoint)) {
+    sortedColumns[key] = params.columns[key]!;
+  }
+  const columnNames = Object.keys(sortedColumns);
+
+  return {
+    library: "drizzle",
+    tableName: params.tableName,
+    ...(params.sqlTableName !== undefined
+      ? { sqlTableName: params.sqlTableName }
+      : {}),
+    columnNames,
+    columns: sortedColumns,
+    hasDynamicColumns: params.hasDynamicColumns,
+  };
+}
+
+function mergeDrizzleTableColumns(
+  existing: FactProviderContribution<DrizzleTableColumnsFactValue>,
+  incoming: FactProviderContribution<DrizzleTableColumnsFactValue>,
+): FactMergeOutcome<DrizzleTableColumnsFactValue> {
+  const existingLibrary: string = existing.value.library;
+  const incomingLibrary: string = incoming.value.library;
+  if (existingLibrary !== incomingLibrary) {
+    return {
+      ok: false,
+      conflict: {
+        message: `Conflicting table library "${existingLibrary}" vs "${incomingLibrary}"`,
+        existingEvidence: existing.evidence,
+        incomingEvidence: incoming.evidence,
+      },
+    };
+  }
+  if (existing.value.tableName !== incoming.value.tableName) {
+    return {
+      ok: false,
+      conflict: {
+        message: `Conflicting Drizzle table name "${existing.value.tableName}" vs "${incoming.value.tableName}"`,
+        existingEvidence: existing.evidence,
+        incomingEvidence: incoming.evidence,
+      },
+    };
+  }
+  if (
+    existing.value.sqlTableName !== undefined &&
+    incoming.value.sqlTableName !== undefined &&
+    existing.value.sqlTableName !== incoming.value.sqlTableName
+  ) {
+    return {
+      ok: false,
+      conflict: {
+        message: `Conflicting SQL table name "${existing.value.sqlTableName}" vs "${incoming.value.sqlTableName}"`,
+        existingEvidence: existing.evidence,
+        incomingEvidence: incoming.evidence,
+      },
+    };
+  }
+
+  const mergedColumns: Record<string, DrizzleTableColumnInfo> = {
+    ...existing.value.columns,
+  };
+  for (const [name, incomingCol] of Object.entries(incoming.value.columns)) {
+    const existingCol = mergedColumns[name];
+    if (!existingCol) {
+      mergedColumns[name] = incomingCol;
+      continue;
+    }
+    if (
+      existingCol.sqlName !== incomingCol.sqlName ||
+      existingCol.nullable !== incomingCol.nullable ||
+      existingCol.primaryKey !== incomingCol.primaryKey ||
+      existingCol.hasDefault !== incomingCol.hasDefault
+    ) {
+      return {
+        ok: false,
+        conflict: {
+          message: `Conflicting Drizzle table column "${name}"`,
+          existingEvidence: existingCol.evidence ?? existing.evidence,
+          incomingEvidence: incomingCol.evidence ?? incoming.evidence,
+        },
+      };
+    }
+    const evidence = combineEvidence(
+      existingCol.evidence,
+      incomingCol.evidence,
+    );
+    mergedColumns[name] = {
+      name,
+      sqlName: existingCol.sqlName,
+      nullable: existingCol.nullable,
+      primaryKey: existingCol.primaryKey,
+      hasDefault: existingCol.hasDefault,
+      ...(evidence !== undefined ? { evidence } : {}),
+    };
+  }
+
+  const sqlTableName =
+    existing.value.sqlTableName ?? incoming.value.sqlTableName;
+  return {
+    ok: true,
+    value: buildDrizzleTableColumnsValue({
+      tableName: existing.value.tableName,
+      ...(sqlTableName !== undefined ? { sqlTableName } : {}),
+      columns: mergedColumns,
+      hasDynamicColumns:
+        existing.value.hasDynamicColumns || incoming.value.hasDynamicColumns,
+    }),
+  };
+}
+
+/**
+ * Shared fact type describing the statically extracted columns, nullability,
+ * default modifiers, and source evidence of a Drizzle table declaration.
+ */
+export const DrizzleTableColumnsFact = defineFactType<
+  DrizzleTableSubjectKind,
+  DrizzleTableColumnsCondition | undefined,
+  DrizzleTableColumnsFactValue
+>({
+  id: "verule.drizzle.table-columns",
+  description:
+    "Statically extracted Drizzle table column declarations, nullability, defaults, and source evidence.",
+  subjectKind: ["syntax", "declaration", "call"],
+  merge: mergeDrizzleTableColumns,
+});
