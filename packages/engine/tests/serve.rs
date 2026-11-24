@@ -1,100 +1,14 @@
+mod support;
+
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    io::BufReader,
+    path::Path,
+    process::{ChildStdin, ChildStdout},
 };
 
 use serde_json::{Value, json};
-
-struct TempDirGuard(PathBuf);
-
-impl TempDirGuard {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn normalized(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn spawn_engine_stdio() -> (Child, ChildStdin, BufReader<ChildStdout>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verule-engine"))
-        .args(["serve", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn verule-engine serve --stdio");
-    let stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    (child, stdin, BufReader::new(stdout))
-}
-
-fn rpc_call(stdin: &mut ChildStdin, reader: &mut BufReader<ChildStdout>, request: &Value) -> Value {
-    let line = serde_json::to_string(request).expect("serialize request");
-    writeln!(stdin, "{line}").expect("write rpc line");
-    stdin.flush().expect("flush rpc line");
-    let mut resp = String::new();
-    let bytes = reader.read_line(&mut resp).expect("read rpc response");
-    assert!(bytes > 0, "expected RPC response line, got EOF");
-    serde_json::from_str(&resp).expect("valid JSON response")
-}
-
-fn write_sample_project(root: &Path) -> (String, String) {
-    let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir).expect("create src dir");
-
-    let tsconfig_path = root.join("tsconfig.json");
-    fs::write(
-        &tsconfig_path,
-        r#"{
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext"
-  },
-  "include": ["src/**/*.ts"]
-}
-"#,
-    )
-    .expect("write tsconfig");
-
-    let sample_source = [
-        "function sink(value: string | number): string {",
-        "  return String(value);",
-        "}",
-        "export function classify(input: string | number): string {",
-        "  if (typeof input === \"string\") {",
-        "    const _prefix = \"中文😀\"; return sink(input);",
-        "  }",
-        "  return sink(input);",
-        "}",
-        "",
-    ]
-    .join("\n");
-    fs::write(src_dir.join("sample.ts"), &sample_source).expect("write sample.ts");
-    (normalized(&tsconfig_path), sample_source)
-}
+use support::{TempDirGuard, finish_engine, normalized, rpc_call, spawn_engine_stdio};
 
 fn open_snapshot(
     stdin: &mut ChildStdin,
@@ -128,10 +42,18 @@ fn open_snapshot(
     (snapshot_id, project_id, source_files)
 }
 
+fn convert_file_to_crlf(path: &Path) {
+    let text = fs::read_to_string(path).expect("read file for crlf conversion");
+    let crlf_text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    fs::write(path, crlf_text).expect("write crlf file");
+}
+
 #[test]
 fn serves_narrowed_type_queries_and_utf16_locations() {
-    let temp = TempDirGuard::new("verule-engine-serve-types");
-    let (tsconfig_str, sample_source) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-types", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
+    let sample_source =
+        fs::read_to_string(temp.path().join("src/sample.ts")).expect("read sample.ts");
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -176,11 +98,12 @@ fn serves_narrowed_type_queries_and_utf16_locations() {
 
     let first_loc = &sink_calls[0]["location"];
     assert_eq!(first_loc["file"], json!("src/sample.ts"));
-    assert_eq!(first_loc["line"], json!(6));
-    let line6 = "    const _prefix = \"中文😀\"; return sink(input);";
-    let prefix = line6.split("sink(input)").next().expect("prefix");
+    assert_eq!(first_loc["line"], json!(7));
+    let line7 = sample_source.lines().nth(6).expect("line 7 in sample.ts");
+    let prefix = line7.split("sink(input)").next().expect("prefix");
     let expected_col = u32::try_from(prefix.encode_utf16().count()).expect("fits u32") + 1;
     assert_eq!(first_loc["column"], json!(expected_col));
+    assert_eq!(first_loc["column"], json!(20));
     let start_byte = usize::try_from(first_loc["start"].as_u64().expect("start")).expect("usize");
     let end_byte = usize::try_from(first_loc["end"].as_u64().expect("end")).expect("usize");
     assert_eq!(&sample_source[start_byte..end_byte], "sink(input)");
@@ -211,19 +134,13 @@ fn serves_narrowed_type_queries_and_utf16_locations() {
     assert_eq!(types[0]["typeText"], json!("string"));
     assert_eq!(types[1]["typeText"], json!("number"));
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn rejects_stale_snapshots_and_invalid_project_configs() {
-    let temp = TempDirGuard::new("verule-engine-serve-errors");
-    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-errors", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -298,56 +215,7 @@ fn rejects_stale_snapshots_and_invalid_project_configs() {
     assert_eq!(bad_resp["ok"], json!(false));
     assert_eq!(bad_resp["error"]["code"], json!("PROJECT_LOAD_ERROR"));
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn write_cfg_project(root: &Path) -> String {
-    let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir).expect("create src dir");
-    let tsconfig_path = root.join("tsconfig.json");
-    fs::write(
-        &tsconfig_path,
-        r#"{
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext"
-  },
-  "include": ["src/**/*.ts"]
-}
-"#,
-    )
-    .expect("write tsconfig");
-
-    let source = [
-        "declare function hasKey(req: string): boolean;",
-        "declare function hasToken(req: string): boolean;",
-        "declare function verify(): void;",
-        "declare function sink(req: string): void;",
-        "export function joint(req: string): void {",
-        "  if (hasKey(req)) { verify(); } else if (hasToken(req)) { verify(); } else { return; }",
-        "  sink(req);",
-        "}",
-        "export function dead(req: string): void {",
-        "  if (hasKey(req)) { verify(); }",
-        "  return;",
-        "  sink(req);",
-        "}",
-        "export function unmodeled(req: string): void {",
-        "  try { if (hasKey(req)) { sink(req); } } catch (_e) {}",
-        "}",
-        "",
-    ]
-    .join("\n");
-    fs::write(src_dir.join("cfg.ts"), source).expect("write cfg.ts");
-    normalized(&tsconfig_path)
+    finish_engine(child, stdin);
 }
 
 fn collect_cfg_handles(
@@ -395,8 +263,8 @@ fn collect_cfg_handles(
 
 #[test]
 fn serves_list_branches_and_branch_coverage_statuses() {
-    let temp = TempDirGuard::new("verule-engine-serve-cfg");
-    let tsconfig_str = write_cfg_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-cfg", "cfg");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
     let (snapshot_id, project_id, _) =
@@ -477,60 +345,19 @@ fn serves_list_branches_and_branch_coverage_statuses() {
         json!("unmodeled-try-catch")
     );
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn write_projection_fixture(root: &Path) -> (String, String) {
-    let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir).expect("create src dir");
-    let tsconfig_path = root.join("tsconfig.json");
-    fs::write(
-        &tsconfig_path,
-        r#"{
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext"
-  },
-  "include": ["src/**/*.ts"]
-}
-"#,
-    )
-    .expect("write tsconfig");
-
-    let source = [
-        "export function id<T>(x: T): T { return x; }",
-        "export function empty(): void {}",
-        "declare const dyn: any;",
-        "export function run(s: string, u: string | number) {",
-        "  const a = id(s);",
-        "  const b = empty();",
-        "  const c = dyn(u);",
-        "  return { a, b, c };",
-        "}",
-        "",
-    ]
-    .join("\n");
-    fs::write(src_dir.join("mod.ts"), &source).expect("write mod.ts");
-    (normalized(root), normalized(&tsconfig_path))
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn projects_overloads_generics_assignability_and_three_state_fields() {
-    let temp = TempDirGuard::new("verule-engine-serve-projection");
-    let (cwd_str, tsconfig_str) = write_projection_fixture(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-projection", "projection");
+    let cwd_str = normalized(temp.path());
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
     let (snapshot_id, project_id, _) =
         open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
 
-    // Range-scoped findSyntax on lines 5-7 of src/mod.ts
+    // Range-scoped findSyntax on lines 11-13 of src/mod.ts
     let syntax_resp = rpc_call(
         &mut stdin,
         &mut reader,
@@ -543,7 +370,7 @@ fn projects_overloads_generics_assignability_and_three_state_fields() {
                 "steps": [{
                     "op": "findSyntax",
                     "kinds": ["CallExpression"],
-                    "range": { "file": "src/mod.ts", "startLine": 5, "endLine": 7 }
+                    "range": { "file": "src/mod.ts", "startLine": 11, "endLine": 13 }
                 }]
             }
         }),
@@ -626,19 +453,13 @@ fn projects_overloads_generics_assignability_and_three_state_fields() {
         json!("INVALID_REFERENCE_KIND")
     );
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn updates_snapshots_and_invalidates_stale_handles() {
-    let temp = TempDirGuard::new("verule-engine-serve-update");
-    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-update", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let unrelated_path = temp.path().join("src").join("unrelated.ts");
     fs::write(&unrelated_path, "export const untouched = 1;\n").expect("write unrelated.ts");
     let cwd_str = normalized(temp.path());
@@ -727,19 +548,13 @@ fn updates_snapshots_and_invalidates_stale_handles() {
         "STALE_REFERENCE",
     );
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn recovers_from_broken_tsconfig_on_snapshot_update() {
-    let temp = TempDirGuard::new("verule-engine-serve-recover");
-    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-recover", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -782,13 +597,7 @@ fn recovers_from_broken_tsconfig_on_snapshot_update() {
         snap1
     );
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 fn assert_stale_type_query(
@@ -819,8 +628,8 @@ fn assert_stale_type_query(
 
 #[test]
 fn emits_observation_metrics_in_summary_and_omits_when_off() {
-    let temp = TempDirGuard::new("verule-engine-serve-observe-summary");
-    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-observe-summary", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -886,19 +695,13 @@ fn emits_observation_metrics_in_summary_and_omits_when_off() {
     assert_eq!(off_resp["ok"], json!(true));
     assert!(off_resp.get("metrics").is_none());
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn truncates_observation_details_by_items_and_bytes() {
-    let temp = TempDirGuard::new("verule-engine-serve-observe-limit");
-    let (tsconfig_str, _) = write_sample_project(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-serve-observe-limit", "sample");
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -955,80 +758,15 @@ fn truncates_observation_details_by_items_and_bytes() {
             >= 1
     );
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn scans_inline_ignore_directives_across_comments_jsx_crlf_and_excludes_jsdoc_and_strings() {
-    let temp = TempDirGuard::new("verule-engine-serve-directives");
-    let src_dir = temp.path().join("src");
-    fs::create_dir_all(&src_dir).expect("create src dir");
+    let temp = TempDirGuard::from_host("verule-engine-serve-directives", "inline-ignore");
+    convert_file_to_crlf(&temp.path().join("src/app.ts"));
 
-    let tsconfig_path = temp.path().join("tsconfig.json");
-    fs::write(
-        &tsconfig_path,
-        r#"{
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "jsx": "react-jsx"
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
-}
-"#,
-    )
-    .expect("write tsconfig");
-
-    let crlf_source = [
-        "declare function sink(v: string): void;",
-        "/** verule-ignore-next-code-line r1 -- JSDoc example must not match */",
-        "export function demo(): void {",
-        "  // verule-ignore-next-code-line r1 -- Line reason",
-        "  sink(\"ok\");",
-        "  /* verule-ignore-next-code-line r2 --",
-        "   * Block reason",
-        "   */",
-        "  // leading note",
-        "  sink(\"ok\");",
-        "  // verule-ignore-next-code-line r3 -- Blank line truncates",
-        "",
-        "  sink(\"ok\");",
-        "  // verule-ignore-next-code-line r1 r2 -- malformed multiple IDs",
-        "  const s = \"// verule-ignore-next-code-line r1 -- inside string\";",
-        "  void s;",
-        "}",
-        "",
-    ]
-    .join("\r\n");
-    fs::write(src_dir.join("app.ts"), crlf_source).expect("write app.ts");
-
-    fs::write(
-        src_dir.join("view.tsx"),
-        [
-            "declare function Item(): unknown;",
-            "export function View() {",
-            "  return (",
-            "    <div>",
-            "      {/* verule-ignore-next-code-line r-jsx -- JSX comment */}",
-            "      <Item />",
-            "    </div>",
-            "  );",
-            "}",
-            "",
-        ]
-        .join("\n"),
-    )
-    .expect("write view.tsx");
-
-    let tsconfig_str = normalized(&tsconfig_path);
+    let tsconfig_str = normalized(&temp.path().join("tsconfig.json"));
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
     let (snapshot_id, _, _) = open_snapshot(&mut stdin, &mut reader, &cwd_str, &tsconfig_str);
@@ -1063,13 +801,7 @@ fn scans_inline_ignore_directives_across_comments_jsx_crlf_and_excludes_jsdoc_an
     assert_eq!(directives[4]["kind"], json!("valid"));
     assert_eq!(directives[4]["ruleId"], json!("r-jsx"));
     assert_eq!(directives[4]["at"]["file"], json!("src/view.tsx"));
-    assert_eq!(directives[4]["targetLine"], json!(6));
+    assert_eq!(directives[4]["targetLine"], json!(7));
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }

@@ -1,160 +1,23 @@
+mod support;
+
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    io::{BufReader, Write as _},
+    path::Path,
+    process::{ChildStdin, ChildStdout},
 };
 
 use serde_json::{Value, json};
+use support::{
+    TempDirGuard, copy_dir_recursive, copy_host_scenario, finish_engine, normalized, rpc_call,
+    spawn_engine_stdio,
+};
 
-struct TempDirGuard(PathBuf);
-
-impl TempDirGuard {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn normalized(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn spawn_engine_stdio() -> (Child, ChildStdin, BufReader<ChildStdout>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verule-engine"))
-        .args(["serve", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn verule-engine serve --stdio");
-    let stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    (child, stdin, BufReader::new(stdout))
-}
-
-fn rpc_call(stdin: &mut ChildStdin, reader: &mut BufReader<ChildStdout>, request: &Value) -> Value {
-    let line = serde_json::to_string(request).expect("serialize request");
-    writeln!(stdin, "{line}").expect("write rpc line");
-    stdin.flush().expect("flush rpc line");
-    let mut resp = String::new();
-    let bytes = reader.read_line(&mut resp).expect("read rpc response");
-    assert!(bytes > 0, "expected RPC response line, got EOF");
-    serde_json::from_str(&resp).expect("valid JSON response")
-}
-
-fn write_aggregate_and_divergent_runtime_fixture(root: &Path) {
-    fs::create_dir_all(root.join("packages/shared")).expect("create shared dir");
-    fs::create_dir_all(root.join("packages/web/src")).expect("create web dir");
-    fs::create_dir_all(root.join("packages/node/src")).expect("create node dir");
-    fs::create_dir_all(root.join("node_modules/ext-pkg")).expect("create node_modules dir");
-
-    fs::write(
-        root.join("node_modules/ext-pkg/index.d.ts"),
-        "export declare const extFlag: boolean;\n",
-    )
-    .expect("write ext-pkg d.ts");
-
-    fs::write(
-        root.join("packages/shared/shared.ts"),
-        [
-            "import { mode } from \"@runtime\";",
-            "import { extFlag } from \"ext-pkg\";",
-            "",
-            "function inspectRuntime(value: string): boolean {",
-            "  return value.length > 0 && extFlag;",
-            "}",
-            "",
-            "export const active = inspectRuntime(mode);",
-            "",
-        ]
-        .join("\n"),
-    )
-    .expect("write shared.ts");
-
-    fs::write(
-        root.join("packages/web/src/web.ts"),
-        "export const mode = \"web\" as const;\n",
-    )
-    .expect("write web.ts");
-
-    fs::write(
-        root.join("packages/node/src/node.ts"),
-        "export const mode = \"node\" as const;\n",
-    )
-    .expect("write node.ts");
-
-    fs::write(
-        root.join("packages/web/tsconfig.json"),
-        serde_json::to_string_pretty(&json!({
-            "compilerOptions": {
-                "composite": true,
-                "strict": true,
-                "target": "ES2022",
-                "module": "NodeNext",
-                "moduleResolution": "NodeNext",
-                "baseUrl": ".",
-                "paths": {
-                    "@runtime": ["./src/web.ts"],
-                    "ext-pkg": ["../../node_modules/ext-pkg/index.d.ts"]
-                }
-            },
-            "include": ["src/**/*.ts", "../shared/shared.ts"]
-        }))
-        .expect("serialize web tsconfig"),
-    )
-    .expect("write web tsconfig");
-
-    fs::write(
-        root.join("packages/node/tsconfig.json"),
-        serde_json::to_string_pretty(&json!({
-            "compilerOptions": {
-                "composite": true,
-                "strict": false,
-                "allowJs": true,
-                "target": "ES2022",
-                "module": "NodeNext",
-                "moduleResolution": "NodeNext",
-                "baseUrl": ".",
-                "paths": {
-                    "@runtime": ["./src/node.ts"],
-                    "ext-pkg": ["../../node_modules/ext-pkg/index.d.ts"]
-                }
-            },
-            "include": ["src/**/*.ts", "../shared/shared.ts"]
-        }))
-        .expect("serialize node tsconfig"),
-    )
-    .expect("write node tsconfig");
-
-    fs::write(
-        root.join("tsconfig.json"),
-        serde_json::to_string_pretty(&json!({
-            "files": [],
-            "references": [
-                { "path": "./packages/web" },
-                { "path": "./packages/node" }
-            ]
-        }))
-        .expect("serialize root tsconfig"),
-    )
-    .expect("write root tsconfig");
+fn materialize_vendor_packages(root: &Path) {
+    let vendor_pkg = root.join("vendor/ext-pkg");
+    let node_modules_pkg = root.join("node_modules/ext-pkg");
+    copy_dir_recursive(&vendor_pkg, &node_modules_pkg);
+    fs::remove_dir_all(root.join("vendor")).expect("remove vendor dir after materializing");
 }
 
 fn assert_runtime_literal_type(
@@ -223,8 +86,8 @@ fn assert_runtime_literal_type(
 
 #[test]
 fn discovers_references_recursively_tracks_provenance_and_isolates_types() {
-    let temp = TempDirGuard::new("verule-engine-projects-agg");
-    write_aggregate_and_divergent_runtime_fixture(temp.path());
+    let temp = TempDirGuard::from_host("verule-engine-projects-agg", "multi-project");
+    materialize_vendor_packages(temp.path());
     let cwd_str = normalized(temp.path());
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
 
@@ -307,58 +170,34 @@ fn discovers_references_recursively_tracks_provenance_and_isolates_types() {
     assert_runtime_literal_type(&mut stdin, &mut reader, snapshot_id, web_proj, 2, "web");
     assert_runtime_literal_type(&mut stdin, &mut reader, snapshot_id, node_proj, 3, "node");
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
 
 #[test]
 fn handles_nested_and_cyclic_references_without_looping_and_opens_jsconfig() {
     let temp = TempDirGuard::new("verule-engine-projects-cycles");
     let root = temp.path();
-    fs::create_dir_all(root.join("a")).expect("create a");
-    fs::create_dir_all(root.join("b")).expect("create b");
-    fs::create_dir_all(root.join("jsapp")).expect("create jsapp");
+    copy_host_scenario("jsapp", &root.join("jsapp"));
 
-    fs::write(root.join("a/a.ts"), "export const aVal = 1;\n").expect("write a.ts");
-    fs::write(root.join("b/b.ts"), "export const bVal = 2;\n").expect("write b.ts");
-    fs::write(root.join("jsapp/index.js"), "export const jsVal = 'ok';\n").expect("write index.js");
-
-    fs::write(
-        root.join("a/tsconfig.json"),
-        serde_json::to_string_pretty(&json!({
+    // Intentional circular tsconfig graph placeholders kept inline so checked hosts stay acyclic.
+    for (dir, file, val, peer) in [
+        ("a", "a.ts", "export const aVal = 1;\n", "../b"),
+        ("b", "b.ts", "export const bVal = 2;\n", "../a"),
+    ] {
+        fs::create_dir_all(root.join(dir)).expect("create cyclic dir");
+        fs::write(root.join(dir).join(file), val).expect("write placeholder ts");
+        let mut tsconfig =
+            fs::File::create(root.join(dir).join("tsconfig.json")).expect("create cyclic tsconfig");
+        let config_json = serde_json::to_string_pretty(&json!({
             "compilerOptions": { "composite": true, "strict": true },
-            "include": ["./a.ts"],
-            "references": [{ "path": "../b", "circular": true }]
+            "include": [format!("./{file}")],
+            "references": [{ "path": peer, "circular": true }]
         }))
-        .expect("serialize a tsconfig"),
-    )
-    .expect("write a tsconfig");
-
-    fs::write(
-        root.join("b/tsconfig.json"),
-        serde_json::to_string_pretty(&json!({
-            "compilerOptions": { "composite": true, "strict": true },
-            "include": ["./b.ts"],
-            "references": [{ "path": "../a", "circular": true }]
-        }))
-        .expect("serialize b tsconfig"),
-    )
-    .expect("write b tsconfig");
-
-    fs::write(
-        root.join("jsapp/jsconfig.json"),
-        serde_json::to_string_pretty(&json!({
-            "compilerOptions": { "checkJs": false },
-            "include": ["./index.js"]
-        }))
-        .expect("serialize jsconfig"),
-    )
-    .expect("write jsconfig");
+        .expect("serialize cyclic tsconfig");
+        tsconfig
+            .write_all(config_json.as_bytes())
+            .expect("write cyclic tsconfig");
+    }
 
     let cwd_str = normalized(root);
     let (child, mut stdin, mut reader) = spawn_engine_stdio();
@@ -403,11 +242,5 @@ fn handles_nested_and_cyclic_references_without_looping_and_opens_jsconfig() {
     assert_eq!(proj_js["sourceFiles"], json!(["jsapp/index.js"]));
     assert_eq!(proj_js["compilerOptions"]["allowJs"], json!(true));
 
-    drop(stdin);
-    let output = child.wait_with_output().expect("wait for engine exit");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    finish_engine(child, stdin);
 }
