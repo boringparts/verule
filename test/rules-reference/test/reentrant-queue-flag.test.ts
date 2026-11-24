@@ -599,4 +599,132 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  void it("handles !== 0, != 0, !== false, != false, == 0, 0 ===, 0 !==, and > 0 guard polarities without inverting branches", async () => {
+    const root = createTempProject({
+      "src/scheduler.ts": [
+        "const enum JobFlags { QUEUED = 1, ALLOW_RECURSE = 2 }",
+        "interface Job { (): void; flags: number }",
+        "const queue: Job[] = [];",
+        "",
+        "export function enqueueJob(job: Job): void {",
+        "  if (!(job.flags & JobFlags.QUEUED)) {",
+        "    queue.push(job);",
+        "    job.flags |= JobFlags.QUEUED;",
+        "  }",
+        "}",
+        "",
+        "export function legalStrictNotZeroContinue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) !== 0) continue;",
+        "    job.flags &= ~JobFlags.QUEUED;",
+        "  }",
+        "}",
+        "",
+        "export function illegalStrictNotZeroClearInsideTrue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) !== 0) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "export function legalLooseNotZeroContinue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) != 0) continue;",
+        "    job.flags &= ~JobFlags.QUEUED;",
+        "  }",
+        "}",
+        "",
+        "export function illegalLooseNotZeroClearInsideTrue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) != 0) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "export function legalNotFalseContinue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if (Boolean(job.flags & JobFlags.ALLOW_RECURSE) !== false) continue;",
+        "    job.flags &= ~JobFlags.QUEUED;",
+        "  }",
+        "}",
+        "",
+        "export function illegalNotFalseClearInsideTrue(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if (Boolean(job.flags & JobFlags.ALLOW_RECURSE) !== false) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "    if (Boolean(job.flags & JobFlags.ALLOW_RECURSE) != false) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "export function legalZeroLeftAndLooseEqAndGtZero(): void {",
+        "  for (let i = 0; i < queue.length; i++) {",
+        "    const job = queue[i];",
+        "    job();",
+        "    if (0 === (job.flags & JobFlags.ALLOW_RECURSE)) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) == 0) {",
+        "      job.flags &= ~JobFlags.QUEUED;",
+        "    }",
+        "    if (0 !== (job.flags & JobFlags.ALLOW_RECURSE)) continue;",
+        "    if ((job.flags & JobFlags.ALLOW_RECURSE) > 0) continue;",
+        "    job.flags &= ~JobFlags.QUEUED;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    const model = defineReentrantQueueModel({
+      id: "inequality-polarity-queue",
+      contracts: [
+        {
+          queueName: "job-queue",
+          enqueueFunctionName: "enqueueJob",
+          queueIdentifier: "queue",
+          flagProperty: "flags",
+          queuedFlagName: "QUEUED",
+          reentrantFlagName: "ALLOW_RECURSE",
+        },
+      ],
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          models: [model],
+          rules: [reentrantQueueFlagRule],
+        }),
+      });
+
+      assert.equal(report.status, "findings");
+      assert.deepEqual(
+        report.diagnostics.map((d) => d.at.line),
+        [26, 45, 64, 67],
+        JSON.stringify(report.diagnostics),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

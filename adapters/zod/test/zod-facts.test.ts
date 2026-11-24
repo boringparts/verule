@@ -1313,7 +1313,7 @@ void describe("@verule/adapter-zod", () => {
     }
   });
 
-  void it("records resolved_by_override localGaps for runtimeFieldValidator().default(21), .and(), and .pipe() overrides", async () => {
+  void it("enforces sound input vs output gap semantics for runtimeFieldValidator().default(21), .and(), z.intersection(), .pipe(), and z.pipe()", async () => {
     const root = createTempProject({
       "src/combinators.ts": [
         'import { z } from "zod";',
@@ -1330,19 +1330,36 @@ void describe("@verule/adapter-zod", () => {
         "  age: runtimeFieldValidator(),",
         "});",
         "",
-        "export const andOverrideSchema = andBaseSchema.and(",
+        "export const andDefaultedSchema = andBaseSchema.and(",
         "  z.object({ age: z.number().default(21) }),",
+        ");",
+        "",
+        "export const andRequiredSchema = andBaseSchema.and(",
+        "  z.object({ age: z.number() }),",
         ");",
         "",
         "export const pipeOverrideSchema = andBaseSchema.pipe(",
         "  z.object({ id: z.string(), age: z.number().default(21) }),",
         ");",
         "",
+        "export const staticIntersectionSchema = z.intersection(",
+        "  andBaseSchema,",
+        "  z.object({ age: z.number().default(21) }),",
+        ");",
+        "",
+        "export const staticPipeSchema = z.pipe(",
+        "  andBaseSchema,",
+        "  z.object({ id: z.string(), age: z.number().default(21) }),",
+        ");",
+        "",
         "export function validateCombinators(input: unknown) {",
         "  return {",
         "    modifier: modifierOverrideSchema.parse(input),",
-        "    and: andOverrideSchema.parse(input),",
+        "    andDefaulted: andDefaultedSchema.parse(input),",
+        "    andRequired: andRequiredSchema.parse(input),",
         "    pipe: pipeOverrideSchema.parse(input),",
+        "    zIntersection: staticIntersectionSchema.parse(input),",
+        "    zPipe: staticPipeSchema.parse(input),",
         "  };",
         "}",
         "",
@@ -1358,11 +1375,23 @@ void describe("@verule/adapter-zod", () => {
       "syntax" | "call" | "declaration",
       ValidatorInputFieldsFactValue
     >[] = [];
+    let outputResults: readonly FactResult<
+      "syntax" | "call" | "declaration",
+      ValidatorOutputFieldsFactValue
+    >[] = [];
 
-    const rule = defineRule({
-      id: "inspect-modifier-and-combinator-overrides",
+    const inputRule = defineRule({
+      id: "inspect-combinators-input",
       run: async (ctx) => {
         inputResults = await ctx.facts(ValidatorInputFieldsFact, {
+          condition: { scope: "calls" },
+        });
+      },
+    });
+    const outputRule = defineRule({
+      id: "inspect-combinators-output",
+      run: async (ctx) => {
+        outputResults = await ctx.facts(ValidatorOutputFieldsFact, {
           condition: { scope: "calls" },
         });
       },
@@ -1373,34 +1402,111 @@ void describe("@verule/adapter-zod", () => {
       config: defineConfig({
         tsconfig: "tsconfig.json",
         adapters: ["@verule/adapter-zod"],
-        rules: [rule],
+        rules: [inputRule, outputRule],
       }),
     });
 
     try {
       const checkReport = await session.check();
       assert.equal(checkReport.status, "clean");
-      assert.deepEqual(checkReport.gaps, []);
+      // Global gaps keep active unresolved-schema-field on input of andDefaultedSchema and pipeOverrideSchema.
+      assert.ok(
+        checkReport.gaps.some(
+          (g) => g.kind === "unresolved-schema-field" && g.at?.line === 12,
+        ),
+        JSON.stringify(checkReport.gaps),
+      );
 
-      for (const schemaName of [
-        "modifierOverrideSchema",
-        "andOverrideSchema",
-        "pipeOverrideSchema",
-      ]) {
-        const fact = inputResults.find(
-          (f) => f.value.schemaName === schemaName,
+      const inputByName = (name: string) =>
+        inputResults.find((f) => f.value.schemaName === name);
+      const outputByName = (name: string) =>
+        outputResults.find((f) => f.value.schemaName === name);
+
+      // 1. Field modifier .default(21) resolves BOTH input and output.
+      const modIn = inputByName("modifierOverrideSchema")!;
+      const modOut = outputByName("modifierOverrideSchema")!;
+      assert.deepEqual(modIn.gaps, []);
+      assert.deepEqual(modIn.value.defaultedFields, ["age"]);
+      assert.equal(modIn.value.hasDynamicFields, false);
+      assert.deepEqual(modOut.gaps, []);
+      assert.deepEqual(modOut.value.presentFields, ["age", "id"]);
+      assert.deepEqual(modOut.value.defaultedFields, ["age"]);
+      assert.equal(modOut.value.hasDynamicFields, false);
+
+      // 2. .and({ age: z.number().default(21) }) keeps input gap (unknown) while resolving output.
+      const andDefIn = inputByName("andDefaultedSchema")!;
+      const andDefOut = outputByName("andDefaultedSchema")!;
+      assert.deepEqual(andDefIn.value.requiredFields, ["id"]);
+      assert.deepEqual(andDefIn.value.optionalFields, []);
+      assert.deepEqual(andDefIn.value.defaultedFields, []);
+      assert.equal(andDefIn.value.fields.age, undefined);
+      assert.equal(andDefIn.value.hasDynamicFields, true);
+      assert.ok(
+        andDefIn.gaps.some(
+          (g) => g.kind === "unresolved-schema-field" && g.at?.line === 12,
+        ),
+        JSON.stringify(andDefIn.gaps),
+      );
+      assert.deepEqual(andDefOut.gaps, []);
+      assert.deepEqual(andDefOut.value.presentFields, ["age", "id"]);
+      assert.deepEqual(andDefOut.value.defaultedFields, ["age"]);
+      assert.equal(andDefOut.value.hasDynamicFields, false);
+
+      // 3. .and({ age: z.number() }) (Required) resolves BOTH input (Required) and output (Present).
+      const andReqIn = inputByName("andRequiredSchema")!;
+      const andReqOut = outputByName("andRequiredSchema")!;
+      assert.deepEqual(andReqIn.gaps, []);
+      assert.deepEqual(andReqIn.value.requiredFields, ["age", "id"]);
+      assert.equal(andReqIn.value.hasDynamicFields, false);
+      assert.deepEqual(andReqOut.gaps, []);
+      assert.deepEqual(andReqOut.value.presentFields, ["age", "id"]);
+      assert.equal(andReqOut.value.hasDynamicFields, false);
+
+      // 4. .pipe({ id, age: z.number().default(21) }) and z.pipe(...) keep inputSchema's gap on input, resolve output.
+      for (const pipeName of ["pipeOverrideSchema", "staticPipeSchema"]) {
+        const pipeIn = inputByName(pipeName)!;
+        const pipeOut = outputByName(pipeName)!;
+        assert.deepEqual(pipeIn.value.requiredFields, ["id"]);
+        assert.deepEqual(pipeIn.value.defaultedFields, []);
+        assert.equal(pipeIn.value.fields.age, undefined);
+        assert.equal(pipeIn.value.hasDynamicFields, true);
+        assert.ok(
+          pipeIn.gaps.some(
+            (g) => g.kind === "unresolved-schema-field" && g.at?.line === 12,
+          ),
+          JSON.stringify(pipeIn.gaps),
         );
-        assert.ok(fact, `Expected fact for ${schemaName}`);
-        assert.deepEqual(fact.gaps, []);
-        assert.deepEqual(fact.value.defaultedFields, ["age"]);
+        assert.deepEqual(pipeOut.gaps, []);
+        assert.deepEqual(pipeOut.value.presentFields, ["age", "id"]);
+        assert.deepEqual(pipeOut.value.defaultedFields, ["age"]);
+        assert.equal(pipeOut.value.hasDynamicFields, false);
       }
 
-      const modExplain = await session.explain({
-        ruleId: "inspect-modifier-and-combinator-overrides",
-        at: "src/combinators.ts:25:15",
+      // 5. z.intersection(base, { age: z.number().default(21) }) matches .and() input vs output semantics.
+      const zIntIn = inputByName("staticIntersectionSchema")!;
+      const zIntOut = outputByName("staticIntersectionSchema")!;
+      assert.deepEqual(zIntIn.value.requiredFields, ["id"]);
+      assert.deepEqual(zIntIn.value.defaultedFields, []);
+      assert.equal(zIntIn.value.fields.age, undefined);
+      assert.equal(zIntIn.value.hasDynamicFields, true);
+      assert.ok(
+        zIntIn.gaps.some(
+          (g) => g.kind === "unresolved-schema-field" && g.at?.line === 12,
+        ),
+        JSON.stringify(zIntIn.gaps),
+      );
+      assert.deepEqual(zIntOut.gaps, []);
+      assert.deepEqual(zIntOut.value.presentFields, ["age", "id"]);
+      assert.deepEqual(zIntOut.value.defaultedFields, ["age"]);
+      assert.equal(zIntOut.value.hasDynamicFields, false);
+
+      // Targeted explain checks on input vs output rules:
+      const modInExplain = await session.explain({
+        ruleId: "inspect-combinators-input",
+        at: "src/combinators.ts:39:15",
       });
       assert.ok(
-        modExplain.explanation.localGaps.some(
+        modInExplain.explanation.localGaps.some(
           (lg) =>
             lg.status === "resolved_by_override" &&
             lg.field === "age" &&
@@ -1409,15 +1515,47 @@ void describe("@verule/adapter-zod", () => {
             lg.resolvedBy.operation === ".default()" &&
             lg.resolvedBy.at?.line === 7,
         ),
-        JSON.stringify(modExplain.explanation.localGaps),
+        JSON.stringify(modInExplain.explanation.localGaps),
       );
 
-      const andExplain = await session.explain({
-        ruleId: "inspect-modifier-and-combinator-overrides",
-        at: "src/combinators.ts:26:10",
+      const modOutExplain = await session.explain({
+        ruleId: "inspect-combinators-output",
+        at: "src/combinators.ts:39:15",
       });
       assert.ok(
-        andExplain.explanation.localGaps.some(
+        modOutExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 7 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".default()" &&
+            lg.resolvedBy.at?.line === 7,
+        ),
+        JSON.stringify(modOutExplain.explanation.localGaps),
+      );
+
+      const andDefInExplain = await session.explain({
+        ruleId: "inspect-combinators-input",
+        at: "src/combinators.ts:40:19",
+      });
+      assert.ok(
+        andDefInExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === 12,
+        ),
+        JSON.stringify(andDefInExplain.explanation.localGaps),
+      );
+
+      const andDefOutExplain = await session.explain({
+        ruleId: "inspect-combinators-output",
+        at: "src/combinators.ts:40:19",
+      });
+      assert.ok(
+        andDefOutExplain.explanation.localGaps.some(
           (lg) =>
             lg.status === "resolved_by_override" &&
             lg.field === "age" &&
@@ -1426,24 +1564,56 @@ void describe("@verule/adapter-zod", () => {
             lg.resolvedBy.operation === ".and()" &&
             lg.resolvedBy.at?.line === 16,
         ),
-        JSON.stringify(andExplain.explanation.localGaps),
+        JSON.stringify(andDefOutExplain.explanation.localGaps),
       );
 
-      const pipeExplain = await session.explain({
-        ruleId: "inspect-modifier-and-combinator-overrides",
-        at: "src/combinators.ts:27:11",
+      const andReqInExplain = await session.explain({
+        ruleId: "inspect-combinators-input",
+        at: "src/combinators.ts:41:18",
       });
       assert.ok(
-        pipeExplain.explanation.localGaps.some(
+        andReqInExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "resolved_by_override" &&
+            lg.field === "age" &&
+            lg.gap.at?.line === 12 &&
+            lg.resolvedBy?.providerId === "zod" &&
+            lg.resolvedBy.operation === ".and()" &&
+            lg.resolvedBy.at?.line === 20,
+        ),
+        JSON.stringify(andReqInExplain.explanation.localGaps),
+      );
+
+      const pipeInExplain = await session.explain({
+        ruleId: "inspect-combinators-input",
+        at: "src/combinators.ts:42:11",
+      });
+      assert.ok(
+        pipeInExplain.explanation.localGaps.some(
+          (lg) =>
+            lg.status === "unresolved" &&
+            lg.field === "age" &&
+            lg.gap.kind === "unresolved-schema-field" &&
+            lg.gap.at?.line === 12,
+        ),
+        JSON.stringify(pipeInExplain.explanation.localGaps),
+      );
+
+      const pipeOutExplain = await session.explain({
+        ruleId: "inspect-combinators-output",
+        at: "src/combinators.ts:42:11",
+      });
+      assert.ok(
+        pipeOutExplain.explanation.localGaps.some(
           (lg) =>
             lg.status === "resolved_by_override" &&
             lg.field === "age" &&
             lg.gap.at?.line === 12 &&
             lg.resolvedBy?.providerId === "zod" &&
             lg.resolvedBy.operation === ".pipe()" &&
-            lg.resolvedBy.at?.line === 20,
+            lg.resolvedBy.at?.line === 24,
         ),
-        JSON.stringify(pipeExplain.explanation.localGaps),
+        JSON.stringify(pipeOutExplain.explanation.localGaps),
       );
     } finally {
       await session.close();

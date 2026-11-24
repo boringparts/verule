@@ -164,8 +164,8 @@ function isZeroCheckCondition(conditionText: string): boolean {
     return !isZeroCheckCondition(normalized.slice(1));
   }
   return (
-    /(?:===|==)\s*(?:0|false)$/u.test(normalized) ||
-    /^(?:0|false)\s*(?:===|==)/u.test(normalized)
+    /(?<![!=])(?:===|==)\s*(?:0|false)$/u.test(normalized) ||
+    /^(?:0|false)\s*(?:===|==)(?!=)/u.test(normalized)
   );
 }
 

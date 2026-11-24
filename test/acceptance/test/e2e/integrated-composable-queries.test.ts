@@ -519,11 +519,52 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         await session.close();
       }
 
-      // Case C & D: field-modifier `.default(21)` and `.and(...)` / `.pipe(...)` overrides on `createSelectSchema`.
+      // Case C & D: sound input vs output semantics for field-modifier `.default(21)`, `.and(...)`, and `.pipe(...)` on `createSelectSchema`.
+      const integratedOutputExplainConfigPath =
+        "packages/app/verule.integrated-output-explain.config.ts";
+      host.writeText(
+        integratedOutputExplainConfigPath,
+        [
+          'import { ValidatorOutputFieldsFact } from "@verule/adapter-zod";',
+          'import { defineConfig, defineRule } from "@verule/sdk";',
+          "",
+          "const validatorOutputProbeRule = defineRule({",
+          '  id: "validator-output-fields-probe",',
+          "  run: async (ctx) => {",
+          '    const outputs = await ctx.facts(ValidatorOutputFieldsFact, { condition: { scope: "calls" } });',
+          "    for (const fact of outputs) {",
+          '      if (!fact.value.presentFields.includes("age")) {',
+          "        const calls = await ctx.syntaxOf([fact.subject], { select: { location: true } });",
+          "        const loc = calls[0]?.location;",
+          "        if (loc) {",
+          "          ctx.report({",
+          "            at: loc,",
+          '            message: `Expected output field "age" to be present on ${fact.value.schemaName ?? "schema"}.`,',
+          "            basis: [fact],",
+          "          });",
+          "        }",
+          "      }",
+          "    }",
+          "  },",
+          "});",
+          "",
+          "export default defineConfig({",
+          '  tsconfig: "packages/app/tsconfig.json",',
+          "  adapters: [",
+          '    "@verule/adapter-drizzle",',
+          '    "@verule/adapter-zod",',
+          '    "@verule/adapter-fixture",',
+          "  ],",
+          "  rules: [validatorOutputProbeRule],",
+          "});",
+          "",
+        ].join("\n"),
+      );
+
       host.replaceText(
         dataIndexRelPath,
         '  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
-        '  andOverriddenSchema,\n  modifierDefaultedSchema,\n  pipeOverriddenSchema,\n  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
+        '  andDefaultedSchema,\n  andRequiredSchema,\n  modifierDefaultedSchema,\n  pipeOverriddenSchema,\n  runtimeAgeSchema,\n  userSchema,\n} from "./drizzle-schema.ts";',
       );
       host.writeText(
         schemaRelPath,
@@ -536,9 +577,13 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
           "  age: runtimeFieldValidator().default(21),",
           "});",
           "",
-          "export const andOverriddenSchema = createSelectSchema(users, {",
+          "export const andDefaultedSchema = createSelectSchema(users, {",
           "  age: runtimeFieldValidator(),",
           "}).and(z.object({ age: z.number().default(21) }));",
+          "",
+          "export const andRequiredSchema = createSelectSchema(users, {",
+          "  age: runtimeFieldValidator(),",
+          "}).and(z.object({ age: z.number() }));",
           "",
           "export const pipeOverriddenSchema = createSelectSchema(users, {",
           "  age: runtimeFieldValidator(),",
@@ -550,7 +595,8 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         rowProjectionRelPath,
         [
           "import {",
-          "  andOverriddenSchema,",
+          "  andDefaultedSchema,",
+          "  andRequiredSchema,",
           "  getUserWithStatusNoAge,",
           "  modifierDefaultedSchema,",
           "  pipeOverriddenSchema,",
@@ -561,7 +607,8 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
           "  if (missingOnlyAge === undefined) return undefined;",
           "  return {",
           "    mod: modifierDefaultedSchema.parse(missingOnlyAge),",
-          "    and: andOverriddenSchema.parse(missingOnlyAge),",
+          "    andDef: andDefaultedSchema.parse(missingOnlyAge),",
+          "    andReq: andRequiredSchema.parse(missingOnlyAge),",
           "    pipe: pipeOverriddenSchema.parse(missingOnlyAge),",
           "  };",
           "}",
@@ -569,27 +616,72 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         ].join("\n"),
       );
 
-      const combinatorCheck = await host.check({
+      // Input rule check: andRequiredSchema reports missing `age`, while andDefaultedSchema and pipeOverriddenSchema keep unresolved gaps on `age`.
+      const combinatorInputCheck = await host.check({
         config: integratedExplainConfigPath,
       });
       assert.equal(
-        combinatorCheck.status,
-        0,
-        combinatorCheck.stderr + combinatorCheck.stdout,
+        combinatorInputCheck.status,
+        1,
+        combinatorInputCheck.stderr + combinatorInputCheck.stdout,
       );
-      assert.deepEqual(combinatorCheck.report.diagnostics, []);
-      assert.equal(
-        combinatorCheck.report.gaps.some(
-          (gap) => gap.kind === "unresolved-schema-field",
+      assert.equal(combinatorInputCheck.report.diagnostics.length, 1);
+      assert.match(
+        combinatorInputCheck.report.diagnostics[0]!.message,
+        /andRequiredSchema\.parse\(\).*required validator field "age"/u,
+      );
+      assert.ok(
+        combinatorInputCheck.report.gaps.some(
+          (gap) =>
+            gap.kind === "unresolved-schema-field" &&
+            gap.at?.file === schemaRelPath,
         ),
-        false,
-        JSON.stringify(combinatorCheck.report.gaps),
+        JSON.stringify(combinatorInputCheck.report.gaps),
       );
 
-      for (const [needle, expectedOp] of [
-        ["modifierDefaultedSchema.parse(missingOnlyAge)", ".default()"],
-        ["andOverriddenSchema.parse(missingOnlyAge)", ".and()"],
-        ["pipeOverriddenSchema.parse(missingOnlyAge)", ".pipe()"],
+      // Output rule check: ALL four schemas resolve `age` in presentFields with ZERO gaps!
+      const combinatorOutputCheck = await host.check({
+        config: integratedOutputExplainConfigPath,
+      });
+      assert.equal(
+        combinatorOutputCheck.status,
+        0,
+        combinatorOutputCheck.stderr + combinatorOutputCheck.stdout,
+      );
+      assert.deepEqual(combinatorOutputCheck.report.diagnostics, []);
+      assert.deepEqual(combinatorOutputCheck.report.gaps, []);
+
+      // Verify targeted explain for input rule at each combinator call:
+      for (const [
+        needle,
+        expectUnresolvedGap,
+        expectedLocalStatus,
+        expectedOp,
+      ] of [
+        [
+          "modifierDefaultedSchema.parse(missingOnlyAge)",
+          false,
+          "resolved_by_override",
+          ".default()",
+        ],
+        [
+          "andDefaultedSchema.parse(missingOnlyAge)",
+          true,
+          "unresolved",
+          undefined,
+        ],
+        [
+          "andRequiredSchema.parse(missingOnlyAge)",
+          false,
+          "resolved_by_override",
+          ".and()",
+        ],
+        [
+          "pipeOverriddenSchema.parse(missingOnlyAge)",
+          true,
+          "unresolved",
+          undefined,
+        ],
       ] as const) {
         const callAt = lineColOf(host, rowProjectionRelPath, needle);
         const explained = await host.check({
@@ -597,9 +689,68 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
           rule: "row-projection-satisfies-validator",
           at: callAt,
         });
+        assert.equal(explained.status, 1);
+        const exp = explained.report.explanation;
+        assert.ok(exp);
+        if (expectUnresolvedGap) {
+          assert.equal(exp.status, "blocked_by_gap");
+          assert.ok(
+            exp.gaps.some(
+              (g) =>
+                g.kind === "unresolved-schema-field" &&
+                g.at?.file === schemaRelPath,
+            ),
+            `Expected unresolved-schema-field gap for ${needle}: ${JSON.stringify(exp.gaps)}`,
+          );
+        } else {
+          assert.equal(
+            exp.gaps.some((g) => g.kind === "unresolved-schema-field"),
+            false,
+            `Unexpected unresolved-schema-field gap for ${needle}: ${JSON.stringify(exp.gaps)}`,
+          );
+          if (needle.startsWith("andRequiredSchema")) {
+            assert.equal(exp.status, "reported");
+          } else {
+            assert.ok(
+              exp.checkpoints.some(
+                (cp) =>
+                  cp.name === "row-projection-satisfied" &&
+                  cp.outcome === "pass",
+              ),
+              `Expected row-projection-satisfied pass checkpoint for ${needle}: ${JSON.stringify(exp.checkpoints)}`,
+            );
+          }
+        }
+        assert.ok(
+          exp.localGaps.some(
+            (lg) =>
+              lg.status === expectedLocalStatus &&
+              lg.field === "age" &&
+              (expectedOp === undefined ||
+                (lg.resolvedBy?.providerId === "zod" &&
+                  lg.resolvedBy.operation === expectedOp)),
+          ),
+          `Unexpected input localGaps for ${needle}: ${JSON.stringify(exp.localGaps)}`,
+        );
+      }
+
+      // Verify targeted explain for output rule at each combinator call:
+      for (const [needle, expectedOp] of [
+        ["modifierDefaultedSchema.parse(missingOnlyAge)", ".default()"],
+        ["andDefaultedSchema.parse(missingOnlyAge)", ".and()"],
+        ["andRequiredSchema.parse(missingOnlyAge)", ".and()"],
+        ["pipeOverriddenSchema.parse(missingOnlyAge)", ".pipe()"],
+      ] as const) {
+        const callAt = lineColOf(host, rowProjectionRelPath, needle);
+        const explained = await host.check({
+          config: integratedOutputExplainConfigPath,
+          rule: "validator-output-fields-probe",
+          at: callAt,
+        });
         assert.equal(explained.status, 0);
         const exp = explained.report.explanation;
         assert.ok(exp);
+        assert.deepEqual(exp.gaps, []);
         assert.ok(
           exp.localGaps.some(
             (lg) =>
@@ -608,7 +759,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
               lg.resolvedBy?.providerId === "zod" &&
               lg.resolvedBy.operation === expectedOp,
           ),
-          `Expected resolved_by_override for ${needle}: ${JSON.stringify({ status: exp.status, gaps: exp.gaps, localGaps: exp.localGaps, queries: exp.queries.map((q) => q.summary), providers: exp.providers })}`,
+          `Expected output resolved_by_override for ${needle}: ${JSON.stringify(exp.localGaps)}`,
         );
       }
     },
