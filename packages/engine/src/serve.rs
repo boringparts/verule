@@ -222,7 +222,6 @@ pub enum HandleInternKey {
     Declaration {
         project_id: String,
         node: P<Node>,
-        symbol: Option<P<Symbol>>,
     },
     Call(String, P<Node>),
     Signature {
@@ -312,16 +311,32 @@ impl SnapshotState {
         node: P<Node>,
         symbol: Option<P<Symbol>>,
     ) -> String {
-        self.alloc_interned_handle(
+        let key = HandleInternKey::Declaration {
+            project_id: project_id.to_string(),
+            node,
+        };
+        if let Some(existing_id) = self.handle_intern.get(&key).cloned() {
+            if let Some(sym) = symbol
+                && let Some(entry) = self.handles.get_mut(&existing_id)
+                && matches!(
+                    entry.payload,
+                    HandlePayload::Declaration { symbol: None, .. }
+                )
+            {
+                entry.payload = HandlePayload::Declaration {
+                    node,
+                    symbol: Some(sym),
+                };
+            }
+            return existing_id;
+        }
+        let id = self.alloc_handle(
             "dec",
             project_id,
-            HandleInternKey::Declaration {
-                project_id: project_id.to_string(),
-                node,
-                symbol,
-            },
             HandlePayload::Declaration { node, symbol },
-        )
+        );
+        self.handle_intern.insert(key, id.clone());
+        id
     }
 
     pub fn alloc_call(&mut self, project_id: &str, node: P<Node>) -> String {

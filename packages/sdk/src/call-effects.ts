@@ -158,23 +158,36 @@ export type FieldEffect = {
   readonly targetSyntax: SyntaxRef;
   /** Receiver object expression (passable to `resolveInstances`, `valuePropagation`, `typeAt`). */
   readonly receiverSyntax: SyntaxRef;
+  /** Canonical declaration of the receiver expression when statically resolved. */
+  readonly receiverDeclaration: DeclarationRef | null;
   /** Assigned RHS syntax for writes (passable to `valuePropagation`, `typeAt`), or `null` for reads/unary updates. */
   readonly valueSyntax: SyntaxRef | null;
   readonly valueText: string | null;
   readonly location: DiagnosticLocation;
   readonly viaCall: CallRef | null;
   readonly enclosingFunction: SyntaxRef | null;
+  readonly enclosingBlock: SyntaxRef | null;
+  /** Loop/try-free enclosing block or function suitable as `scope` for `listBranches` and `branchCoverage`. */
+  readonly cfgScope: SyntaxRef | null;
   readonly guards: readonly GuardConditionInfo[];
   readonly evidence: readonly Evidence[];
 };
 
 export type CallbackInvocationInfo = {
+  readonly kind: "direct" | "indirect";
   readonly call: CallRef;
+  readonly outerCall: CallRef;
   readonly syntax: SyntaxRef;
   readonly callbackArgument: SyntaxRef;
-  readonly parameterIndex: number;
+  readonly parameterIndex: number | null;
+  readonly targetDeclaration: DeclarationRef | null;
+  readonly helperDeclaration: DeclarationRef | null;
   readonly resolvedTargets: readonly DeclarationRef[];
+  readonly enclosingFunction: SyntaxRef | null;
+  readonly enclosingBlock: SyntaxRef | null;
+  readonly cfgScope: SyntaxRef | null;
   readonly location: DiagnosticLocation;
+  readonly outerCallLocation: DiagnosticLocation;
   readonly evidence: readonly Evidence[];
 };
 
@@ -240,22 +253,33 @@ type RawFieldEffect = {
   readonly syntax: string;
   readonly targetSyntax: string;
   readonly receiverSyntax: string;
+  readonly receiverDeclaration: string | null;
   readonly valueSyntax: string | null;
   readonly valueText: string | null;
   readonly location: DiagnosticLocation;
   readonly viaCall: string | null;
   readonly enclosingFunction: string | null;
+  readonly enclosingBlock: string | null;
+  readonly cfgScope: string | null;
   readonly guards: readonly RawGuardCondition[];
   readonly evidence: readonly Evidence[];
 };
 
 type RawCallbackInvocation = {
+  readonly kind: "direct" | "indirect";
   readonly call: string;
+  readonly outerCall: string;
   readonly syntax: string;
   readonly callbackArgument: string;
-  readonly parameterIndex: number;
+  readonly parameterIndex: number | null;
+  readonly targetDeclaration: string | null;
+  readonly helperDeclaration: string | null;
   readonly resolvedTargets: readonly string[];
+  readonly enclosingFunction: string | null;
+  readonly enclosingBlock: string | null;
+  readonly cfgScope: string | null;
   readonly location: DiagnosticLocation;
+  readonly outerCallLocation: DiagnosticLocation;
   readonly evidence: readonly Evidence[];
 };
 
@@ -475,7 +499,16 @@ function mapCleanupSite(
   sessionToken: symbol,
   projectId: string,
   snapshotId: number,
+  syntaxLocations?: WeakMap<SyntaxRef, DiagnosticLocation>,
 ): CleanupSiteInfo {
+  const syntax = makeProgramRef(
+    "syntax",
+    sessionToken,
+    projectId,
+    snapshotId,
+    raw.syntax,
+  );
+  syntaxLocations?.set(syntax, raw.location);
   return registerProvenance(
     {
       instance: makeProgramRef(
@@ -488,13 +521,7 @@ function mapCleanupSite(
       instanceKey: raw.instanceKey,
       allocationLocation: raw.allocationLocation,
       operationKind: raw.operationKind,
-      syntax: makeProgramRef(
-        "syntax",
-        sessionToken,
-        projectId,
-        snapshotId,
-        raw.syntax,
-      ),
+      syntax,
       location: raw.location,
       viaCall:
         raw.viaCall !== null
@@ -514,24 +541,62 @@ function mapCleanupSite(
   );
 }
 
+function optionalRef<K extends "syntax" | "call" | "declaration">(
+  kind: K,
+  sessionToken: symbol,
+  projectId: string,
+  snapshotId: number,
+  handleId: string | null,
+) {
+  return handleId !== null
+    ? makeProgramRef(kind, sessionToken, projectId, snapshotId, handleId)
+    : null;
+}
+
 function mapFieldEffect(
   raw: RawFieldEffect,
   sessionToken: symbol,
   projectId: string,
   snapshotId: number,
+  syntaxLocations?: WeakMap<SyntaxRef, DiagnosticLocation>,
 ): FieldEffect {
+  const syntax = makeProgramRef(
+    "syntax",
+    sessionToken,
+    projectId,
+    snapshotId,
+    raw.syntax,
+  );
+  syntaxLocations?.set(syntax, raw.location);
+  const guards = raw.guards.map((g) => {
+    const condition = makeProgramRef(
+      "syntax",
+      sessionToken,
+      projectId,
+      snapshotId,
+      g.condition,
+    );
+    syntaxLocations?.set(condition, g.location);
+    return {
+      branchSyntax: makeProgramRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        g.branchSyntax,
+      ),
+      condition,
+      conditionText: g.conditionText,
+      direction: g.direction,
+      location: g.location,
+    };
+  });
   return registerProvenance(
     {
       kind: raw.kind,
       propertyName: raw.propertyName,
       operator: raw.operator,
-      syntax: makeProgramRef(
-        "syntax",
-        sessionToken,
-        projectId,
-        snapshotId,
-        raw.syntax,
-      ),
+      syntax,
       targetSyntax: makeProgramRef(
         "syntax",
         sessionToken,
@@ -546,60 +611,141 @@ function mapFieldEffect(
         snapshotId,
         raw.receiverSyntax,
       ),
-      valueSyntax:
-        raw.valueSyntax !== null
-          ? makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              raw.valueSyntax,
-            )
-          : null,
+      receiverDeclaration: optionalRef(
+        "declaration",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.receiverDeclaration,
+      ),
+      valueSyntax: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.valueSyntax,
+      ),
       valueText: raw.valueText,
       location: raw.location,
-      viaCall:
-        raw.viaCall !== null
-          ? makeProgramRef(
-              "call",
-              sessionToken,
-              projectId,
-              snapshotId,
-              raw.viaCall,
-            )
-          : null,
-      enclosingFunction:
-        raw.enclosingFunction !== null
-          ? makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              raw.enclosingFunction,
-            )
-          : null,
-      guards: raw.guards.map((g) => ({
-        branchSyntax: makeProgramRef(
-          "syntax",
-          sessionToken,
-          projectId,
-          snapshotId,
-          g.branchSyntax,
-        ),
-        condition: makeProgramRef(
-          "syntax",
-          sessionToken,
-          projectId,
-          snapshotId,
-          g.condition,
-        ),
-        conditionText: g.conditionText,
-        direction: g.direction,
-        location: g.location,
-      })),
+      viaCall: optionalRef(
+        "call",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.viaCall,
+      ),
+      enclosingFunction: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.enclosingFunction,
+      ),
+      enclosingBlock: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.enclosingBlock,
+      ),
+      cfgScope: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        raw.cfgScope,
+      ),
+      guards,
       evidence: raw.evidence,
     },
     raw.evidence,
+  );
+}
+
+function mapCallbackInvocation(
+  cb: RawCallbackInvocation,
+  sessionToken: symbol,
+  projectId: string,
+  snapshotId: number,
+  syntaxLocations?: WeakMap<SyntaxRef, DiagnosticLocation>,
+): CallbackInvocationInfo {
+  const syntax = makeProgramRef(
+    "syntax",
+    sessionToken,
+    projectId,
+    snapshotId,
+    cb.syntax,
+  );
+  syntaxLocations?.set(syntax, cb.location);
+  return registerProvenance(
+    {
+      kind: cb.kind,
+      call: makeProgramRef(
+        "call",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.call,
+      ),
+      outerCall: makeProgramRef(
+        "call",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.outerCall,
+      ),
+      syntax,
+      callbackArgument: makeProgramRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.callbackArgument,
+      ),
+      parameterIndex: cb.parameterIndex,
+      targetDeclaration: optionalRef(
+        "declaration",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.targetDeclaration,
+      ),
+      helperDeclaration: optionalRef(
+        "declaration",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.helperDeclaration,
+      ),
+      resolvedTargets: cb.resolvedTargets.map((id) =>
+        makeProgramRef("declaration", sessionToken, projectId, snapshotId, id),
+      ),
+      enclosingFunction: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.enclosingFunction,
+      ),
+      enclosingBlock: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.enclosingBlock,
+      ),
+      cfgScope: optionalRef(
+        "syntax",
+        sessionToken,
+        projectId,
+        snapshotId,
+        cb.cfgScope,
+      ),
+      location: cb.location,
+      outerCallLocation: cb.outerCallLocation,
+      evidence: cb.evidence,
+    },
+    cb.evidence,
   );
 }
 
@@ -643,6 +789,7 @@ export function createCallEffectsQueries(deps: {
   readonly resolveSyntaxLocation?: (
     ref: CleanupScopeRef,
   ) => DiagnosticLocation | undefined;
+  readonly syntaxLocations?: WeakMap<SyntaxRef, DiagnosticLocation>;
   readonly onCleanupCovered?: (params: {
     readonly targetLocations: readonly DiagnosticLocation[];
     readonly paths: readonly ExplainCleanupPath[];
@@ -667,6 +814,7 @@ export function createCallEffectsQueries(deps: {
     assertOpen,
     recordGaps,
     resolveSyntaxLocation,
+    syntaxLocations,
     onCleanupCovered,
     getRpcOptions,
     onQueryCompleted,
@@ -772,6 +920,7 @@ export function createCallEffectsQueries(deps: {
                           sessionToken,
                           projectId,
                           snapshotId,
+                          syntaxLocations,
                         ),
                       ),
                       evidence: tr.evidence,
@@ -794,13 +943,31 @@ export function createCallEffectsQueries(deps: {
                 ),
                 targetResults,
                 disposedInstances: raw.disposedInstances.map((site) =>
-                  mapCleanupSite(site, sessionToken, projectId, snapshotId),
+                  mapCleanupSite(
+                    site,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 registeredInstances: raw.registeredInstances.map((site) =>
-                  mapCleanupSite(site, sessionToken, projectId, snapshotId),
+                  mapCleanupSite(
+                    site,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 detachedInstances: raw.detachedInstances.map((site) =>
-                  mapCleanupSite(site, sessionToken, projectId, snapshotId),
+                  mapCleanupSite(
+                    site,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 evidence: raw.evidence,
                 gaps: raw.gaps,
@@ -944,52 +1111,39 @@ export function createCallEffectsQueries(deps: {
               return {
                 target: targetRef,
                 fieldReads: raw.fieldReads.map((e) =>
-                  mapFieldEffect(e, sessionToken, projectId, snapshotId),
+                  mapFieldEffect(
+                    e,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 fieldWrites: raw.fieldWrites.map((e) =>
-                  mapFieldEffect(e, sessionToken, projectId, snapshotId),
+                  mapFieldEffect(
+                    e,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 effects: raw.effects.map((e) =>
-                  mapFieldEffect(e, sessionToken, projectId, snapshotId),
+                  mapFieldEffect(
+                    e,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
+                  ),
                 ),
                 callbackInvocations: raw.callbackInvocations.map((cb) =>
-                  registerProvenance(
-                    {
-                      call: makeProgramRef(
-                        "call",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        cb.call,
-                      ),
-                      syntax: makeProgramRef(
-                        "syntax",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        cb.syntax,
-                      ),
-                      callbackArgument: makeProgramRef(
-                        "syntax",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        cb.callbackArgument,
-                      ),
-                      parameterIndex: cb.parameterIndex,
-                      resolvedTargets: cb.resolvedTargets.map((id) =>
-                        makeProgramRef(
-                          "declaration",
-                          sessionToken,
-                          projectId,
-                          snapshotId,
-                          id,
-                        ),
-                      ),
-                      location: cb.location,
-                      evidence: cb.evidence,
-                    },
-                    cb.evidence,
+                  mapCallbackInvocation(
+                    cb,
+                    sessionToken,
+                    projectId,
+                    snapshotId,
+                    syntaxLocations,
                   ),
                 ),
                 calls: raw.calls.map((id) =>

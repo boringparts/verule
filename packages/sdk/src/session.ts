@@ -1145,6 +1145,7 @@ export async function openSession(
       assertOpen: assertActiveSnapshot,
       recordGaps,
       resolveSyntaxLocation: (ref) => syntaxLocations.get(ref as SyntaxRef),
+      syntaxLocations,
       ...(collector.isExplainEnabled()
         ? {
             onCleanupCovered: ({ targetLocations, paths }) => {
