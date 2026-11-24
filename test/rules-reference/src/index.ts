@@ -1,4 +1,15 @@
 export {
+  createPoolResourceOwnershipRule,
+  definePoolResourceOwnershipModel,
+  poolResourceOwnershipModel,
+  poolResourceOwnershipRule,
+  type ChildItemScopeSpec,
+  type OuterHostContainerSpec,
+  type PoolResourceOwnershipModelFacts,
+  type PoolResourceOwnershipModelOptions,
+  type PoolResourceOwnershipRuleOptions,
+} from "./pool-resource-ownership.ts";
+export {
   createRowProjectionSatisfiesValidatorRule,
   rowProjectionSatisfiesValidatorRule,
   type RowProjectionValidatorRuleOptions,
