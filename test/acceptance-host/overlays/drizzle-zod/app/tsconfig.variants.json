@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["variants/fake-select.ts", "variants/integrated/**/*.ts"]
+}

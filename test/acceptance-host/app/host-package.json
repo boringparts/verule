@@ -1,0 +1,29 @@
+{
+  "name": "@verule/acceptance-host-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/review.ts",
+      "types": "./src/review.ts",
+      "default": "./src/review.ts"
+    },
+    "./package.json": "./package.json",
+    "./rule": {
+      "source": "./src/rule.ts",
+      "types": "./src/rule.ts",
+      "default": "./src/rule.ts"
+    }
+  },
+  "dependencies": {
+    "@verule/acceptance-host-data": "workspace:*",
+    "@verule/sdk": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  },
+  "engines": {
+    "node": "^26.13.1"
+  }
+}

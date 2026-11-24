@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@verule/acceptance-host-drizzle-zod-data": [
+        "../../node_modules/@verule/acceptance-host-drizzle-zod-data/variants/case-a/index.ts"
+      ]
+    }
+  },
+  "include": ["row-projection.ts"]
+}

@@ -15,6 +15,8 @@
     "verule.config.ts",
     "verule.native.config.ts",
     "verule.missing-adapter.config.ts",
-    "provider-session-overlay/app/**/*.ts"
+    "provider-session-overlay/**/*.ts",
+    "scenarios/queue/src/**/*.ts",
+    "scenarios/queue/verule.config.ts"
   ]
 }

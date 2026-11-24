@@ -1,16 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import {
-  cpSync,
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, readFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,6 +8,11 @@ import { drizzleAdapter } from "@verule/adapter-drizzle";
 import { zodAdapter } from "@verule/adapter-zod";
 import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";
 import { defineConfig, openSession, runCheck } from "@verule/sdk";
+import {
+  linkNodeModulesPackage,
+  type PreparedTempHost,
+  withTempHost,
+} from "@verule/test-hosts";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const sdkRoot = join(packageRoot, "node_modules", "@verule", "sdk");
@@ -37,820 +31,437 @@ const adapterDrizzleRoot = join(
 const drizzleOrmRoot = join(packageRoot, "node_modules", "drizzle-orm");
 const drizzleZodRoot = join(packageRoot, "node_modules", "drizzle-zod");
 const zodRoot = join(packageRoot, "node_modules", "zod");
-const tscBin = join(packageRoot, "node_modules", ".bin", "tsc");
+const externalConsumerSource = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "external-consumer",
+  "consumer.ts",
+);
 
-const DRIZZLE_AND_ZOD_STUBS = {
-  "packages/db/package.json": JSON.stringify({
-    name: "@fixture/db",
-    version: "1.0.0",
-    type: "module",
-    exports: { ".": "./src/index.ts" },
-  }),
-  "packages/db/src/drizzle.ts": [
-    "export type Column<T = unknown> = {",
-    "  readonly _type: T;",
-    "  notNull: () => Column<T>;",
-    "  primaryKey: () => Column<T>;",
-    "  default: (v: T) => Column<T>;",
-    "};",
-    "declare const col: Column<any>;",
-    "export const integer = (_name?: string) => col;",
-    "export const text = (_name?: string) => col;",
-    "export function sqliteTable<Cols extends Record<string, unknown>>(_name: string, cols: Cols): Cols {",
-    "  return cols;",
-    "}",
-    "export function relations<T>(_table: T, _cb: (h: { one: any; many: any }) => Record<string, unknown>) { return {}; }",
-    "export function eq(_a: unknown, _b: unknown) { return {}; }",
-    "export type SelectChain = {",
-    "  from: (t: unknown) => SelectChain;",
-    "  where: (c: unknown) => SelectChain;",
-    "  get: () => Promise<Record<string, unknown> | undefined>;",
-    "};",
-    "export type RelQuery = {",
-    "  findFirst: (opts?: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;",
-    "};",
-    "export declare const db: {",
-    "  select: (fields?: Record<string, unknown>) => SelectChain;",
-    "  query: Record<string, RelQuery>;",
-    "};",
-    "",
-  ].join("\n"),
-  "packages/validators/package.json": JSON.stringify({
-    name: "@fixture/validators",
-    version: "1.0.0",
-    type: "module",
-    exports: { ".": "./src/index.ts" },
-  }),
-  "packages/validators/src/zod.ts": [
-    "export type ZodAnyType = {",
-    "  optional: () => ZodAnyType;",
-    "  nullish: () => ZodAnyType;",
-    "  nullable: () => ZodAnyType;",
-    "  default: (v: unknown) => ZodAnyType;",
-    "  prefault: (v: unknown) => ZodAnyType;",
-    "  catch: (v: unknown) => ZodAnyType;",
-    "  transform: (fn: (v: never) => unknown) => ZodAnyType;",
-    "  extend: (shape: Record<string, unknown>) => ZodAnyType;",
-    "  pick: (mask: Record<string, boolean>) => ZodAnyType;",
-    "  parse: (v: unknown) => unknown;",
-    "  safeParse: (v: unknown) => { success: boolean; data?: unknown };",
-    "};",
-    "declare const node: ZodAnyType;",
-    "export const z = {",
-    "  string: () => node,",
-    "  number: () => node,",
-    "  enum: (_values: readonly string[]) => node,",
-    "  object: (_shape: Record<string, unknown>) => node,",
-    "};",
-    "",
-  ].join("\n"),
-};
-
-function createMonorepoFixture(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "verule-rules-ref-"));
-  const allFiles: Record<string, string> = {
-    ...DRIZZLE_AND_ZOD_STUBS,
-    ...files,
-  };
-  for (const [relPath, content] of Object.entries(allFiles)) {
-    const absPath = join(root, relPath);
-    mkdirSync(join(absPath, ".."), { recursive: true });
-    writeFileSync(absPath, content, "utf8");
-  }
-
-  writeFileSync(
-    join(root, "packages/db/tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-        },
-        include: ["src/**/*.ts"],
+async function withMonorepoHost(
+  hostName: string,
+  callback: (host: PreparedTempHost) => Promise<void>,
+): Promise<void> {
+  return withTempHost(
+    {
+      host: hostName,
+      prefix: "verule-rules-ref-",
+      packageLinks: {
+        "drizzle-orm": drizzleOrmRoot,
+        "drizzle-zod": drizzleZodRoot,
+        zod: zodRoot,
       },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-  writeFileSync(
-    join(root, "packages/validators/tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-        },
-        include: ["src/**/*.ts"],
+      setup: (host) => {
+        host.removePath("tsconfig.json");
+        renameSync(
+          host.resolvePath("packages/db/tsconfig.runtime.json"),
+          host.resolvePath("packages/db/tsconfig.json"),
+        );
+        renameSync(
+          host.resolvePath("packages/api/tsconfig.runtime.json"),
+          host.resolvePath("packages/api/tsconfig.json"),
+        );
+        const validatorsTsconfig = host.resolvePath(
+          "packages/validators/tsconfig.runtime.json",
+        );
+        if (existsSync(validatorsTsconfig)) {
+          renameSync(
+            validatorsTsconfig,
+            host.resolvePath("packages/validators/tsconfig.json"),
+          );
+          linkNodeModulesPackage(
+            host.rootDir,
+            "@fixture/validators",
+            host.resolvePath("packages/validators"),
+          );
+        }
+        linkNodeModulesPackage(
+          host.rootDir,
+          "@fixture/db",
+          host.resolvePath("packages/db"),
+        );
       },
-      null,
-      2,
-    ),
-    "utf8",
+    },
+    callback,
   );
-  writeFileSync(
-    join(root, "packages/api/tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-        },
-        include: ["src/**/*.ts"],
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-
-  mkdirSync(join(root, "node_modules/@fixture"), { recursive: true });
-  symlinkSync(
-    join(root, "packages/db"),
-    join(root, "node_modules/@fixture/db"),
-    "dir",
-  );
-  symlinkSync(
-    join(root, "packages/validators"),
-    join(root, "node_modules/@fixture/validators"),
-    "dir",
-  );
-  symlinkSync(drizzleOrmRoot, join(root, "node_modules/drizzle-orm"), "dir");
-  symlinkSync(drizzleZodRoot, join(root, "node_modules/drizzle-zod"), "dir");
-  symlinkSync(zodRoot, join(root, "node_modules/zod"), "dir");
-
-  return root;
 }
 
 void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () => {
   void it("covers cross-package missing field (a), complete row pass (b), defaulted field pass (c), and unrelated input non-report", async () => {
-    const root = createMonorepoFixture({
-      "packages/db/src/schema.ts": [
-        'import { integer, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const users = sqliteTable("users", {',
-        '  id: integer("id").primaryKey(),',
-        '  name: text("name").notNull(),',
-        '  age: integer("age").notNull(),',
-        "});",
-        "",
-      ].join("\n"),
-      "packages/db/src/queries.ts": [
-        'import { db, eq } from "./drizzle.js";',
-        'import { users } from "./schema.js";',
-        "",
-        "export async function fetchUserBrief(userId: number) {",
-        "  return await db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)).get();",
-        "}",
-        "",
-        "export async function fetchUserFull(userId: number) {",
-        "  return await db.select({ id: users.id, name: users.name, age: users.age }).from(users).where(eq(users.id, userId)).get();",
-        "}",
-        "",
-      ].join("\n"),
-      "packages/db/src/index.ts": [
-        'export { users } from "./schema.js";',
-        'export { fetchUserBrief, fetchUserFull } from "./queries.js";',
-        "",
-      ].join("\n"),
-      "packages/validators/src/index.ts": [
-        'import { z } from "./zod.js";',
-        "",
-        "export const strictUserSchema = z.object({",
-        "  id: z.number(),",
-        "  name: z.string(),",
-        "  age: z.number(),",
-        "});",
-        "",
-        "export const defaultedAgeSchema = z.object({",
-        "  id: z.number(),",
-        "  name: z.string(),",
-        "  age: z.number().prefault(18),",
-        "});",
-        "",
-      ].join("\n"),
-      "packages/api/src/handler.ts": [
-        'import { fetchUserBrief, fetchUserFull } from "@fixture/db";',
-        'import { defaultedAgeSchema, strictUserSchema } from "@fixture/validators";',
-        "",
-        "export async function handleRequests(userId: number, externalPayload: unknown) {",
-        "  const brief = await fetchUserBrief(userId);",
-        "  const full = await fetchUserFull(userId);",
-        "",
-        "  // (a) Missing age -> MUST report here with evidence to packages/db and packages/validators",
-        "  const invalid = brief ? strictUserSchema.parse(brief) : null;",
-        "  // (b) Complete row -> MUST pass",
-        "  const valid = full ? strictUserSchema.parse(full) : null;",
-        "  // (c) Defaulted/prefaulted age -> MUST pass",
-        "  const defaulted = brief ? defaultedAgeSchema.parse(brief) : null;",
-        "  // Unrelated input not originating from Drizzle query -> MUST NOT report",
-        "  const unrelated = strictUserSchema.parse(externalPayload);",
-        "",
-        "  return { invalid, valid, defaulted, unrelated };",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withMonorepoHost(
+      "rules-reference/row-projection-basic",
+      async (host) => {
+        await host.typecheck("packages/db/tsconfig.json");
+        await host.typecheck("packages/validators/tsconfig.json");
+        await host.typecheck("packages/api/tsconfig.json");
 
-    try {
-      const report = await runCheck({
-        cwd: root,
-        adapterResolutionRoot: packageRoot,
-        config: defineConfig({
-          projects: [
-            "packages/db/tsconfig.json",
-            "packages/validators/tsconfig.json",
-            "packages/api/tsconfig.json",
-          ],
-          adapters: [drizzleAdapter, zodAdapter],
-          rules: [rowProjectionSatisfiesValidatorRule],
-        }),
-      });
+        const report = await runCheck({
+          cwd: host.rootDir,
+          adapterResolutionRoot: packageRoot,
+          config: defineConfig({
+            projects: [
+              "packages/db/tsconfig.json",
+              "packages/validators/tsconfig.json",
+              "packages/api/tsconfig.json",
+            ],
+            adapters: [drizzleAdapter, zodAdapter],
+            rules: [rowProjectionSatisfiesValidatorRule],
+          }),
+        });
 
-      assert.equal(report.status, "findings");
-      assert.equal(report.diagnostics.length, 1);
+        assert.equal(report.status, "findings");
+        assert.equal(report.diagnostics.length, 1);
 
-      const diag = report.diagnostics[0]!;
-      assert.equal(diag.ruleId, "row-projection-satisfies-validator");
-      assert.equal(diag.at.file, "packages/api/src/handler.ts");
-      assert.equal(diag.at.line, 9);
-      assert.ok(
-        diag.message.includes("age"),
-        `Unexpected message: ${diag.message}`,
-      );
+        const diag = report.diagnostics[0]!;
+        assert.equal(diag.ruleId, "row-projection-satisfies-validator");
+        assert.equal(diag.at.file, "packages/api/src/handler.ts");
+        assert.equal(diag.at.line, 9);
+        assert.ok(
+          diag.message.includes("age"),
+          `Unexpected message: ${diag.message}`,
+        );
 
-      // Evidence must trace back to Drizzle projection in packages/db, value propagation, and Zod schema in packages/validators
-      assert.ok(
-        diag.evidence.some(
-          (ev) => ev.at?.file === "packages/db/src/queries.ts",
-        ),
-        "Expected evidence pointing to packages/db/src/queries.ts",
-      );
-      assert.ok(
-        diag.evidence.some(
-          (ev) => ev.at?.file === "packages/validators/src/index.ts",
-        ),
-        "Expected evidence pointing to packages/validators/src/index.ts",
-      );
-      assert.ok(
-        diag.evidence.some(
-          (ev) => ev.at?.file === "packages/api/src/handler.ts",
-        ),
-        "Expected evidence along propagation path in packages/api/src/handler.ts",
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+        // Evidence must trace back to Drizzle projection in packages/db, value propagation, and Zod schema in packages/validators
+        assert.ok(
+          diag.evidence.some(
+            (ev) => ev.at?.file === "packages/db/src/queries.ts",
+          ),
+          "Expected evidence pointing to packages/db/src/queries.ts",
+        );
+        assert.ok(
+          diag.evidence.some(
+            (ev) => ev.at?.file === "packages/validators/src/index.ts",
+          ),
+          "Expected evidence pointing to packages/validators/src/index.ts",
+        );
+        assert.ok(
+          diag.evidence.some(
+            (ev) => ev.at?.file === "packages/api/src/handler.ts",
+          ),
+          "Expected evidence along propagation path in packages/api/src/handler.ts",
+        );
+      },
+    );
   });
 
   void it("handles dynamic query columns (d) and relational createSelectSchema + rest destructuring + live edit revocation (e)", async () => {
-    const root = createMonorepoFixture({
-      "packages/db/src/schema.ts": [
-        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const workspace = sqliteTable("workspace", {',
-        '  id: integer("id").primaryKey(),',
-        '  slug: text("slug").notNull(),',
-        '  name: text("name"),',
-        '  plan: text("plan").notNull().default("free"),',
-        "});",
-        "",
-        'export const page = sqliteTable("page", {',
-        '  id: integer("id").primaryKey(),',
-        '  workspaceId: integer("workspace_id").notNull(),',
-        '  slug: text("slug").notNull(),',
-        '  customDomain: text("custom_domain"),',
-        '  password: text("password"),',
-        "});",
-        "",
-        "export const pageRelations = relations(page, ({ one }) => ({",
-        "  workspace: one(workspace),",
-        "}));",
-        "",
-      ].join("\n"),
-      "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "drizzle-zod";',
-        'import { z } from "zod";',
-        'import { page, workspace } from "./schema.js";',
+    await withMonorepoHost(
+      "rules-reference/row-projection-relational",
+      async (host) => {
+        await host.typecheck("packages/db/tsconfig.json");
+        await host.typecheck("packages/api/tsconfig.json");
 
-        "",
-        "export const selectWorkspaceSchema = createSelectSchema(workspace)",
-        "  .extend({",
-        '    plan: z.enum(["free", "pro"]).nullable().prefault("free"),',
-        "    usage: z.object({ count: z.number() }).nullish(),",
-        "  })",
-        "  .transform((v: Record<string, unknown>) => ({ ...v }));",
-        "",
-        "export const selectPageSchema = createSelectSchema(page).extend({",
-        '  password: z.string().nullable().prefault(""),',
-        "});",
-        "",
-      ].join("\n"),
-      "packages/db/src/index.ts": [
-        'export { db, eq } from "./drizzle.js";',
-        'export { page, pageRelations, workspace } from "./schema.js";',
-        'export { selectPageSchema, selectWorkspaceSchema } from "./validation.js";',
-        "",
-      ].join("\n"),
-      "packages/validators/src/index.ts": [
-        'import { z } from "./zod.js";',
-        "",
-        "export const userAgeSchema = z.object({",
-        "  id: z.number(),",
-        "  age: z.number(),",
-        "});",
-        "",
-      ].join("\n"),
-      "packages/api/src/routes.ts": [
-        'import { db, page, selectPageSchema, selectWorkspaceSchema } from "@fixture/db";',
-        'import { userAgeSchema } from "@fixture/validators";',
-        "",
-        "declare function extraFields(): Record<string, unknown>;",
-        "",
-        "const gateFieldsSchema = selectPageSchema.pick({",
-        "  slug: true,",
-        "  customDomain: true,",
-        "  password: true,",
-        "});",
-        "",
-        "export async function getGate() {",
-        "  const _page = await db.query.page.findFirst({",
-        "    columns: {",
-        "      slug: true,",
-        "      customDomain: true,",
-        "    },",
-        "    with: { workspace: true },",
-        "  });",
-        "  if (!_page) return null;",
-        "  const ws = selectWorkspaceSchema.safeParse(_page.workspace);",
-        "  const { workspace: _ws, ...rest } = _page;",
-        "  const gate = gateFieldsSchema.parse(rest);",
-        "  return { ws, gate };",
-        "}",
-        "",
-        "export async function checkDynamicAndStripped() {",
-        "  const dynRow = await db.select({ id: page.id, ...extraFields() }).from(page).get();",
-        "  const maybeOk = dynRow ? userAgeSchema.parse(dynRow) : null;",
-        "  const { age: _strippedAge, ...withoutAge } = dynRow ?? {};",
-        "  const definitelyMissing = userAgeSchema.parse(withoutAge);",
-        "  return { maybeOk, definitelyMissing };",
-        "}",
-        "",
-      ].join("\n"),
-    });
+        const session = await openSession({
+          cwd: host.rootDir,
+          adapterResolutionRoot: packageRoot,
+          config: defineConfig({
+            projects: [
+              "packages/db/tsconfig.json",
+              "packages/api/tsconfig.json",
+            ],
+            adapters: [drizzleAdapter, zodAdapter],
+            rules: [rowProjectionSatisfiesValidatorRule],
+          }),
+        });
 
-    const session = await openSession({
-      cwd: root,
-      adapterResolutionRoot: packageRoot,
-      config: defineConfig({
-        projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-        adapters: [drizzleAdapter, zodAdapter],
-        rules: [rowProjectionSatisfiesValidatorRule],
-      }),
-    });
+        try {
+          const initial = await session.check();
+          // Dynamic spread `maybeOk` has Gap (no false positive on maybeOk),
+          // while `withoutAge` explicitly stripped `age` via rest destructuring -> reports at line 34!
+          // Both `selectWorkspaceSchema.safeParse(_page.workspace)` and `gateFieldsSchema.parse(rest)` pass!
+          assert.equal(initial.diagnostics.length, 1);
+          assert.equal(
+            initial.diagnostics[0]!.at.file,
+            "packages/api/src/routes.ts",
+          );
+          assert.equal(initial.diagnostics[0]!.at.line, 34);
+          assert.ok(initial.diagnostics[0]!.message.includes("age"));
+          assert.ok(
+            initial.gaps.some((g) => g.kind === "dynamic-query-projection"),
+            "Expected dynamic-query-projection Gap to be preserved",
+          );
 
-    try {
-      const initial = await session.check();
-      // Dynamic spread `maybeOk` has Gap (no false positive on maybeOk),
-      // while `withoutAge` explicitly stripped `age` via rest destructuring -> reports at line 31!
-      // Both `selectWorkspaceSchema.safeParse(_page.workspace)` and `gateFieldsSchema.parse(rest)` pass!
-      assert.equal(initial.diagnostics.length, 1);
-      assert.equal(
-        initial.diagnostics[0]!.at.file,
-        "packages/api/src/routes.ts",
-      );
-      assert.equal(initial.diagnostics[0]!.at.line, 31);
-      assert.ok(initial.diagnostics[0]!.message.includes("age"));
-      assert.ok(
-        initial.gaps.some((g) => g.kind === "dynamic-query-projection"),
-        "Expected dynamic-query-projection Gap to be preserved",
-      );
+          // Edit routes.ts: remove `slug: true,` from findFirst columns -> triggers diagnostic ONLY on gateFieldsSchema.parse(rest), NOT on selectWorkspaceSchema.safeParse(_page.workspace)!
+          const originalRoutes = host.readText("packages/api/src/routes.ts");
+          host.replaceText(
+            "packages/api/src/routes.ts",
+            "      slug: true,\n",
+            "",
+          );
+          await session.update({ changed: ["packages/api/src/routes.ts"] });
 
-      // Edit routes.ts: remove `slug: true,` from findFirst columns -> triggers diagnostic ONLY on gateFieldsSchema.parse(rest), NOT on selectWorkspaceSchema.safeParse(_page.workspace)!
-      const routesPath = join(root, "packages/api/src/routes.ts");
-      const originalRoutes = readFileSync(routesPath, "utf8");
-      const brokenRoutes = originalRoutes.replace("      slug: true,\n", "");
-      writeFileSync(routesPath, brokenRoutes, "utf8");
-      await session.update({ changed: ["packages/api/src/routes.ts"] });
+          const afterDelete = await session.check();
+          const gateDiag = afterDelete.diagnostics.find(
+            (d) =>
+              d.at.file === "packages/api/src/routes.ts" &&
+              d.message.includes("slug"),
+          );
+          assert.ok(
+            gateDiag,
+            "Expected missing slug diagnostic after deleting slug: true",
+          );
+          assert.equal(gateDiag.at.line, 22);
+          assert.equal(
+            afterDelete.diagnostics.some((d) => d.at.line === 20),
+            false,
+            "_page.workspace validation must NOT report when page.slug is removed",
+          );
 
-      const afterDelete = await session.check();
-      const gateDiag = afterDelete.diagnostics.find(
-        (d) =>
-          d.at.file === "packages/api/src/routes.ts" &&
-          d.message.includes("slug"),
-      );
-      assert.ok(
-        gateDiag,
-        "Expected missing slug diagnostic after deleting slug: true",
-      );
-      assert.equal(gateDiag.at.line, 22);
-      assert.equal(
-        afterDelete.diagnostics.some((d) => d.at.line === 20),
-        false,
-        "_page.workspace validation must NOT report when page.slug is removed",
-      );
-
-      // Restore `slug: true,` -> slug diagnostic is revoked!
-      writeFileSync(routesPath, originalRoutes, "utf8");
-      await session.update({ changed: ["packages/api/src/routes.ts"] });
-      const afterRestore = await session.check();
-      assert.equal(
-        afterRestore.diagnostics.some((d) => d.message.includes("slug")),
-        false,
-      );
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+          // Restore `slug: true,` -> slug diagnostic is revoked!
+          host.writeText("packages/api/src/routes.ts", originalRoutes);
+          await session.update({ changed: ["packages/api/src/routes.ts"] });
+          const afterRestore = await session.check();
+          assert.equal(
+            afterRestore.diagnostics.some((d) => d.message.includes("slug")),
+            false,
+          );
+        } finally {
+          await session.close();
+        }
+      },
+    );
   });
 
   void it("handles bracket relation reads, destructured aliases, chained rest omissions, omitted-relation counterexample, and targeted explain", async () => {
-    const root = createMonorepoFixture({
-      "packages/db/src/schema.ts": [
-        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const workspace = sqliteTable("workspace", {',
-        '  id: integer("id").primaryKey(),',
-        '  slug: text("slug").notNull(),',
-        '  name: text("name"),',
-        "});",
-        "",
-        'export const page = sqliteTable("page", {',
-        '  id: integer("id").primaryKey(),',
-        '  workspaceId: integer("workspace_id").notNull(),',
-        '  slug: text("slug").notNull(),',
-        '  customDomain: text("custom_domain"),',
-        "});",
-        "",
-        "export const pageRelations = relations(page, ({ one }) => ({",
-        "  workspace: one(workspace),",
-        "}));",
-        "",
-      ].join("\n"),
-      "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "drizzle-zod";',
-        'import { page, workspace } from "./schema.js";',
-        "",
-        "export const selectWorkspaceSchema = createSelectSchema(workspace);",
-        "export const selectPageSchema = createSelectSchema(page);",
-        "",
-      ].join("\n"),
-      "packages/db/src/index.ts": [
-        'export { db } from "./drizzle.js";',
-        'export { page, pageRelations, workspace } from "./schema.js";',
-        'export { selectPageSchema, selectWorkspaceSchema } from "./validation.js";',
-        "",
-      ].join("\n"),
-      "packages/validators/src/index.ts": [
-        'import { z } from "./zod.js";',
-        "",
-        "export const pageSlugSchema = z.object({",
-        "  slug: z.string(),",
-        "});",
-        "export const dynSchema = z.object({",
-        "  id: z.number(),",
-        "  slug: z.string(),",
-        "});",
-        "",
-      ].join("\n"),
-      "packages/api/src/routes.ts": [
-        'import { db, page, selectWorkspaceSchema } from "@fixture/db";',
-        'import { dynSchema, pageSlugSchema } from "@fixture/validators";',
-        "",
-        "declare function extraFields(): Record<string, unknown>;",
-        "",
-        "export async function checkCases(external: unknown) {",
-        "  const partialPage = await db.query.page.findFirst({",
-        "    columns: { slug: true, customDomain: true },",
-        "    with: { workspace: { columns: { id: true } } },",
-        "  });",
-        "  if (!partialPage) return null;",
-        "",
-        "  // Bracket access on nested relation missing `slug` -> MUST report at line 14",
-        '  const badBracketWs = selectWorkspaceSchema.safeParse(partialPage["workspace"]);',
-        "",
-        "  // Destructured same-name and aliased relation missing `slug` -> MUST report at lines 17 & 19",
-        "  const { workspace } = partialPage;",
-        "  const badDestructWs = selectWorkspaceSchema.safeParse(workspace);",
-        "  const { workspace: wsAlias } = partialPage;",
-        "  const badAliasWs = selectWorkspaceSchema.safeParse(wsAlias);",
-        "",
-        "  // Chained rest destructuring omitting `slug` -> MUST report missing `slug` at line 24",
-        "  const { customDomain: _cd, ...r1 } = partialPage;",
-        "  const { slug: _slug, ...r2 } = r1;",
-        "  const badChainedRest = pageSlugSchema.parse(r2);",
-        "",
-        "  // Counterexample: rest omitted `workspace`, so `withoutWs.workspace` must NOT match original relation",
-        "  const { workspace: _omittedWs, ...withoutWs } = partialPage;",
-        "  const omittedRel = selectWorkspaceSchema.safeParse((withoutWs as Record<string, unknown>).workspace);",
-        "",
-        "  // Passing case: r1 retains `slug`",
-        "  const okRest = pageSlugSchema.parse(r1);",
-        "",
-        "  // Dynamic projection gap case",
-        "  const dynRow = await db.select({ id: page.id, ...extraFields() }).from(page).get();",
-        "  const dynOut = dynRow ? dynSchema.parse(dynRow) : null;",
-        "",
-        "  // Unrelated non-query input",
-        "  const extOut = pageSlugSchema.parse(external);",
-        "",
-        "  return { badBracketWs, badDestructWs, badAliasWs, badChainedRest, omittedRel, okRest, dynOut, extOut };",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withMonorepoHost(
+      "rules-reference/row-projection-relations-cases",
+      async (host) => {
+        await host.typecheck("packages/db/tsconfig.json");
+        await host.typecheck("packages/api/tsconfig.json");
 
-    const session = await openSession({
-      cwd: root,
-      adapterResolutionRoot: packageRoot,
-      config: defineConfig({
-        projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-        adapters: [drizzleAdapter, zodAdapter],
-        rules: [rowProjectionSatisfiesValidatorRule],
-      }),
-    });
+        const session = await openSession({
+          cwd: host.rootDir,
+          adapterResolutionRoot: packageRoot,
+          config: defineConfig({
+            projects: [
+              "packages/db/tsconfig.json",
+              "packages/api/tsconfig.json",
+            ],
+            adapters: [drizzleAdapter, zodAdapter],
+            rules: [rowProjectionSatisfiesValidatorRule],
+          }),
+        });
 
-    try {
-      const report = await session.check();
-      assert.equal(report.status, "findings");
-      const diagLines = report.diagnostics
-        .map((d) => d.at.line)
-        .toSorted((a, b) => a - b);
-      assert.deepEqual(diagLines, [14, 18, 20, 25]);
-      for (const diag of report.diagnostics) {
-        assert.ok(diag.message.includes("slug"), diag.message);
-        assert.ok(
-          diag.evidence.some(
-            (e) => e.at?.file === "packages/api/src/routes.ts",
-          ),
-        );
-        assert.ok(
-          diag.evidence.some((e) => e.at?.file === "packages/db/src/schema.ts"),
-        );
-      }
+        try {
+          const report = await session.check();
+          assert.equal(report.status, "findings");
+          const diagLines = report.diagnostics
+            .map((d) => d.at.line)
+            .toSorted((a, b) => a - b);
+          assert.deepEqual(diagLines, [14, 20, 22, 27]);
+          for (const diag of report.diagnostics) {
+            assert.ok(diag.message.includes("slug"), diag.message);
+            assert.ok(
+              diag.evidence.some(
+                (e) => e.at?.file === "packages/api/src/routes.ts",
+              ),
+            );
+            assert.ok(
+              diag.evidence.some(
+                (e) => e.at?.file === "packages/db/src/schema.ts",
+              ),
+            );
+          }
 
-      const explainedReported = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:14:24",
-      });
-      assert.equal(explainedReported.explanation.status, "reported");
-      assert.ok(explainedReported.diagnostics.some((d) => d.at.line === 14));
+          const explainedReported = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:14:24",
+          });
+          assert.equal(explainedReported.explanation.status, "reported");
+          assert.ok(
+            explainedReported.diagnostics.some((d) => d.at.line === 14),
+          );
 
-      const explainedPass = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:32:18",
-      });
-      assert.ok(
-        explainedPass.explanation.checkpoints.some(
-          (cp) =>
-            cp.name === "row-projection-satisfied" && cp.outcome === "pass",
-        ),
-      );
+          const explainedPass = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:36:18",
+          });
+          assert.ok(
+            explainedPass.explanation.checkpoints.some(
+              (cp) =>
+                cp.name === "row-projection-satisfied" && cp.outcome === "pass",
+            ),
+          );
 
-      const explainedDyn = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:36:27",
-      });
-      assert.equal(explainedDyn.explanation.status, "excluded_by_checkpoint");
-      assert.equal(
-        explainedDyn.explanation.excludedByCheckpoint?.name,
-        "dynamic-query-projection-gap",
-      );
+          const explainedDyn = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:43:27",
+          });
+          assert.equal(
+            explainedDyn.explanation.status,
+            "excluded_by_checkpoint",
+          );
+          assert.equal(
+            explainedDyn.explanation.excludedByCheckpoint?.name,
+            "dynamic-query-projection-gap",
+          );
 
-      const explainedUnrelated = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:39:18",
-      });
-      assert.equal(
-        explainedUnrelated.explanation.status,
-        "excluded_by_checkpoint",
-      );
-      assert.equal(
-        explainedUnrelated.explanation.excludedByCheckpoint?.name,
-        "validator-input-not-from-query",
-      );
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+          const explainedUnrelated = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:46:18",
+          });
+          assert.equal(
+            explainedUnrelated.explanation.status,
+            "excluded_by_checkpoint",
+          );
+          assert.equal(
+            explainedUnrelated.explanation.excludedByCheckpoint?.name,
+            "validator-input-not-from-query",
+          );
+        } finally {
+          await session.close();
+        }
+      },
+    );
   });
 
   void it("resolves createSelectSchema(table, refine) + .extend() override and traces local unknowns via targeted explain", async () => {
-    const root = createMonorepoFixture({
-      "packages/db/src/schema.ts": [
-        'import { integer, relations, sqliteTable, text } from "./drizzle.js";',
-        "",
-        'export const users = sqliteTable("users", {',
-        '  id: integer("id").primaryKey(),',
-        '  name: text("name").notNull(),',
-        '  age: integer("age").notNull(),',
-        "});",
-        "export const _r = relations;",
-        "",
-      ].join("\n"),
-      "packages/db/src/queries.ts": [
-        'import { db, eq } from "./drizzle.js";',
-        'import { users } from "./schema.js";',
-        "",
-        "export async function fetchUserBrief(userId: number) {",
-        "  return await db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)).get();",
-        "}",
-        "",
-      ].join("\n"),
-      "packages/db/src/validation.ts": [
-        'import { createSelectSchema } from "drizzle-zod";',
-        'import { z } from "zod";',
-        'import { users } from "./schema.js";',
-        "",
-        "declare function runtimeAgeValidator(): z.ZodType<number>;",
-        "",
-        "export const unknownAgeSchema = createSelectSchema(users, {",
-        "  age: runtimeAgeValidator(),",
-        "});",
-        "",
-        "export const defaultedAgeSchema = createSelectSchema(users, {",
-        "  age: runtimeAgeValidator(),",
-        "}).extend({",
-        "  age: z.number().default(18),",
-        "});",
-        "",
-      ].join("\n"),
-      "packages/db/src/index.ts": [
-        'export { users } from "./schema.js";',
-        'export { fetchUserBrief } from "./queries.js";',
-        'export { defaultedAgeSchema, unknownAgeSchema } from "./validation.js";',
-        "",
-      ].join("\n"),
-      "packages/api/src/routes.ts": [
-        'import { defaultedAgeSchema, fetchUserBrief, unknownAgeSchema } from "@fixture/db";',
-        "",
-        "export async function checkRefined(userId: number) {",
-        "  const brief = await fetchUserBrief(userId);",
-        "  if (!brief) return null;",
-        "  const withGap = unknownAgeSchema.parse(brief);",
-        "  const resolved = defaultedAgeSchema.parse(brief);",
-        "  return { withGap, resolved };",
-        "}",
-        "",
-      ].join("\n"),
-    });
+    await withMonorepoHost(
+      "rules-reference/row-projection-refined",
+      async (host) => {
+        await host.typecheck("packages/db/tsconfig.json");
+        await host.typecheck("packages/api/tsconfig.json");
 
-    const session = await openSession({
-      cwd: root,
-      adapterResolutionRoot: packageRoot,
-      config: defineConfig({
-        projects: ["packages/db/tsconfig.json", "packages/api/tsconfig.json"],
-        adapters: [drizzleAdapter, zodAdapter],
-        rules: [rowProjectionSatisfiesValidatorRule],
-      }),
-    });
+        const session = await openSession({
+          cwd: host.rootDir,
+          adapterResolutionRoot: packageRoot,
+          config: defineConfig({
+            projects: [
+              "packages/db/tsconfig.json",
+              "packages/api/tsconfig.json",
+            ],
+            adapters: [drizzleAdapter, zodAdapter],
+            rules: [rowProjectionSatisfiesValidatorRule],
+          }),
+        });
 
-    try {
-      const report = await session.check();
-      assert.equal(report.status, "clean");
-      // unknownAgeSchema keeps its active unresolved-schema-field gap,
-      // while defaultedAgeSchema cleared its superseded gap!
-      const schemaGaps = report.gaps.filter(
-        (g) => g.kind === "unresolved-schema-field",
-      );
-      assert.equal(schemaGaps.length, 1, JSON.stringify(schemaGaps));
-      assert.equal(schemaGaps[0]?.at?.file, "packages/db/src/validation.ts");
-      assert.equal(schemaGaps[0]?.at?.line, 8);
+        try {
+          const report = await session.check();
+          assert.equal(report.status, "clean");
+          // unknownAgeSchema keeps its active unresolved-schema-field gap,
+          // while defaultedAgeSchema cleared its superseded gap!
+          const schemaGaps = report.gaps.filter(
+            (g) => g.kind === "unresolved-schema-field",
+          );
+          assert.equal(schemaGaps.length, 1, JSON.stringify(schemaGaps));
+          assert.equal(
+            schemaGaps[0]?.at?.file,
+            "packages/db/src/validation.ts",
+          );
+          assert.equal(schemaGaps[0]?.at?.line, 9);
 
-      const gapExplain = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:6:19",
-      });
-      assert.ok(
-        gapExplain.explanation.localGaps.some(
-          (lg) =>
-            lg.status === "unresolved" &&
-            lg.providerId === "drizzle" &&
-            lg.field === "age" &&
-            lg.gap.kind === "unresolved-schema-field",
-        ),
-        JSON.stringify(gapExplain.explanation.localGaps),
-      );
+          const gapExplain = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:10:19",
+          });
+          assert.ok(
+            gapExplain.explanation.localGaps.some(
+              (lg) =>
+                lg.status === "unresolved" &&
+                lg.providerId === "drizzle" &&
+                lg.field === "age" &&
+                lg.gap.kind === "unresolved-schema-field",
+            ),
+            JSON.stringify(gapExplain.explanation.localGaps),
+          );
 
-      const resolvedExplain = await session.explain({
-        ruleId: "row-projection-satisfies-validator",
-        at: "packages/api/src/routes.ts:7:20",
-      });
-      assert.ok(
-        resolvedExplain.explanation.localGaps.some(
-          (lg) =>
-            lg.status === "resolved_by_override" &&
-            lg.providerId === "drizzle" &&
-            lg.field === "age" &&
-            lg.resolvedBy?.providerId === "zod" &&
-            lg.resolvedBy.operation === ".extend()",
-        ),
-        JSON.stringify(resolvedExplain.explanation.localGaps),
-      );
-    } finally {
-      await session.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+          const resolvedExplain = await session.explain({
+            ruleId: "row-projection-satisfies-validator",
+            at: "packages/api/src/routes.ts:11:20",
+          });
+          assert.ok(
+            resolvedExplain.explanation.localGaps.some(
+              (lg) =>
+                lg.status === "resolved_by_override" &&
+                lg.providerId === "drizzle" &&
+                lg.field === "age" &&
+                lg.resolvedBy?.providerId === "zod" &&
+                lg.resolvedBy.operation === ".extend()",
+            ),
+            JSON.stringify(resolvedExplain.explanation.localGaps),
+          );
+        } finally {
+          await session.close();
+        }
+      },
+    );
   });
 
-  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @verule/sdk .d.ts", () => {
-    const root = mkdtempSync(join(tmpdir(), "verule-rules-ref-typecheck-"));
-    try {
-      for (const pkg of [
-        { name: "@verule/sdk", dir: sdkRoot },
-        { name: "@verule/adapter-zod", dir: adapterZodRoot },
-        { name: "@verule/adapter-drizzle", dir: adapterDrizzleRoot },
-        { name: "@verule/rules-reference", dir: packageRoot },
-      ]) {
-        const pkgOut = join(root, "node_modules", ...pkg.name.split("/"));
-        mkdirSync(pkgOut, { recursive: true });
-        const distSrc = join(pkg.dir, "dist");
-        const distDst = join(pkgOut, "dist");
-        assert.equal(
-          existsSync(join(distSrc, "index.d.ts")),
-          true,
-          `Missing built dist/index.d.ts for ${pkg.name}`,
-        );
-        cpSync(distSrc, distDst, { recursive: true });
-        const raw = JSON.parse(
-          readFileSync(join(pkg.dir, "package.json"), "utf8"),
-        ) as {
-          readonly name: string;
-          readonly version: string;
-          readonly type: string;
-          readonly publishConfig?: { readonly exports?: unknown };
-        };
-        writeFileSync(
-          join(pkgOut, "package.json"),
+  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @verule/sdk .d.ts", async () => {
+    await withTempHost(
+      { prefix: "verule-rules-ref-typecheck-" },
+      async (host) => {
+        for (const pkg of [
+          { name: "@verule/sdk", dir: sdkRoot },
+          { name: "@verule/adapter-zod", dir: adapterZodRoot },
+          { name: "@verule/adapter-drizzle", dir: adapterDrizzleRoot },
+          { name: "@verule/rules-reference", dir: packageRoot },
+        ]) {
+          const pkgOut = host.resolvePath(
+            join("node_modules", ...pkg.name.split("/")),
+          );
+          const distSrc = join(pkg.dir, "dist");
+          assert.equal(
+            existsSync(join(distSrc, "index.d.ts")),
+            true,
+            `Missing built dist/index.d.ts for ${pkg.name}`,
+          );
+          cpSync(distSrc, join(pkgOut, "dist"), { recursive: true });
+          const raw = JSON.parse(
+            readFileSync(join(pkg.dir, "package.json"), "utf8"),
+          ) as {
+            readonly name: string;
+            readonly version: string;
+            readonly type: string;
+            readonly publishConfig?: { readonly exports?: unknown };
+          };
+          host.writeText(
+            join("node_modules", ...pkg.name.split("/"), "package.json"),
+            JSON.stringify(
+              {
+                name: raw.name,
+                version: raw.version,
+                type: raw.type,
+                exports: raw.publishConfig?.exports ?? {
+                  ".": {
+                    types: "./dist/index.d.ts",
+                    default: "./dist/index.js",
+                  },
+                },
+              },
+              null,
+              2,
+            ),
+          );
+        }
+
+        host.writeText(
+          "tsconfig.json",
           JSON.stringify(
             {
-              name: raw.name,
-              version: raw.version,
-              type: raw.type,
-              exports: raw.publishConfig?.exports ?? {
-                ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+              compilerOptions: {
+                strict: true,
+                exactOptionalPropertyTypes: true,
+                noUncheckedIndexedAccess: true,
+                target: "ES2022",
+                module: "NodeNext",
+                moduleResolution: "NodeNext",
+                types: [],
+                noEmit: true,
               },
+              include: ["src/**/*.ts"],
             },
             null,
             2,
           ),
-          "utf8",
         );
-      }
+        host.writeText(
+          "src/consumer.ts",
+          readFileSync(externalConsumerSource, "utf8"),
+        );
 
-      writeFileSync(
-        join(root, "tsconfig.json"),
-        JSON.stringify(
-          {
-            compilerOptions: {
-              strict: true,
-              exactOptionalPropertyTypes: true,
-              noUncheckedIndexedAccess: true,
-              target: "ES2022",
-              module: "NodeNext",
-              moduleResolution: "NodeNext",
-              types: [],
-              noEmit: true,
-            },
-            include: ["src/**/*.ts"],
-          },
-          null,
-          2,
-        ),
-        "utf8",
-      );
-      mkdirSync(join(root, "src"), { recursive: true });
-      writeFileSync(
-        join(root, "src", "consumer.ts"),
-        [
-          'import { defineConfig } from "@verule/sdk";',
-          'import { drizzleAdapter } from "@verule/adapter-drizzle";',
-          'import { zodAdapter } from "@verule/adapter-zod";',
-          'import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";',
-          "",
-          "export default defineConfig({",
-          '  tsconfig: "tsconfig.json",',
-          "  adapters: [drizzleAdapter, zodAdapter],",
-          "  rules: [rowProjectionSatisfiesValidatorRule],",
-          "});",
-          "",
-        ].join("\n"),
-        "utf8",
-      );
-
-      execFileSync(
-        tscBin,
-        ["-p", join(root, "tsconfig.json"), "--pretty", "false"],
-        { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+        await host.typecheck();
+      },
+    );
   });
 });

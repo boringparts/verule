@@ -12,7 +12,7 @@
     "format:write": "oxfmt --write .",
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false && tsc -p tsconfig.multiple-sources.json --noEmit --pretty false"
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false && tsc -p tsconfig.multiple-sources.json --noEmit --pretty false && tsc -p tsconfig.variants.json --noEmit --pretty false && tsc -p variants/case-a/tsconfig.json --noEmit --pretty false && tsc -p variants/case-b/tsconfig.json --noEmit --pretty false && tsc -p variants/case-cd/tsconfig.json --noEmit --pretty false && tsc -p variants/case-e/tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@verule/acceptance-host-drizzle-zod-data": "workspace:*",

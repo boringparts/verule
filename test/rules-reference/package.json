@@ -37,6 +37,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@verule/test-hosts": "workspace:*",
     "@verule/tooling-config": "workspace:*",
     "drizzle-orm": "catalog:",
     "drizzle-zod": "catalog:",
