@@ -24,6 +24,18 @@ export const neutralProductReviewRule = defineRule({
       kinds: ["PropertyAccessExpression"],
       textIncludes: [".price"],
     });
+    const priceExpressions = priceReads
+      .map((read) => ({ read, expression: read.expression }))
+      .filter(
+        (
+          entry,
+        ): entry is {
+          readonly read: (typeof priceReads)[number];
+          readonly expression: NonNullable<
+            (typeof priceReads)[number]["expression"]
+          >;
+        } => entry.expression !== undefined,
+      );
 
     for (const [index, resolved] of resolvedCalls.entries()) {
       const call = reviewCalls[index];
@@ -41,44 +53,68 @@ export const neutralProductReviewRule = defineRule({
           target.location?.file === "packages/data/src/product.ts",
       );
       if (productQuery === undefined || productQuery.location === null) {
+        ctx.checkpoint(
+          "product-query-origin",
+          call.location,
+          "exclude",
+          () => ({
+            targets: targets.resolvedTargets.map((t) => ({
+              name: t.name,
+              file: t.location?.file ?? null,
+            })),
+          }),
+        );
         continue;
       }
 
-      for (const priceRead of priceReads) {
-        const productValue = priceRead.expression;
-        if (!priceRead.text.endsWith(".price") || productValue === undefined) {
-          continue;
-        }
-        // Check the imported query result against the binding read by the price validation.
-        const propagation = await ctx.valuePropagation({
-          propagation: "value",
-          from: call.ref,
-          to: [productValue],
-        });
-        const flow = propagation.results[0];
-        if (!flow?.reachable) {
-          continue;
-        }
+      ctx.checkpoint("product-query-origin", call.location, "pass", () => ({
+        target: productQuery.name,
+        file: productQuery.location?.file ?? null,
+      }));
 
-        ctx.report({
-          at: call.location,
-          message: "Review products loaded across the package boundary.",
-          evidence: [
-            {
-              kind: "source",
-              message: "The call resolves to the data package product query.",
-              at: productQuery.location,
-            },
-            {
-              kind: "source",
-              message: "The returned product reaches its price validation.",
-              at: priceRead.location,
-            },
-            ...flow.evidence,
-          ],
-        });
-        break;
+      // Batch all candidate .price reads so unselected reads in other functions stay excluded.
+      const propagation = await ctx.valuePropagation({
+        propagation: "value",
+        from: call.ref,
+        to: priceExpressions.map((entry) => entry.expression),
+      });
+      const matchedFlow = propagation.results.find((flow) => flow.reachable);
+      if (matchedFlow === undefined) {
+        ctx.checkpoint(
+          "price-validation-reachability",
+          call.location,
+          "exclude",
+        );
+        continue;
       }
+
+      const matchedPriceRead = priceExpressions.find(
+        (entry) => entry.expression.handleId === matchedFlow.to.handleId,
+      );
+      if (matchedPriceRead === undefined) {
+        continue;
+      }
+
+      ctx.checkpoint(
+        "price-validation-reachability",
+        call.location,
+        "pass",
+        () => ({ priceAt: matchedPriceRead.read.location }),
+      );
+
+      ctx.report({
+        at: call.location,
+        message: "Review products loaded across the package boundary.",
+        basis: [productQuery, matchedPriceRead.read, matchedFlow],
+        evidence: [
+          {
+            kind: "note",
+            message:
+              "Business judgment: cross-package product lookups require price review.",
+            at: call.location,
+          },
+        ],
+      });
     }
   },
 });

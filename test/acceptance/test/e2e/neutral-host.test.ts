@@ -54,29 +54,54 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       "neutral-product-review",
       JSON.stringify(result.report.diagnostics),
     );
-    assert.ok(
-      result.report.diagnostics[0]?.evidence.some(
-        (item) =>
-          item.at?.file === "packages/data/src/product.ts" &&
-          item.message ===
-            "The call resolves to the data package product query.",
-      ),
+    const diag = result.report.diagnostics[0];
+    assert.ok(diag, JSON.stringify(result.report.diagnostics));
+    assert.equal(diag.at.file, "packages/app/src/review.ts");
+    assert.equal(diag.at.line, 15);
+    assert.equal(
+      diag.message,
+      "Review products loaded across the package boundary.",
     );
     assert.ok(
-      result.report.diagnostics[0]?.evidence.some(
+      diag.evidence.some(
         (item) =>
-          item.at?.file === "packages/app/src/review.ts" &&
-          item.message === "The returned product reaches its price validation.",
+          item.kind === "source" &&
+          item.at?.file === "packages/data/src/product.ts" &&
+          item.at.line === 7 &&
+          item.declaration === "findProduct",
       ),
+      `Expected selected CallTargetInfo evidence from product.ts: ${JSON.stringify(diag.evidence)}`,
+    );
+    assert.ok(
+      diag.evidence.some(
+        (item) =>
+          item.kind === "source" &&
+          item.at?.file === "packages/app/src/review.ts" &&
+          item.at.line === 16,
+      ),
+      `Expected selected price read / propagation evidence on review.ts:16: ${JSON.stringify(diag.evidence)}`,
+    );
+    assert.ok(
+      diag.evidence.some(
+        (item) =>
+          item.kind === "note" &&
+          item.at?.file === "packages/app/src/review.ts" &&
+          item.at.line === 15 &&
+          item.message ===
+            "Business judgment: cross-package product lookups require price review.",
+      ),
+      `Expected custom business note on review.ts:15: ${JSON.stringify(diag.evidence)}`,
     );
     assert.equal(
-      result.report.diagnostics[0]?.at.file,
-      "packages/app/src/review.ts",
-    );
-    assert.ok(
-      result.report.diagnostics[0]?.evidence.some(
-        (item) => item.at?.file === "packages/data/src/product.ts",
+      diag.evidence.some(
+        (item) =>
+          (item.at?.file === "packages/data/src/product.ts" &&
+            item.at.line === 11) ||
+          (item.at?.file === "packages/app/src/review.ts" &&
+            [7, 25, 26, 35, 41, 42].includes(item.at.line)),
       ),
+      false,
+      `Unselected candidate evidence leaked into diagnostic: ${JSON.stringify(diag.evidence)}`,
     );
     assert.deepEqual(await runInstalledSdk(host), result.report);
     assert.ok(
@@ -85,6 +110,52 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
           gap.kind === "dynamic-callee" &&
           gap.at?.file === "packages/app/src/review.ts",
       ),
+    );
+
+    const reportedCallTarget = findSourceTarget(reviewSource, "getProduct(id)");
+    const reportedExplanation = await host.check({
+      config: configPath,
+      rule: "neutral-product-review",
+      at: `${reviewPath}:${reportedCallTarget}`,
+    });
+    assert.equal(reportedExplanation.status, 1, reportedExplanation.stderr);
+    assert.equal(reportedExplanation.report.explanation?.status, "reported");
+    assert.ok(
+      reportedExplanation.report.explanation?.checkpoints.some(
+        (cp) => cp.name === "product-query-origin" && cp.outcome === "pass",
+      ),
+      JSON.stringify(reportedExplanation.report.explanation?.checkpoints),
+    );
+    assert.ok(
+      reportedExplanation.report.explanation?.checkpoints.some(
+        (cp) =>
+          cp.name === "price-validation-reachability" && cp.outcome === "pass",
+      ),
+      JSON.stringify(reportedExplanation.report.explanation?.checkpoints),
+    );
+
+    const localCounterexampleTarget = findSourceTarget(
+      reviewSource,
+      "findProduct(id)",
+    );
+    const localCounterexampleExplanation = await host.check({
+      config: configPath,
+      rule: "neutral-product-review",
+      at: `${reviewPath}:${localCounterexampleTarget}`,
+    });
+    assert.equal(
+      localCounterexampleExplanation.status,
+      1,
+      localCounterexampleExplanation.stderr,
+    );
+    assert.equal(
+      localCounterexampleExplanation.report.explanation?.status,
+      "excluded_by_checkpoint",
+    );
+    assert.equal(
+      localCounterexampleExplanation.report.explanation?.excludedByCheckpoint
+        ?.name,
+      "product-query-origin",
     );
 
     host.replaceText(

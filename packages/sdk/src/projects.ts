@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { normalizeEvidence, normalizeLocation } from "./evidence.ts";
 import {
   VeruleExecutionError,
   type Diagnostic,
@@ -25,23 +26,6 @@ function compareCodepoint(a: string, b: string): number {
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
-}
-
-function normalizeLocation(loc: DiagnosticLocation): DiagnosticLocation {
-  const normalizedFile = loc.file.replaceAll("\\", "/");
-  return normalizedFile === loc.file ? loc : { ...loc, file: normalizedFile };
-}
-
-function normalizeEvidence(evidence: readonly Evidence[]): readonly Evidence[] {
-  return evidence.map((item) => ({
-    kind: item.kind,
-    message: item.message,
-    ...(item.at !== undefined ? { at: normalizeLocation(item.at) } : {}),
-    ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
-    ...(item.declaration !== undefined
-      ? { declaration: item.declaration }
-      : {}),
-  }));
 }
 
 function canonicalLocationKey(loc: DiagnosticLocation): string {

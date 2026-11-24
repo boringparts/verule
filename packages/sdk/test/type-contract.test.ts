@@ -608,6 +608,28 @@ void describe("@verule/sdk external TypeScript consumer contract", () => {
           `,
           expectedPattern: /TS2322|TS2345/u,
         },
+        {
+          name: "aggregate ValuePropagationResult cannot be passed in DiagnosticInput.basis",
+          body: `
+            declare const synRef: SyntaxRef;
+            declare const loc: import("@verule/sdk").DiagnosticLocation;
+            const prop = await ctx.valuePropagation({ from: synRef, to: [synRef] });
+            ctx.report({ at: loc, message: "bad basis", basis: [prop] });
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
+        {
+          name: "aggregate CallEffectsResult cannot be passed in DiagnosticInput.basis",
+          body: `
+            declare const callRef: CallRef;
+            declare const loc: import("@verule/sdk").DiagnosticLocation;
+            const [eff] = await ctx.callEffects({ targets: [callRef] });
+            if (eff) {
+              ctx.report({ at: loc, message: "bad basis", basis: [eff] });
+            }
+          `,
+          expectedPattern: /TS2322|TS2345/u,
+        },
       ];
 
       for (const testCase of negativeCases) {

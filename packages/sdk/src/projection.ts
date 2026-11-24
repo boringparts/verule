@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { registerProvenance, summarizeSyntaxSnippet } from "./evidence.ts";
 import {
   VeruleExecutionError,
   getRefSessionToken,
@@ -8,6 +9,7 @@ import {
   type CallRef,
   type DeclarationRef,
   type DiagnosticLocation,
+  type Evidence,
   type Gap,
   type ProgramRef,
   type SignatureRef,
@@ -598,7 +600,30 @@ export function createProjectionQueries(deps: {
             ),
           );
         }
-        return row as ProjectedDeclarationRow<S>;
+        const declEvidence: Evidence[] = [];
+        if (select?.location === true && raw.location != null) {
+          declEvidence.push({
+            kind: "source",
+            message:
+              select.name === true && raw.name != null
+                ? `Declaration: ${raw.name}`
+                : "Declaration",
+            at: raw.location,
+            ...(select.name === true && raw.name != null
+              ? { declaration: raw.name }
+              : {}),
+          });
+        } else if (select?.name === true && raw.name != null) {
+          declEvidence.push({
+            kind: "source",
+            message: `Declaration: ${raw.name}`,
+            declaration: raw.name,
+          });
+        }
+        return registerProvenance(
+          row as ProjectedDeclarationRow<S>,
+          declEvidence,
+        );
       });
     },
 
@@ -642,7 +667,18 @@ export function createProjectionQueries(deps: {
           projectId,
           snapshotId,
         );
-        return row as ProjectedCallResolutionRow<S>;
+        return registerProvenance(
+          row as ProjectedCallResolutionRow<S>,
+          select?.location === true && raw.location != null
+            ? [
+                {
+                  kind: "source",
+                  message: "Call expression",
+                  at: raw.location,
+                },
+              ]
+            : [],
+        );
       });
     },
 
@@ -674,7 +710,18 @@ export function createProjectionQueries(deps: {
           projectId,
           snapshotId,
         );
-        return row as ProjectedCallRow<S>;
+        return registerProvenance(
+          row as ProjectedCallRow<S>,
+          select.location === true && raw.location != null
+            ? [
+                {
+                  kind: "source",
+                  message: "Call expression",
+                  at: raw.location,
+                },
+              ]
+            : [],
+        );
       });
     },
 
@@ -956,7 +1003,24 @@ export function createProjectionQueries(deps: {
             makeProgramRef("syntax", sessionToken, projectId, snapshotId, id),
           );
         }
-        return row as ProjectedSyntaxLookupRow<S>;
+        const syntaxEvidence: Evidence[] = [];
+        if (select?.location === true && raw.location != null) {
+          const kindPrefix =
+            select.kind === true && raw.kind != null ? raw.kind : "Syntax node";
+          const snippet =
+            select.text === true && raw.text != null
+              ? `: ${summarizeSyntaxSnippet(raw.text)}`
+              : "";
+          syntaxEvidence.push({
+            kind: "source",
+            message: `${kindPrefix}${snippet}`,
+            at: raw.location,
+          });
+        }
+        return registerProvenance(
+          row as ProjectedSyntaxLookupRow<S>,
+          syntaxEvidence,
+        );
       });
     },
   };

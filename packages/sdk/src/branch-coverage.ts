@@ -1,3 +1,4 @@
+import { registerProvenance } from "./evidence.ts";
 import {
   VeruleExecutionError,
   getRefSessionToken,
@@ -123,27 +124,38 @@ export function toFunctionBranchesResult(
 ): FunctionBranchesResult {
   return {
     target,
-    branches: item.branches.map((branch) => ({
-      ref: makeProgramRef(
-        "branch",
-        sessionToken,
-        projectId,
-        snapshotId,
-        branch.ref,
+    branches: item.branches.map((branch) =>
+      registerProvenance(
+        {
+          ref: makeProgramRef(
+            "branch",
+            sessionToken,
+            projectId,
+            snapshotId,
+            branch.ref,
+          ),
+          kind: branch.kind,
+          direction: branch.direction,
+          condition: makeProgramRef(
+            "syntax",
+            sessionToken,
+            projectId,
+            snapshotId,
+            branch.condition,
+          ),
+          conditionText: branch.conditionText,
+          location: branch.location,
+          statementLocation: branch.statementLocation,
+        },
+        [
+          {
+            kind: "source",
+            message: `Branch (${branch.kind} ${branch.direction}): ${branch.conditionText}`,
+            at: branch.location,
+          },
+        ],
       ),
-      kind: branch.kind,
-      direction: branch.direction,
-      condition: makeProgramRef(
-        "syntax",
-        sessionToken,
-        projectId,
-        snapshotId,
-        branch.condition,
-      ),
-      conditionText: branch.conditionText,
-      location: branch.location,
-      statementLocation: branch.statementLocation,
-    })),
+    ),
     gaps: item.gaps,
   };
 }
@@ -152,10 +164,13 @@ export function toBranchCoverageItem(
   item: EngineBranchCoverageItem,
   target: SyntaxRef,
 ): BranchCoverageItem {
-  return {
-    target,
-    status: item.status,
-    evidence: item.evidence,
-    gaps: item.gaps,
-  };
+  return registerProvenance(
+    {
+      target,
+      status: item.status,
+      evidence: item.evidence,
+      gaps: item.gaps,
+    },
+    item.evidence,
+  );
 }

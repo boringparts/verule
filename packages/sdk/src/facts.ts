@@ -1,5 +1,11 @@
 import { performance } from "node:perf_hooks";
 
+import {
+  dedupeEvidence,
+  extractBasisEvidence,
+  registerProvenance,
+  type DiagnosticBasis,
+} from "./evidence.ts";
 import type { ObservationCollector } from "./observation.ts";
 import { locationMatchesTarget } from "./observation.ts";
 import { validateProgramRefs } from "./projection.ts";
@@ -172,6 +178,7 @@ export type FactContribution<
 > = {
   readonly subject: ProgramRef<SubjectKind>;
   readonly value: Value;
+  readonly basis?: readonly DiagnosticBasis[];
   readonly evidence?: readonly Evidence[];
   readonly gaps?: readonly Gap[];
 };
@@ -374,19 +381,6 @@ function formatEvidenceList(evidence: readonly Evidence[]): string {
     .join("; ");
 }
 
-function dedupeEvidence(items: readonly Evidence[]): readonly Evidence[] {
-  const seen = new Set<string>();
-  const out: Evidence[] = [];
-  for (const item of items) {
-    const key = stableSerializeValue(item);
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(item);
-    }
-  }
-  return out;
-}
-
 function dedupeGaps(items: readonly Gap[]): readonly Gap[] {
   const seen = new Set<string>();
   const out: Gap[] = [];
@@ -510,7 +504,9 @@ function mergeContributions<
     // Collapse multiple entries for the same subject within a single provider if any.
     for (const contribution of entry.contributions) {
       const handleId = contribution.subject.handleId;
-      const incomingEvidence = [...(contribution.evidence ?? [])];
+      const incomingEvidence = [
+        ...extractBasisEvidence(contribution.basis, contribution.evidence),
+      ];
       const incomingGaps = [...(contribution.gaps ?? [])];
       const existing = bySubject.get(handleId);
 
@@ -622,7 +618,7 @@ function mergeContributions<
 
   return orderedIds.map((handleId) => {
     const acc = bySubject.get(handleId)!;
-    return {
+    const fact: FactResult<SubjectKind, Value> = {
       factTypeId: factType.id,
       projectId,
       snapshotId,
@@ -632,6 +628,7 @@ function mergeContributions<
       gaps: acc.gaps,
       providers: acc.providers,
     };
+    return registerProvenance(fact, acc.evidence);
   });
 }
 

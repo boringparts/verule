@@ -31,6 +31,11 @@ import {
 } from "./calls-values.ts";
 import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
 import {
+  extractBasisEvidence,
+  registerProvenance,
+  summarizeSyntaxSnippet,
+} from "./evidence.ts";
+import {
   FactCache,
   executeFactQuery,
   validateAdapters,
@@ -209,6 +214,20 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
   return [...rules];
 }
 
+function registerModelProvenance(model: Model): Model {
+  const message =
+    typeof model.description === "string" && model.description.trim() !== ""
+      ? model.description
+      : `Project model "${model.id}"`;
+  return registerProvenance(model, [
+    {
+      kind: "model",
+      modelId: model.id,
+      message,
+    },
+  ]);
+}
+
 function validateModels(models: readonly Model[]): readonly Model[] {
   const seen = new Set<string>();
   for (const model of models) {
@@ -237,6 +256,7 @@ function validateModels(models: readonly Model[]): readonly Model[] {
       );
     }
     seen.add(model.id);
+    registerModelProvenance(model);
   }
   return [...models];
 }
@@ -261,7 +281,7 @@ export function defineModel(model: Model): Model {
     model.cleanupOperations,
     model.lifecycleEvents,
   );
-  return model;
+  return registerModelProvenance(model);
 }
 
 function selectRules(
@@ -510,82 +530,91 @@ function toSyntaxNodeResult(
   );
   syntaxLocations.set(ref, item.location);
 
-  return {
-    ref,
-    kind: item.kind,
-    text: item.text,
-    location: item.location,
-    ...(item.expression !== undefined
-      ? {
-          expression: makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            item.expression,
-          ),
-        }
-      : {}),
-    ...(item.arguments !== undefined
-      ? {
-          arguments: item.arguments.map((argId) =>
-            makeProgramRef(
+  return registerProvenance(
+    {
+      ref,
+      kind: item.kind,
+      text: item.text,
+      location: item.location,
+      ...(item.expression !== undefined
+        ? {
+            expression: makeProgramRef(
               "syntax",
               sessionToken,
               projectId,
               snapshotId,
-              argId,
+              item.expression,
             ),
-          ),
-        }
-      : {}),
-    ...(item.name !== undefined
-      ? {
-          name: makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            item.name,
-          ),
-        }
-      : {}),
-    ...(item.initializer !== undefined
-      ? {
-          initializer: makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            item.initializer,
-          ),
-        }
-      : {}),
-    ...(item.body !== undefined
-      ? {
-          body: makeProgramRef(
-            "syntax",
-            sessionToken,
-            projectId,
-            snapshotId,
-            item.body,
-          ),
-        }
-      : {}),
-    ...(item.parameters !== undefined
-      ? {
-          parameters: item.parameters.map((paramId) =>
-            makeProgramRef(
+          }
+        : {}),
+      ...(item.arguments !== undefined
+        ? {
+            arguments: item.arguments.map((argId) =>
+              makeProgramRef(
+                "syntax",
+                sessionToken,
+                projectId,
+                snapshotId,
+                argId,
+              ),
+            ),
+          }
+        : {}),
+      ...(item.name !== undefined
+        ? {
+            name: makeProgramRef(
               "syntax",
               sessionToken,
               projectId,
               snapshotId,
-              paramId,
+              item.name,
             ),
-          ),
-        }
-      : {}),
-  };
+          }
+        : {}),
+      ...(item.initializer !== undefined
+        ? {
+            initializer: makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              item.initializer,
+            ),
+          }
+        : {}),
+      ...(item.body !== undefined
+        ? {
+            body: makeProgramRef(
+              "syntax",
+              sessionToken,
+              projectId,
+              snapshotId,
+              item.body,
+            ),
+          }
+        : {}),
+      ...(item.parameters !== undefined
+        ? {
+            parameters: item.parameters.map((paramId) =>
+              makeProgramRef(
+                "syntax",
+                sessionToken,
+                projectId,
+                snapshotId,
+                paramId,
+              ),
+            ),
+          }
+        : {}),
+    },
+    [
+      {
+        kind: "source",
+        message: `${item.kind}: ${summarizeSyntaxSnippet(item.text)}`,
+        at: item.location,
+      },
+    ],
+  );
 }
 
 function toTypeAtResult(
@@ -1914,7 +1943,7 @@ export async function openSession(
           ...(input.findingKey !== undefined
             ? { findingKey: input.findingKey }
             : {}),
-          evidence: input.evidence ?? [],
+          evidence: extractBasisEvidence(input.basis, input.evidence),
         });
       },
       checkpoint: (

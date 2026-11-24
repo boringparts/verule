@@ -21,6 +21,7 @@ import type {
   ValuePropagationOptions,
   ValuePropagationResult,
 } from "./calls-values.ts";
+import type { DiagnosticBasis } from "./evidence.ts";
 import type {
   ConfiguredAdapter,
   FactQueryOptions,
@@ -256,6 +257,7 @@ export type DiagnosticInput = {
   readonly at: DiagnosticLocation;
   readonly message: string;
   readonly findingKey?: string;
+  readonly basis?: readonly DiagnosticBasis[];
   readonly evidence?: readonly Evidence[];
 };
 

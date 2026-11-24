@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 import type { EngineClient, RpcRequestOptions } from "./engine-client.ts";
+import { registerProvenance } from "./evidence.ts";
 import { normalizeLookupFiles } from "./lookup-files.ts";
 import { validateProgramRefs, type SelectedKeys } from "./projection.ts";
 import {
@@ -432,30 +433,34 @@ export function createInstanceIdentityQueries(deps: {
             }
             recordGaps(raw.gaps);
             const instances: ResolvedInstanceInfo[] = raw.instances.map(
-              (entry) => ({
-                ref: makeProgramRef(
-                  "instance",
-                  sessionToken,
-                  projectId,
-                  snapshotId,
-                  entry.ref,
+              (entry) =>
+                registerProvenance(
+                  {
+                    ref: makeProgramRef(
+                      "instance",
+                      sessionToken,
+                      projectId,
+                      snapshotId,
+                      entry.ref,
+                    ),
+                    instanceKey: entry.instanceKey,
+                    originKind: entry.originKind,
+                    allocationLocation: entry.allocationLocation,
+                    originSyntax:
+                      entry.originSyntax !== null
+                        ? makeProgramRef(
+                            "syntax",
+                            sessionToken,
+                            projectId,
+                            snapshotId,
+                            entry.originSyntax,
+                          )
+                        : null,
+                    modelId: entry.modelId,
+                    evidence: entry.evidence,
+                  },
+                  entry.evidence,
                 ),
-                instanceKey: entry.instanceKey,
-                originKind: entry.originKind,
-                allocationLocation: entry.allocationLocation,
-                originSyntax:
-                  entry.originSyntax !== null
-                    ? makeProgramRef(
-                        "syntax",
-                        sessionToken,
-                        projectId,
-                        snapshotId,
-                        entry.originSyntax,
-                      )
-                    : null,
-                modelId: entry.modelId,
-                evidence: entry.evidence,
-              }),
             );
             const primaryRef =
               raw.instance !== null
@@ -467,16 +472,19 @@ export function createInstanceIdentityQueries(deps: {
                     raw.instance,
                   )
                 : null;
-            return {
-              target,
-              instance: primaryRef,
-              instanceKey: raw.instanceKey,
-              allocationLocation: raw.allocationLocation,
-              originKind: raw.originKind,
-              instances,
-              evidence: raw.evidence,
-              gaps: raw.gaps,
-            };
+            return registerProvenance(
+              {
+                target,
+                instance: primaryRef,
+                instanceKey: raw.instanceKey,
+                allocationLocation: raw.allocationLocation,
+                originKind: raw.originKind,
+                instances,
+                evidence: raw.evidence,
+                gaps: raw.gaps,
+              },
+              raw.evidence,
+            );
           });
           cache.resolutionCache.set(key, rowPromise);
         }
@@ -485,10 +493,15 @@ export function createInstanceIdentityQueries(deps: {
       const results = await Promise.all(
         targets.map((target) => {
           const key = `${snapshotId}:${projectId}:${modelsDigest}:${lookupScopeKey}:${target.handleId}`;
-          return cache.resolutionCache.get(key)!.then((cached) => ({
-            ...cached,
-            target,
-          }));
+          return cache.resolutionCache.get(key)!.then((cached) =>
+            registerProvenance(
+              {
+                ...cached,
+                target,
+              },
+              cached.evidence,
+            ),
+          );
         }),
       );
 
@@ -571,7 +584,42 @@ export function createInstanceIdentityQueries(deps: {
         if (select?.evidence === true) {
           row.evidence = raw.evidence ?? [];
         }
-        return row as ProjectedInstanceRow<S>;
+        const projectedEvidence: Evidence[] = [];
+        if (
+          select?.evidence === true &&
+          raw.evidence &&
+          raw.evidence.length > 0
+        ) {
+          projectedEvidence.push(...raw.evidence);
+        } else if (
+          select?.allocationLocation === true &&
+          raw.allocationLocation != null
+        ) {
+          if (select.modelId === true && raw.modelId != null) {
+            projectedEvidence.push({
+              kind: "model",
+              modelId: raw.modelId,
+              message: `Instance allocated by model "${raw.modelId}"`,
+              at: raw.allocationLocation,
+            });
+          } else {
+            projectedEvidence.push({
+              kind: "source",
+              message: "Instance allocation",
+              at: raw.allocationLocation,
+            });
+          }
+        } else if (select?.modelId === true && raw.modelId != null) {
+          projectedEvidence.push({
+            kind: "model",
+            modelId: raw.modelId,
+            message: `Instance modeled by "${raw.modelId}"`,
+          });
+        }
+        return registerProvenance(
+          row as ProjectedInstanceRow<S>,
+          projectedEvidence,
+        );
       });
 
       if (onQueryCompleted) {
