@@ -13,7 +13,6 @@ import type {
   CheckReport,
   FactType,
   NativeAdapterObservation,
-  NormalizedVeruleConfig,
   ObservationDetailEntry,
   SyntaxRef,
   VeruleExecutionError,
