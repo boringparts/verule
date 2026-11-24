@@ -431,7 +431,6 @@ export function createInstanceIdentityQueries(deps: {
                 `Engine omitted resolveInstances result for "${target.handleId}".`,
               );
             }
-            recordGaps(raw.gaps);
             const instances: ResolvedInstanceInfo[] = raw.instances.map(
               (entry) =>
                 registerProvenance(
@@ -504,6 +503,9 @@ export function createInstanceIdentityQueries(deps: {
           );
         }),
       );
+      for (const row of results) {
+        recordGaps(row.gaps);
+      }
 
       if (onQueryCompleted) {
         const count = results.reduce(

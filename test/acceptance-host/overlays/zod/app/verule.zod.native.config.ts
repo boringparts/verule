@@ -35,7 +35,7 @@ const zodFactProbe = defineRule({
           input: input.value,
           output: output.value,
         }),
-        evidence: [...input.evidence, ...output.evidence],
+        basis: [input, output],
       });
     }
   },

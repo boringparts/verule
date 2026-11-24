@@ -152,7 +152,6 @@ export function createPackageImplQueries(deps: {
                 `Engine omitted resolveImplementations result for "${target.handleId}".`,
               );
             }
-            recordGaps(raw.gaps);
             return registerProvenance(
               {
                 target,
@@ -174,6 +173,9 @@ export function createPackageImplQueries(deps: {
           cache.implCache.get(`${snapshotId}:${projectId}:${target.handleId}`)!,
         ),
       );
+      for (const row of results) {
+        recordGaps(row.gaps);
+      }
 
       if (onQueryCompleted) {
         const count = results.filter((r) => r.implementation !== null).length;

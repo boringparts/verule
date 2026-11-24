@@ -95,7 +95,7 @@ export const providerSessionFactRule = defineRule({
         input,
         annotation: fact.value.annotation,
       }),
-      evidence: fact.evidence,
+      basis: [fact],
     });
   },
 });
@@ -133,7 +133,7 @@ export const providerSessionFilteredRule = defineRule({
         input: fact.value.input,
         annotation: fact.value.annotation,
       }),
-      evidence: fact.evidence,
+      basis: [fact],
     });
   },
 });
@@ -167,7 +167,7 @@ export const drizzleProviderRule = defineRule({
       at,
       findingKey: "provider-session-drizzle-fact",
       message: JSON.stringify(fact.value),
-      evidence: fact.evidence,
+      basis: [fact],
     });
   },
 });

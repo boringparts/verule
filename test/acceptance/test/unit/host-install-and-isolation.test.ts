@@ -156,10 +156,14 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
   );
   writeFileSync(join(hostDir, ".npmrc"), "auto-install-peers=true\n");
 
+  const storeDir = join(fixture.path, "store");
+  mkdirSync(storeDir, { recursive: true });
+
   const installOutcome = await installArtifactPackages({
     checkoutDir: hostDir,
     packageManager: "pnpm",
     artifacts,
+    storeDir,
   });
   assert.equal(installOutcome.status, "ready");
   assert.equal(
@@ -188,6 +192,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     checkoutDir: hostDir,
     artifacts,
     blockedPaths: [devRepoDir],
+    allowedStorePaths: [storeDir],
   });
   assert.equal(audit.cliVersion, "0.0.0");
   assert.equal(audit.engineBinarySha256, binarySha256);
@@ -198,6 +203,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     args: [],
     isolated: true,
     blockedPaths: [devRepoDir],
+    pnpmStoreDir: storeDir,
   });
   assert.equal(bareRun.status, 0, bareRun.stderr);
   assert.equal(bareRun.stdout, "verule 0.0.0 (engine 0.0.0-test)\n");
@@ -208,6 +214,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     args: ["--version"],
     isolated: true,
     blockedPaths: [devRepoDir],
+    pnpmStoreDir: storeDir,
   });
   assert.equal(versionRun.status, 0, versionRun.stderr);
   assert.equal(versionRun.stdout, "verule 0.0.0\n");
@@ -341,7 +348,8 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
   const sharedDir = join(fixture.path, "shared-runtime");
   const hostDir = join(fixture.path, "host");
   const bundleDir = join(fixture.path, "bundle");
-  for (const dir of [devRepoDir, sharedDir, hostDir, bundleDir]) {
+  const storeDir = join(fixture.path, "store");
+  for (const dir of [devRepoDir, sharedDir, hostDir, bundleDir, storeDir]) {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
@@ -355,6 +363,7 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
     checkoutDir: hostDir,
     packageManager: "pnpm",
     artifacts: bundle.artifacts,
+    storeDir,
   });
   assert.equal(installOutcome.status, "ready");
 
@@ -363,6 +372,7 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
     args: ["--version"],
     isolated: true,
     blockedPaths: [devRepoDir],
+    pnpmStoreDir: storeDir,
     sharedReadWritePaths: [sharedDir],
     env: {
       ...process.env,
@@ -396,6 +406,7 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
     args: [],
     isolated: true,
     blockedPaths: [devRepoDir],
+    pnpmStoreDir: storeDir,
     sharedReadWritePaths: [sharedDir],
     env: {
       ...process.env,

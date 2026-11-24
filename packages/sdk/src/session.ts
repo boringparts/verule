@@ -924,7 +924,10 @@ export async function openSession(
   let pendingConfigLoadMs = options.configLoadMs ?? 0;
 
   const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
-  const typeCache = new Map<string, Promise<TypeAtResult>>();
+  const typeCache = new Map<
+    string,
+    Promise<{ readonly result: TypeAtResult; readonly gaps: readonly Gap[] }>
+  >();
   const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
   const callsValuesCache = createCallsValuesCache();
   const callEffectsCache = createCallEffectsCache();
@@ -1468,28 +1471,34 @@ export async function openSession(
                 `Engine omitted type result for target "${target.handleId}".`,
               );
             }
-            if (raw.gaps) {
-              recordGaps(raw.gaps);
-            }
-            return toTypeAtResult(
-              raw,
-              target,
-              sessionToken,
-              project.projectId,
-              activeSnapshotId,
-            );
+            return {
+              result: toTypeAtResult(
+                raw,
+                target,
+                sessionToken,
+                project.projectId,
+                activeSnapshotId,
+              ),
+              gaps: raw.gaps ?? [],
+            };
           });
           typeCache.set(key, itemPromise);
         }
       }
 
-      const results = await Promise.all(
+      const cachedEntries = await Promise.all(
         targets.map((target) =>
           typeCache.get(
             `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
           )!,
         ),
       );
+      for (const entry of cachedEntries) {
+        if (entry.gaps.length > 0) {
+          recordGaps(entry.gaps);
+        }
+      }
+      const results = cachedEntries.map((entry) => entry.result);
 
       if (collector.isActive()) {
         const durationMs = performance.now() - queryStart;

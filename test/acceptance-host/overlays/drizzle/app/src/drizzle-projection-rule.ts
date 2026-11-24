@@ -35,7 +35,7 @@ export const drizzleProjectionRule = defineRule({
           `dynamic=${fact.value.hasDynamicColumns}`,
           `gaps=${fact.gaps.map((gap) => gap.kind).join(",") || "none"}`,
         ].join(" "),
-        evidence: fact.evidence,
+        basis: [fact],
       });
     }
   },
