@@ -66,24 +66,33 @@ impl OutputPresence {
 }
 
 #[derive(Clone, Debug)]
-struct Field {
+struct InputFieldState {
     requirement: InputRequirement,
+    nullable: bool,
+    evidence: Vec<Evidence>,
+}
+
+impl InputFieldState {
+    const fn required(evidence: Vec<Evidence>) -> Self {
+        Self {
+            requirement: InputRequirement::Required,
+            nullable: false,
+            evidence,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OutputFieldState {
     presence: OutputPresence,
     nullable: bool,
     from_default: bool,
     evidence: Vec<Evidence>,
 }
 
-impl Default for Field {
-    fn default() -> Self {
-        Self::required(Vec::new())
-    }
-}
-
-impl Field {
+impl OutputFieldState {
     const fn required(evidence: Vec<Evidence>) -> Self {
         Self {
-            requirement: InputRequirement::Required,
             presence: OutputPresence::Required,
             nullable: false,
             from_default: false,
@@ -92,69 +101,221 @@ impl Field {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct FieldResult {
-    field: Option<Field>,
-    nullability_explicit: bool,
+trait SideField: Clone {
+    fn evidence(&self) -> &[Evidence];
+    fn first_evidence_location(&self) -> Option<SourceLocation> {
+        self.evidence().first().and_then(|ev| ev.at.clone())
+    }
+    fn is_definitely_required(&self) -> bool;
+    fn conclusion_summary(&self, name: &str) -> String;
+    fn intersect(&self, other: &Self) -> Self;
+    fn union_with(all_present: bool, fields: &[&Self]) -> Self;
+}
+
+impl SideField for InputFieldState {
+    fn evidence(&self) -> &[Evidence] {
+        &self.evidence
+    }
+
+    fn is_definitely_required(&self) -> bool {
+        self.requirement == InputRequirement::Required
+    }
+
+    fn conclusion_summary(&self, name: &str) -> String {
+        format!(
+            "field \"{name}\": {} (nullable={})",
+            self.requirement.as_str(),
+            self.nullable
+        )
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        Self {
+            requirement: if self.requirement == InputRequirement::Required
+                || other.requirement == InputRequirement::Required
+            {
+                InputRequirement::Required
+            } else if self.requirement == InputRequirement::Defaulted
+                || other.requirement == InputRequirement::Defaulted
+            {
+                InputRequirement::Defaulted
+            } else {
+                InputRequirement::Optional
+            },
+            nullable: self.nullable && other.nullable,
+            evidence: dedupe_evidence([self.evidence.clone(), other.evidence.clone()].concat()),
+        }
+    }
+
+    fn union_with(all_present: bool, fields: &[&Self]) -> Self {
+        let required = all_present
+            && fields
+                .iter()
+                .all(|field| field.requirement == InputRequirement::Required);
+        let all_defaulted = all_present
+            && fields
+                .iter()
+                .all(|field| field.requirement == InputRequirement::Defaulted);
+        Self {
+            requirement: if required {
+                InputRequirement::Required
+            } else if all_defaulted {
+                InputRequirement::Defaulted
+            } else {
+                InputRequirement::Optional
+            },
+            nullable: fields.iter().any(|field| field.nullable),
+            evidence: dedupe_evidence(
+                fields
+                    .iter()
+                    .flat_map(|field| field.evidence.clone())
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl SideField for OutputFieldState {
+    fn evidence(&self) -> &[Evidence] {
+        &self.evidence
+    }
+
+    fn is_definitely_required(&self) -> bool {
+        self.presence == OutputPresence::Required
+    }
+
+    fn conclusion_summary(&self, name: &str) -> String {
+        format!(
+            "field \"{name}\": {} (nullable={})",
+            self.presence.as_str(),
+            self.nullable
+        )
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        Self {
+            presence: if self.presence == OutputPresence::Required
+                || other.presence == OutputPresence::Required
+            {
+                OutputPresence::Required
+            } else {
+                OutputPresence::Optional
+            },
+            nullable: self.nullable && other.nullable,
+            from_default: self.from_default || other.from_default,
+            evidence: dedupe_evidence([self.evidence.clone(), other.evidence.clone()].concat()),
+        }
+    }
+
+    fn union_with(all_present: bool, fields: &[&Self]) -> Self {
+        let output_required = all_present
+            && fields
+                .iter()
+                .all(|field| field.presence == OutputPresence::Required);
+        Self {
+            presence: if output_required {
+                OutputPresence::Required
+            } else {
+                OutputPresence::Optional
+            },
+            nullable: fields.iter().any(|field| field.nullable),
+            from_default: output_required && fields.iter().any(|field| field.from_default),
+            evidence: dedupe_evidence(
+                fields
+                    .iter()
+                    .flat_map(|field| field.evidence.clone())
+                    .collect(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FieldSideResult<F> {
+    field: Option<F>,
     has_dynamic_fields: bool,
     gaps: Vec<Gap>,
     local_gaps: Vec<ExplainLocalGap>,
 }
 
+impl<F> Default for FieldSideResult<F> {
+    fn default() -> Self {
+        Self {
+            field: None,
+            has_dynamic_fields: false,
+            gaps: Vec::new(),
+            local_gaps: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-struct Schema {
-    recognized: bool,
-    fields: BTreeMap<String, Field>,
+struct FieldResult {
+    input: FieldSideResult<InputFieldState>,
+    output: FieldSideResult<OutputFieldState>,
+    nullability_explicit: bool,
+}
+
+impl FieldResult {
+    fn required(evidence: Vec<Evidence>) -> Self {
+        Self {
+            input: FieldSideResult {
+                field: Some(InputFieldState::required(evidence.clone())),
+                ..FieldSideResult::default()
+            },
+            output: FieldSideResult {
+                field: Some(OutputFieldState::required(evidence)),
+                ..FieldSideResult::default()
+            },
+            nullability_explicit: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SchemaSide<F> {
+    fields: BTreeMap<String, F>,
     field_gaps: BTreeMap<String, Vec<Gap>>,
     field_gap_origins: BTreeMap<String, ExplainLocalGap>,
     shape_local_gaps: Vec<ExplainLocalGap>,
     resolved_local_gaps: Vec<ExplainLocalGap>,
     explicit_dynamic: bool,
-    has_dynamic_fields: bool,
     gaps: Vec<Gap>,
-    evidence: Vec<Evidence>,
 }
 
-impl Schema {
-    fn unrecognized() -> Self {
-        Self::default()
-    }
-
-    fn unresolved(message: String, at: Option<SourceLocation>) -> Self {
-        let gap = Gap {
-            kind: "unresolved-schema".to_string(),
-            message: message.clone(),
-            at: at.clone(),
-        };
+impl<F> Default for SchemaSide<F> {
+    fn default() -> Self {
         Self {
-            recognized: true,
-            has_dynamic_fields: true,
-            shape_local_gaps: vec![ExplainLocalGap {
-                status: ExplainGapResolutionStatus::Unresolved,
-                fact_type_id: String::new(),
-                provider_id: "zod".to_string(),
-                field: None,
-                gap: gap.clone(),
-                subject_location: at.clone(),
-                resolved_by: None,
-                impact: Some(message),
-            }],
-            gaps: vec![gap],
-            evidence: vec![source_evidence("Unresolved Zod schema".to_string(), at)],
-            ..Self::default()
+            fields: BTreeMap::new(),
+            field_gaps: BTreeMap::new(),
+            field_gap_origins: BTreeMap::new(),
+            shape_local_gaps: Vec::new(),
+            resolved_local_gaps: Vec::new(),
+            explicit_dynamic: false,
+            gaps: Vec::new(),
         }
     }
+}
 
-    fn add_evidence(&mut self, evidence: Evidence) {
-        push_unique(&mut self.evidence, evidence);
+impl<F: SideField> SchemaSide<F> {
+    fn has_dynamic_fields(&self) -> bool {
+        self.explicit_dynamic || !self.gaps.is_empty() || !self.field_gaps.is_empty()
     }
 
-    fn add_gap(&mut self, gap: Gap) {
-        push_unique(&mut self.gaps, gap);
-        self.recompute_dynamic();
+    fn all_gaps(&self) -> Vec<Gap> {
+        let mut combined = self.gaps.clone();
+        for gaps in self.field_gaps.values() {
+            combined.extend(gaps.clone());
+        }
+        dedupe_gaps(combined)
     }
 
-    fn apply_field_result(&mut self, name: String, result: FieldResult) {
+    fn apply_field_result(
+        &mut self,
+        name: String,
+        result: FieldSideResult<F>,
+        schema_evidence: &mut Vec<Evidence>,
+    ) {
         for mut lg in result.local_gaps {
             if lg.field.is_none() {
                 lg.field = Some(name.clone());
@@ -164,7 +325,7 @@ impl Schema {
             }
         }
         if let Some(field) = result.field {
-            self.evidence.extend(field.evidence.clone());
+            schema_evidence.extend(field.evidence().to_vec());
             self.fields.insert(name.clone(), field);
             self.field_gap_origins.remove(&name);
             if result.gaps.is_empty() {
@@ -197,20 +358,23 @@ impl Schema {
         }
         self.explicit_dynamic |=
             result.has_dynamic_fields && self.gaps.is_empty() && self.field_gaps.is_empty();
-        self.recompute_dynamic();
     }
 
-    fn recompute_dynamic(&mut self) {
-        self.has_dynamic_fields =
-            self.explicit_dynamic || !self.gaps.is_empty() || !self.field_gaps.is_empty();
-    }
-
-    fn all_gaps(&self) -> Vec<Gap> {
-        let mut combined = self.gaps.clone();
-        for gaps in self.field_gaps.values() {
-            combined.extend(gaps.clone());
-        }
-        dedupe_gaps(combined)
+    fn filter_mask(&mut self, method: &str, mask: &Mask) {
+        self.fields.retain(|name, _| {
+            let included = mask.keys.contains(name);
+            (method == "pick" && included) || (method == "omit" && !included)
+        });
+        self.field_gaps.retain(|name, _| {
+            let included = mask.keys.contains(name);
+            (method == "pick" && included) || (method == "omit" && !included)
+        });
+        self.field_gap_origins.retain(|name, _| {
+            let included = mask.keys.contains(name);
+            (method == "pick" && included) || (method == "omit" && !included)
+        });
+        self.explicit_dynamic |= mask.has_dynamic_fields && mask.gaps.is_empty();
+        self.gaps.extend(mask.gaps.clone());
     }
 
     fn take_explain_trace(
@@ -233,6 +397,76 @@ impl Schema {
             }
         }
         Some(FactExplainTrace { local_gaps })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Schema {
+    recognized: bool,
+    input: SchemaSide<InputFieldState>,
+    output: SchemaSide<OutputFieldState>,
+    evidence: Vec<Evidence>,
+}
+
+impl Schema {
+    fn unrecognized() -> Self {
+        Self::default()
+    }
+
+    fn unresolved(message: String, at: Option<SourceLocation>) -> Self {
+        let gap = Gap {
+            kind: "unresolved-schema".to_string(),
+            message: message.clone(),
+            at: at.clone(),
+        };
+        let local_gap = ExplainLocalGap {
+            status: ExplainGapResolutionStatus::Unresolved,
+            fact_type_id: String::new(),
+            provider_id: "zod".to_string(),
+            field: None,
+            gap: gap.clone(),
+            subject_location: at.clone(),
+            resolved_by: None,
+            impact: Some(message),
+        };
+        Self {
+            recognized: true,
+            input: SchemaSide {
+                shape_local_gaps: vec![local_gap.clone()],
+                gaps: vec![gap.clone()],
+                ..SchemaSide::default()
+            },
+            output: SchemaSide {
+                shape_local_gaps: vec![local_gap],
+                gaps: vec![gap],
+                ..SchemaSide::default()
+            },
+            evidence: vec![source_evidence("Unresolved Zod schema".to_string(), at)],
+        }
+    }
+
+    fn add_evidence(&mut self, evidence: Evidence) {
+        push_unique(&mut self.evidence, evidence);
+    }
+
+    fn add_gap(&mut self, gap: Gap) {
+        push_unique(&mut self.input.gaps, gap.clone());
+        push_unique(&mut self.output.gaps, gap);
+    }
+
+    fn apply_field_result(&mut self, name: String, result: FieldResult) {
+        self.input
+            .apply_field_result(name.clone(), result.input, &mut self.evidence);
+        self.output
+            .apply_field_result(name, result.output, &mut self.evidence);
+    }
+
+    fn has_dynamic_fields(&self) -> bool {
+        self.input.has_dynamic_fields() || self.output.has_dynamic_fields()
+    }
+
+    fn is_empty_fields(&self) -> bool {
+        self.input.fields.is_empty() && self.output.fields.is_empty()
     }
 }
 
@@ -278,9 +512,34 @@ pub fn extract<'a>(
 
     let mut contributions = Vec::with_capacity(sites.len());
     for mut site in sites {
-        let value = match request.fact_type_id {
-            INPUT_FACT => input_value(&site),
-            OUTPUT_FACT => output_value(&site),
+        let subject_location = if request.explain {
+            site.subject.location()?
+        } else {
+            None
+        };
+        let (value, gaps, explain_trace) = match request.fact_type_id {
+            INPUT_FACT => (
+                input_value(&site),
+                site.schema.input.all_gaps(),
+                if request.explain {
+                    site.schema
+                        .input
+                        .take_explain_trace(request.fact_type_id, subject_location.as_ref())
+                } else {
+                    None
+                },
+            ),
+            OUTPUT_FACT => (
+                output_value(&site),
+                site.schema.output.all_gaps(),
+                if request.explain {
+                    site.schema
+                        .output
+                        .take_explain_trace(request.fact_type_id, subject_location.as_ref())
+                } else {
+                    None
+                },
+            ),
             _ => {
                 return Err(AdapterError::UnsupportedFactType {
                     adapter_id: "zod".to_string(),
@@ -288,19 +547,10 @@ pub fn extract<'a>(
                 });
             }
         };
-        let subject_location = if request.explain {
-            site.subject.location()?
-        } else {
-            None
-        };
         let mut contribution = FactContribution::new(site.subject, value);
         contribution.evidence = dedupe_evidence(site.schema.evidence.clone());
-        contribution.gaps = site.schema.all_gaps();
-        if request.explain {
-            contribution.explain_trace = site
-                .schema
-                .take_explain_trace(request.fact_type_id, subject_location.as_ref());
-        }
+        contribution.gaps = gaps;
+        contribution.explain_trace = explain_trace;
         contributions.push(contribution);
     }
     Ok(contributions)
@@ -469,7 +719,7 @@ fn input_value(site: &Site) -> Value {
     let mut optional = Vec::new();
     let mut defaulted = Vec::new();
     let mut fields = Map::new();
-    for (name, field) in &site.schema.fields {
+    for (name, field) in &site.schema.input.fields {
         match field.requirement {
             InputRequirement::Required => required.push(name.clone()),
             InputRequirement::Optional => optional.push(name.clone()),
@@ -494,7 +744,7 @@ fn input_value(site: &Site) -> Value {
         "optionalFields": optional,
         "defaultedFields": defaulted,
         "fields": fields,
-        "hasDynamicFields": site.schema.has_dynamic_fields,
+        "hasDynamicFields": site.schema.input.has_dynamic_fields(),
     });
     add_site_metadata(&mut value, site);
     value
@@ -505,7 +755,7 @@ fn output_value(site: &Site) -> Value {
     let mut optional = Vec::new();
     let mut defaulted = Vec::new();
     let mut fields = Map::new();
-    for (name, field) in &site.schema.fields {
+    for (name, field) in &site.schema.output.fields {
         match field.presence {
             OutputPresence::Required => present.push(name.clone()),
             OutputPresence::Optional => optional.push(name.clone()),
@@ -530,7 +780,7 @@ fn output_value(site: &Site) -> Value {
         "optionalFields": optional,
         "defaultedFields": defaulted,
         "fields": fields,
-        "hasDynamicFields": site.schema.has_dynamic_fields,
+        "hasDynamicFields": site.schema.output.has_dynamic_fields(),
     });
     add_site_metadata(&mut value, site);
     value
@@ -728,9 +978,10 @@ impl ZodEvaluator {
             if method == "record" {
                 let mut schema = Schema {
                     recognized: true,
-                    has_dynamic_fields: true,
                     ..Schema::default()
                 };
+                schema.input.explicit_dynamic = true;
+                schema.output.explicit_dynamic = true;
                 schema.add_gap(Gap {
                     kind: "dynamic-schema-shape".to_string(),
                     message:
@@ -747,21 +998,12 @@ impl ZodEvaluator {
             return Self::evaluate_union(context, call, method.as_str(), &arguments, visited);
         }
 
-        if method == "intersection" && receiver.is_some_and(is_zod_namespace) {
-            if let (Some(left), Some(right)) = (arguments.first(), arguments.get(1)) {
-                let left = Self::evaluate_schema(context, *left, visited)?;
-                let right = Self::evaluate_schema(context, *right, visited)?;
-                return Ok(intersection_schema(
-                    location,
-                    left,
-                    right,
-                    "z.intersection()",
-                ));
-            }
-            return Ok(Schema::unresolved(
-                "z.intersection() requires two statically resolvable schemas.".to_string(),
-                location,
-            ));
+        if matches!(method.as_str(), "intersection" | "pipe")
+            && receiver.is_some_and(is_zod_namespace)
+        {
+            return Self::evaluate_static_combinator(
+                context, &method, &arguments, location, visited,
+            );
         }
 
         if let Some(receiver) = receiver
@@ -793,6 +1035,47 @@ impl ZodEvaluator {
         }
 
         Ok(Schema::unrecognized())
+    }
+
+    fn evaluate_static_combinator<'a>(
+        context: &'a Context<'_>,
+        method: &str,
+        arguments: &[NodeRef<'a>],
+        location: Option<SourceLocation>,
+        visited: &mut Vec<NodeRef<'a>>,
+    ) -> Result<Schema, AdapterError> {
+        let (Some(first), Some(second)) = (arguments.first(), arguments.get(1)) else {
+            return Ok(Schema::unresolved(
+                format!("z.{method}() requires two statically resolvable schemas."),
+                location,
+            ));
+        };
+        let left = Self::evaluate_schema(context, *first, visited)?;
+        let right = Self::evaluate_schema(context, *second, visited)?;
+        if method == "intersection" {
+            return Ok(intersection_schema(
+                location,
+                left,
+                right,
+                "z.intersection()",
+            ));
+        }
+        if left.recognized && right.recognized {
+            return Ok(pipe_schema(location, &left, &right, "z.pipe()"));
+        }
+        if left.recognized {
+            let mut result = left;
+            result.output.gaps.push(Gap {
+                kind: "unresolved-schema".to_string(),
+                message: "z.pipe() output schema could not be statically resolved.".to_string(),
+                at: location,
+            });
+            return Ok(result);
+        }
+        Ok(Schema::unresolved(
+            "z.pipe() requires two statically resolvable schemas.".to_string(),
+            location,
+        ))
     }
 
     #[expect(
@@ -842,29 +1125,8 @@ impl ZodEvaluator {
             "pick" | "omit" => {
                 if let Some(mask_expression) = arguments.first() {
                     let mask = Self::evaluate_mask(*mask_expression, visited)?;
-                    let mut selected = BTreeMap::new();
-                    for (name, field) in result.fields {
-                        let included = mask.keys.contains(&name);
-                        if (method == "pick" && included) || (method == "omit" && !included) {
-                            selected.insert(name, field);
-                        }
-                    }
-                    result.fields = selected;
-                    let mut selected_gaps = BTreeMap::new();
-                    for (name, fgaps) in result.field_gaps {
-                        let included = mask.keys.contains(&name);
-                        if (method == "pick" && included) || (method == "omit" && !included) {
-                            selected_gaps.insert(name, fgaps);
-                        }
-                    }
-                    result.field_gaps = selected_gaps;
-                    result.field_gap_origins.retain(|name, _| {
-                        let included = mask.keys.contains(name);
-                        (method == "pick" && included) || (method == "omit" && !included)
-                    });
-                    result.explicit_dynamic |= mask.has_dynamic_fields && mask.gaps.is_empty();
-                    result.gaps.extend(mask.gaps);
-                    result.recompute_dynamic();
+                    result.input.filter_mask(method, &mask);
+                    result.output.filter_mask(method, &mask);
                 } else {
                     result.add_gap(Gap {
                         kind: "dynamic-schema-mask".to_string(),
@@ -883,15 +1145,17 @@ impl ZodEvaluator {
                 } else {
                     None
                 };
-                for (name, field) in &mut result.fields {
-                    let applies = mask.as_ref().is_none_or(|mask| mask.keys.contains(name));
-                    if applies {
-                        let requirement = if method == "partial" {
+                for (name, field) in &mut result.input.fields {
+                    if mask.as_ref().is_none_or(|mask| mask.keys.contains(name)) {
+                        field.requirement = if method == "partial" {
                             InputRequirement::Optional
                         } else {
                             InputRequirement::Required
                         };
-                        field.requirement = requirement;
+                    }
+                }
+                for (name, field) in &mut result.output.fields {
+                    if mask.as_ref().is_none_or(|mask| mask.keys.contains(name)) {
                         field.presence = if method == "partial" {
                             OutputPresence::Optional
                         } else {
@@ -901,9 +1165,12 @@ impl ZodEvaluator {
                     }
                 }
                 if let Some(mask) = mask {
-                    result.explicit_dynamic |= mask.has_dynamic_fields && mask.gaps.is_empty();
-                    result.gaps.extend(mask.gaps);
-                    result.recompute_dynamic();
+                    result.input.explicit_dynamic |=
+                        mask.has_dynamic_fields && mask.gaps.is_empty();
+                    result.output.explicit_dynamic |=
+                        mask.has_dynamic_fields && mask.gaps.is_empty();
+                    result.input.gaps.extend(mask.gaps.clone());
+                    result.output.gaps.extend(mask.gaps);
                 }
             }
             "and" => {
@@ -922,9 +1189,9 @@ impl ZodEvaluator {
                 if let Some(output_expression) = arguments.first() {
                     let output = Self::evaluate_schema(context, *output_expression, visited)?;
                     if output.recognized {
-                        result = pipe_schema(location, &result, &output);
+                        result = pipe_schema(location, &result, &output, ".pipe()");
                     } else {
-                        result.add_gap(Gap {
+                        result.output.gaps.push(Gap {
                             kind: "unresolved-schema".to_string(),
                             message: ".pipe() output schema could not be statically resolved."
                                 .to_string(),
@@ -1019,18 +1286,25 @@ impl ZodEvaluator {
                     let field = if let Some(initializer) = property.safe_initializer()? {
                         Self::evaluate_field(initializer, field_evidence, None, visited)?
                     } else {
+                        let missing_gap = Gap {
+                            kind: "unresolved-schema-field".to_string(),
+                            message: format!(
+                                "Field \"{name}\" has no inspectable schema initializer."
+                            ),
+                            at: property.location()?,
+                        };
                         FieldResult {
-                            field: None,
+                            input: FieldSideResult {
+                                has_dynamic_fields: true,
+                                gaps: vec![missing_gap.clone()],
+                                ..FieldSideResult::default()
+                            },
+                            output: FieldSideResult {
+                                has_dynamic_fields: true,
+                                gaps: vec![missing_gap],
+                                ..FieldSideResult::default()
+                            },
                             nullability_explicit: false,
-                            has_dynamic_fields: true,
-                            gaps: vec![Gap {
-                                kind: "unresolved-schema-field".to_string(),
-                                message: format!(
-                                    "Field \"{name}\" has no inspectable schema initializer."
-                                ),
-                                at: property.location()?,
-                            }],
-                            local_gaps: Vec::new(),
                         }
                     };
                     schema.apply_field_result(name, field);
@@ -1070,8 +1344,8 @@ impl ZodEvaluator {
                     if let Some(expression) = expression {
                         let spread = Self::evaluate_shape(context, expression, visited)?;
                         if spread.recognized
-                            && spread.has_dynamic_fields
-                            && spread.fields.is_empty()
+                            && spread.has_dynamic_fields()
+                            && spread.is_empty_fields()
                         {
                             schema.add_gap(dynamic_gap(
                                 "dynamic-schema-spread",
@@ -1114,8 +1388,8 @@ impl ZodEvaluator {
             }
         }
         schema.evidence = dedupe_evidence(schema.evidence);
-        schema.gaps = dedupe_gaps(schema.gaps);
-        schema.recompute_dynamic();
+        schema.input.gaps = dedupe_gaps(schema.input.gaps);
+        schema.output.gaps = dedupe_gaps(schema.output.gaps);
         Ok(schema)
     }
 
@@ -1132,10 +1406,7 @@ impl ZodEvaluator {
         let expression = unwrap(expression)?;
         if expression.kind()? == NodeKind::Identifier {
             if callback_param.is_some_and(|param| text(expression).ok().as_deref() == Some(param)) {
-                return Ok(FieldResult {
-                    field: Some(Field::required(evidence)),
-                    ..FieldResult::default()
-                });
+                return Ok(FieldResult::required(evidence));
             }
             if let Some(declaration) = expression.declaration_node()?
                 && !visited.contains(&declaration)
@@ -1167,19 +1438,13 @@ impl ZodEvaluator {
             ) {
                 let mut inner =
                     Self::evaluate_field(receiver, evidence.clone(), callback_param, visited)?;
-                if let Some(field) = &mut inner.field {
-                    apply_field_modifier(field, &mut inner.nullability_explicit, method.as_str());
-                    return Ok(inner);
-                }
                 let modifier_at = expression.location()?;
-                if resolve_unknown_with_modifier(
+                apply_or_resolve_modifier(
                     &mut inner,
                     method.as_str(),
                     evidence,
                     modifier_at.as_ref(),
-                ) {
-                    return Ok(inner);
-                }
+                );
                 return Ok(inner);
             }
             if matches!(
@@ -1201,22 +1466,51 @@ impl ZodEvaluator {
                     Self::evaluate_field(receiver, evidence.clone(), callback_param, visited)?;
                 if let Some(output) = expression.arguments()?.first() {
                     let right = Self::evaluate_field(*output, evidence, callback_param, visited)?;
-                    let field = match (left.field, right.field) {
-                        (Some(mut l), Some(r)) => {
-                            l.presence = r.presence;
-                            l.nullable = r.nullable;
-                            l.from_default |= r.from_default;
-                            l.evidence.extend(r.evidence);
-                            Some(l)
+                    let mut out_side = right.output;
+                    if let Some(out_field) = &mut out_side.field {
+                        if let Some(in_out_field) = &left.output.field {
+                            out_field.from_default |= in_out_field.from_default;
+                            out_field.evidence.extend(in_out_field.evidence.clone());
+                            out_field.evidence =
+                                dedupe_evidence(std::mem::take(&mut out_field.evidence));
+                        } else if !left.output.gaps.is_empty() {
+                            let pipe_at = expression.location()?;
+                            for prior_gap in left.output.gaps {
+                                out_side.local_gaps.push(ExplainLocalGap {
+                                    status: ExplainGapResolutionStatus::ResolvedByOverride,
+                                    fact_type_id: String::new(),
+                                    provider_id: "zod".to_string(),
+                                    field: None,
+                                    gap: prior_gap,
+                                    subject_location: None,
+                                    resolved_by: Some(ExplainGapResolution {
+                                        provider_id: "zod".to_string(),
+                                        operation: ".pipe()".to_string(),
+                                        conclusion: format!(
+                                            "pipe: {} (nullable={})",
+                                            out_field.presence.as_str(),
+                                            out_field.nullable
+                                        ),
+                                        at: out_field
+                                            .first_evidence_location()
+                                            .or_else(|| pipe_at.clone()),
+                                    }),
+                                    impact: Some(
+                                        "Prior unknown field validator output was resolved by .pipe()."
+                                            .to_string(),
+                                    ),
+                                });
+                            }
                         }
-                        _ => None,
-                    };
+                    } else {
+                        out_side.gaps = [left.output.gaps, out_side.gaps].concat();
+                        out_side.has_dynamic_fields |= left.output.has_dynamic_fields;
+                    }
+                    out_side.local_gaps = [left.output.local_gaps, out_side.local_gaps].concat();
                     return Ok(FieldResult {
-                        field,
+                        input: left.input,
+                        output: out_side,
                         nullability_explicit: right.nullability_explicit,
-                        has_dynamic_fields: left.has_dynamic_fields || right.has_dynamic_fields,
-                        gaps: [left.gaps, right.gaps].concat(),
-                        local_gaps: [left.local_gaps, right.local_gaps].concat(),
                     });
                 }
             }
@@ -1228,25 +1522,31 @@ impl ZodEvaluator {
             if matches!(method.as_str(), "record" | "any" | "unknown" | "custom")
                 && is_zod_namespace(receiver)
             {
+                let gap = dynamic_gap(
+                    "dynamic-schema-field",
+                    format!(
+                        "Field uses dynamic Zod type z.{method}() whose constraints cannot be statically determined."
+                    ),
+                    expression.location()?,
+                );
                 return Ok(FieldResult {
-                    field: Some(Field::required(evidence)),
+                    input: FieldSideResult {
+                        field: Some(InputFieldState::required(evidence.clone())),
+                        has_dynamic_fields: true,
+                        gaps: vec![gap.clone()],
+                        local_gaps: Vec::new(),
+                    },
+                    output: FieldSideResult {
+                        field: Some(OutputFieldState::required(evidence)),
+                        has_dynamic_fields: true,
+                        gaps: vec![gap],
+                        local_gaps: Vec::new(),
+                    },
                     nullability_explicit: false,
-                    has_dynamic_fields: true,
-                    gaps: vec![dynamic_gap(
-                        "dynamic-schema-field",
-                        format!(
-                            "Field uses dynamic Zod type z.{method}() whose constraints cannot be statically determined."
-                        ),
-                        expression.location()?,
-                    )],
-                    local_gaps: Vec::new(),
                 });
             }
             if is_zod_namespace(receiver) {
-                return Ok(FieldResult {
-                    field: Some(Field::required(evidence)),
-                    ..FieldResult::default()
-                });
+                return Ok(FieldResult::required(evidence));
             }
             // Method chains like `z.string().min(1)` or `runtimeFn().refine(...)` depend on their receiver.
             if is_zod_type(expression)? {
@@ -1352,47 +1652,124 @@ impl ZodEvaluator {
     }
 }
 
-fn apply_field_modifier(field: &mut Field, nullability_explicit: &mut bool, method: &str) {
+fn apply_or_resolve_modifier(
+    inner: &mut FieldResult,
+    method: &str,
+    evidence: Vec<Evidence>,
+    modifier_at: Option<&SourceLocation>,
+) {
     match method {
-        "optional" => {
-            field.requirement = InputRequirement::Optional;
-            field.presence = OutputPresence::Optional;
-            field.from_default = false;
-        }
-        "nullish" => {
-            field.requirement = InputRequirement::Optional;
-            field.presence = OutputPresence::Optional;
-            field.nullable = true;
-            *nullability_explicit = true;
-            field.from_default = false;
-        }
         "nullable" => {
-            field.nullable = true;
-            *nullability_explicit = true;
+            inner.nullability_explicit = true;
+            if let Some(field) = &mut inner.input.field {
+                field.nullable = true;
+            }
+            if let Some(field) = &mut inner.output.field {
+                field.nullable = true;
+            }
+            return;
         }
-        "default" | "prefault" | "catch" => {
-            field.requirement = InputRequirement::Defaulted;
-            field.presence = OutputPresence::Required;
-            field.from_default = true;
+        "optional" | "nullish" | "default" | "prefault" | "catch" | "nonoptional" => {}
+        _ => return,
+    }
+
+    let (requirement, presence, nullable_opt, from_default) = match method {
+        "optional" => (
+            InputRequirement::Optional,
+            OutputPresence::Optional,
+            None,
+            false,
+        ),
+        "nullish" => (
+            InputRequirement::Optional,
+            OutputPresence::Optional,
+            Some(true),
+            false,
+        ),
+        "default" | "prefault" | "catch" => (
+            InputRequirement::Defaulted,
+            OutputPresence::Required,
+            None,
+            true,
+        ),
+        "nonoptional" => (
+            InputRequirement::Required,
+            OutputPresence::Required,
+            None,
+            false,
+        ),
+        _ => return,
+    };
+
+    if let Some(nullable) = nullable_opt {
+        inner.nullability_explicit = true;
+        let _ = nullable;
+    }
+
+    if let Some(field) = &mut inner.input.field {
+        field.requirement = requirement;
+        if let Some(nullable) = nullable_opt {
+            field.nullable = nullable;
         }
-        "nonoptional" => {
-            field.requirement = InputRequirement::Required;
-            field.presence = OutputPresence::Required;
-            field.from_default = false;
+    } else {
+        let field = InputFieldState {
+            requirement,
+            nullable: nullable_opt.unwrap_or(false),
+            evidence: evidence.clone(),
+        };
+        record_side_modifier_resolution(
+            &mut inner.input,
+            method,
+            &format!(
+                "{}: {} (nullable={})",
+                method,
+                field.requirement.as_str(),
+                field.nullable
+            ),
+            modifier_at,
+        );
+        inner.input.field = Some(field);
+        inner.input.has_dynamic_fields = false;
+    }
+
+    if let Some(field) = &mut inner.output.field {
+        field.presence = presence;
+        field.from_default = from_default;
+        if let Some(nullable) = nullable_opt {
+            field.nullable = nullable;
         }
-        _ => {}
+    } else {
+        let field = OutputFieldState {
+            presence,
+            nullable: nullable_opt.unwrap_or(false),
+            from_default,
+            evidence,
+        };
+        record_side_modifier_resolution(
+            &mut inner.output,
+            method,
+            &format!(
+                "{}: {} (nullable={})",
+                method,
+                field.presence.as_str(),
+                field.nullable
+            ),
+            modifier_at,
+        );
+        inner.output.field = Some(field);
+        inner.output.has_dynamic_fields = false;
     }
 }
 
-fn record_modifier_resolution(
-    inner: &mut FieldResult,
+fn record_side_modifier_resolution<F>(
+    side: &mut FieldSideResult<F>,
     method: &str,
-    field: &Field,
+    conclusion: &str,
     modifier_at: Option<&SourceLocation>,
 ) {
-    let prior_gaps = std::mem::take(&mut inner.gaps);
+    let prior_gaps = std::mem::take(&mut side.gaps);
     for prior_gap in prior_gaps {
-        inner.local_gaps.push(ExplainLocalGap {
+        side.local_gaps.push(ExplainLocalGap {
             status: ExplainGapResolutionStatus::ResolvedByOverride,
             fact_type_id: String::new(),
             provider_id: "zod".to_string(),
@@ -1402,74 +1779,13 @@ fn record_modifier_resolution(
             resolved_by: Some(ExplainGapResolution {
                 provider_id: "zod".to_string(),
                 operation: format!(".{method}()"),
-                conclusion: format!(
-                    "{}: {} (nullable={})",
-                    method,
-                    field.requirement.as_str(),
-                    field.nullable
-                ),
+                conclusion: conclusion.to_string(),
                 at: modifier_at.cloned(),
             }),
             impact: Some(format!(
                 "Prior unknown field validator was resolved by .{method}()."
             )),
         });
-    }
-}
-
-fn resolve_unknown_with_modifier(
-    inner: &mut FieldResult,
-    method: &str,
-    evidence: Vec<Evidence>,
-    modifier_at: Option<&SourceLocation>,
-) -> bool {
-    match method {
-        "default" | "prefault" | "catch" => {
-            let field = Field {
-                requirement: InputRequirement::Defaulted,
-                presence: OutputPresence::Required,
-                nullable: false,
-                from_default: true,
-                evidence,
-            };
-            record_modifier_resolution(inner, method, &field, modifier_at);
-            inner.field = Some(field);
-            inner.has_dynamic_fields = false;
-            true
-        }
-        "optional" | "nullish" => {
-            let nullable = method == "nullish";
-            let field = Field {
-                requirement: InputRequirement::Optional,
-                presence: OutputPresence::Optional,
-                nullable,
-                from_default: false,
-                evidence,
-            };
-            record_modifier_resolution(inner, method, &field, modifier_at);
-            inner.field = Some(field);
-            inner.nullability_explicit |= nullable;
-            inner.has_dynamic_fields = false;
-            true
-        }
-        "nonoptional" => {
-            let field = Field {
-                requirement: InputRequirement::Required,
-                presence: OutputPresence::Required,
-                nullable: false,
-                from_default: false,
-                evidence,
-            };
-            record_modifier_resolution(inner, method, &field, modifier_at);
-            inner.field = Some(field);
-            inner.has_dynamic_fields = false;
-            true
-        }
-        "nullable" => {
-            inner.nullability_explicit = true;
-            true
-        }
-        _ => false,
     }
 }
 
@@ -1501,19 +1817,26 @@ fn extract_validator_fields<'a>(
         };
 
         let mut value = Map::new();
-        value.insert("resolved".to_string(), json!(result.field.is_some()));
+        let resolved = result.input.field.is_some() && result.output.field.is_some();
+        value.insert("resolved".to_string(), json!(resolved));
         value.insert("mode".to_string(), json!(mode));
         let mut contribution_evidence = Vec::new();
-        if let Some(field) = result.field {
-            value.insert("requirement".to_string(), json!(field.requirement.as_str()));
-            value.insert("presence".to_string(), json!(field.presence.as_str()));
-            value.insert("nullable".to_string(), json!(field.nullable));
+        if let (Some(in_field), Some(out_field)) = (result.input.field, result.output.field) {
+            value.insert(
+                "requirement".to_string(),
+                json!(in_field.requirement.as_str()),
+            );
+            value.insert("presence".to_string(), json!(out_field.presence.as_str()));
+            value.insert(
+                "nullable".to_string(),
+                json!(in_field.nullable || out_field.nullable),
+            );
             value.insert(
                 "nullabilityExplicit".to_string(),
                 json!(result.nullability_explicit),
             );
-            value.insert("fromDefault".to_string(), json!(field.from_default));
-            let deduped = dedupe_evidence(field.evidence);
+            value.insert("fromDefault".to_string(), json!(out_field.from_default));
+            let deduped = dedupe_evidence([in_field.evidence, out_field.evidence].concat());
             if !deduped.is_empty() {
                 value.insert("evidence".to_string(), json!(deduped));
                 contribution_evidence = deduped;
@@ -1521,10 +1844,20 @@ fn extract_validator_fields<'a>(
         }
         let mut contribution = FactContribution::new(target, Value::Object(value));
         contribution.evidence = contribution_evidence;
-        contribution.gaps = dedupe_gaps(result.gaps);
+        contribution.gaps = dedupe_gaps([result.input.gaps, result.output.gaps].concat());
         if request.explain {
             let subject_loc = expr.location()?;
-            let mut local_gaps = result.local_gaps;
+            let mut local_gaps = result.input.local_gaps;
+            for entry in result.output.local_gaps {
+                let duplicate = local_gaps.iter().any(|existing| {
+                    existing.gap == entry.gap
+                        && existing.resolved_by.as_ref().map(|r| (&r.operation, &r.at))
+                            == entry.resolved_by.as_ref().map(|r| (&r.operation, &r.at))
+                });
+                if !duplicate {
+                    local_gaps.push(entry);
+                }
+            }
             for entry in &mut local_gaps {
                 if entry.fact_type_id.is_empty() {
                     entry.fact_type_id = FIELD_FACT.to_string();
@@ -1617,10 +1950,17 @@ fn ingest_external_field(schema: &mut Schema, name: &str, entry: &Value, externa
             .get("evidence")
             .and_then(|val| serde_json::from_value::<Vec<Evidence>>(val.clone()).ok())
             .unwrap_or_default();
-        schema.fields.insert(
+        schema.input.fields.insert(
             name.to_string(),
-            Field {
+            InputFieldState {
                 requirement,
+                nullable,
+                evidence: evidence.clone(),
+            },
+        );
+        schema.output.fields.insert(
+            name.to_string(),
+            OutputFieldState {
                 presence,
                 nullable,
                 from_default,
@@ -1628,7 +1968,14 @@ fn ingest_external_field(schema: &mut Schema, name: &str, entry: &Value, externa
             },
         );
         if !entry_gaps.is_empty() {
-            schema.field_gaps.insert(name.to_string(), entry_gaps);
+            schema
+                .input
+                .field_gaps
+                .insert(name.to_string(), entry_gaps.clone());
+            schema
+                .output
+                .field_gaps
+                .insert(name.to_string(), entry_gaps);
         }
         return;
     }
@@ -1643,23 +1990,32 @@ fn ingest_external_field(schema: &mut Schema, name: &str, entry: &Value, externa
         entry_gaps
     };
     if let Some(first_gap) = gaps.first() {
-        schema.field_gap_origins.insert(
-            name.to_string(),
-            ExplainLocalGap {
-                status: ExplainGapResolutionStatus::Unresolved,
-                fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
-                provider_id: external_provider.to_string(),
-                field: Some(name.to_string()),
-                gap: first_gap.clone(),
-                subject_location: None,
-                resolved_by: None,
-                impact: Some(format!(
-                    "Field \"{name}\" in external schema could not be statically resolved."
-                )),
-            },
-        );
+        let origin = ExplainLocalGap {
+            status: ExplainGapResolutionStatus::Unresolved,
+            fact_type_id: SCHEMA_FIELDS_FACT.to_string(),
+            provider_id: external_provider.to_string(),
+            field: Some(name.to_string()),
+            gap: first_gap.clone(),
+            subject_location: None,
+            resolved_by: None,
+            impact: Some(format!(
+                "Field \"{name}\" in external schema could not be statically resolved."
+            )),
+        };
+        schema
+            .input
+            .field_gap_origins
+            .insert(name.to_string(), origin.clone());
+        schema
+            .output
+            .field_gap_origins
+            .insert(name.to_string(), origin);
     }
-    schema.field_gaps.insert(name.to_string(), gaps);
+    schema
+        .input
+        .field_gaps
+        .insert(name.to_string(), gaps.clone());
+    schema.output.field_gaps.insert(name.to_string(), gaps);
 }
 
 fn schema_from_external_fact(fact: QueriedFact<'_>) -> Schema {
@@ -1683,39 +2039,55 @@ fn schema_from_external_fact(fact: QueriedFact<'_>) -> Schema {
     if let Some(trace) = fact.explain_trace {
         for local_gap in trace.local_gaps {
             if local_gap.status == ExplainGapResolutionStatus::ResolvedByOverride {
-                schema.resolved_local_gaps.push(local_gap);
+                schema.input.resolved_local_gaps.push(local_gap.clone());
+                schema.output.resolved_local_gaps.push(local_gap);
             } else if let Some(field_name) = local_gap.field.clone() {
-                schema.field_gap_origins.insert(field_name, local_gap);
+                schema
+                    .input
+                    .field_gap_origins
+                    .insert(field_name.clone(), local_gap.clone());
+                schema
+                    .output
+                    .field_gap_origins
+                    .insert(field_name, local_gap);
             } else {
-                schema.shape_local_gaps.push(local_gap);
+                schema.input.shape_local_gaps.push(local_gap.clone());
+                schema.output.shape_local_gaps.push(local_gap);
             }
         }
     }
 
-    if let Some(shape_gaps) = fact
+    let shape_gaps = if let Some(shape_gaps) = fact
         .value
         .get("shapeGaps")
         .and_then(|val| serde_json::from_value::<Vec<Gap>>(val.clone()).ok())
     {
-        schema.gaps = shape_gaps;
+        shape_gaps
     } else {
-        let field_gap_set: Vec<Gap> = schema.field_gaps.values().flatten().cloned().collect();
-        schema.gaps = fact
-            .gaps
+        let field_gap_set: Vec<Gap> = schema
+            .input
+            .field_gaps
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        fact.gaps
             .into_iter()
             .filter(|gap| !field_gap_set.contains(gap))
-            .collect();
-    }
+            .collect()
+    };
+    let shape_gaps = dedupe_gaps(shape_gaps);
+    schema.input.gaps = shape_gaps.clone();
+    schema.output.gaps = shape_gaps;
 
     if fact.value.get("hasDynamicFields").and_then(Value::as_bool) == Some(true)
-        && schema.gaps.is_empty()
-        && schema.field_gaps.is_empty()
+        && schema.input.gaps.is_empty()
+        && schema.input.field_gaps.is_empty()
     {
-        schema.explicit_dynamic = true;
+        schema.input.explicit_dynamic = true;
+        schema.output.explicit_dynamic = true;
     }
     schema.evidence = dedupe_evidence(schema.evidence);
-    schema.gaps = dedupe_gaps(schema.gaps);
-    schema.recompute_dynamic();
     schema
 }
 
@@ -1740,19 +2112,10 @@ impl Mask {
     }
 }
 
-fn union_schema(location: Option<SourceLocation>, branches: &[Schema], label: &str) -> Schema {
-    if branches.is_empty() {
-        return Schema::unresolved(
-            format!("Empty {label} schema has indeterminate fields."),
-            location,
-        );
-    }
-    let mut output = Schema {
-        recognized: true,
-        explicit_dynamic: branches
-            .iter()
-            .any(|branch| !branch.recognized || branch.explicit_dynamic),
-        ..Schema::default()
+fn union_side<F: SideField>(branches: &[&SchemaSide<F>], any_unrecognized: bool) -> SchemaSide<F> {
+    let mut output = SchemaSide {
+        explicit_dynamic: any_unrecognized || branches.iter().any(|branch| branch.explicit_dynamic),
+        ..SchemaSide::default()
     };
     for branch in branches {
         output.gaps.extend(branch.gaps.clone());
@@ -1775,7 +2138,6 @@ fn union_schema(location: Option<SourceLocation>, branches: &[Schema], label: &s
                 .entry(name.clone())
                 .or_insert_with(|| origin.clone());
         }
-        output.evidence.extend(branch.evidence.clone());
     }
     let names = branches
         .iter()
@@ -1796,50 +2158,190 @@ fn union_schema(location: Option<SourceLocation>, branches: &[Schema], label: &s
             .iter()
             .filter_map(|branch| branch.fields.get(&name))
             .collect::<Vec<_>>();
-        let required = all_present
-            && fields
-                .iter()
-                .all(|field| field.requirement == InputRequirement::Required);
-        let all_defaulted = all_present
-            && fields
-                .iter()
-                .all(|field| field.requirement == InputRequirement::Defaulted);
-        let output_required = all_present
-            && fields
-                .iter()
-                .all(|field| field.presence == OutputPresence::Required);
-        let evidence = dedupe_evidence(
-            fields
-                .iter()
-                .flat_map(|field| field.evidence.clone())
-                .collect(),
-        );
-        output.fields.insert(
-            name,
-            Field {
-                requirement: if required {
-                    InputRequirement::Required
-                } else if all_defaulted {
-                    InputRequirement::Defaulted
-                } else {
-                    InputRequirement::Optional
-                },
-                presence: if output_required {
-                    OutputPresence::Required
-                } else {
-                    OutputPresence::Optional
-                },
-                nullable: fields.iter().any(|field| field.nullable),
-                from_default: output_required && fields.iter().any(|field| field.from_default),
-                evidence,
-            },
+        output
+            .fields
+            .insert(name, F::union_with(all_present, &fields));
+    }
+    output.gaps = dedupe_gaps(output.gaps);
+    output
+}
+
+fn union_schema(location: Option<SourceLocation>, branches: &[Schema], label: &str) -> Schema {
+    if branches.is_empty() {
+        return Schema::unresolved(
+            format!("Empty {label} schema has indeterminate fields."),
+            location,
         );
     }
-    output.add_evidence(source_evidence(format!("Zod {label} schema"), location));
-    output.gaps = dedupe_gaps(output.gaps);
-    output.evidence = dedupe_evidence(output.evidence);
-    output.recompute_dynamic();
-    output
+    let any_unrecognized = branches.iter().any(|branch| !branch.recognized);
+    let input_branches: Vec<_> = branches.iter().map(|b| &b.input).collect();
+    let output_branches: Vec<_> = branches.iter().map(|b| &b.output).collect();
+    let mut evidence: Vec<Evidence> = branches
+        .iter()
+        .flat_map(|branch| branch.evidence.clone())
+        .collect();
+    push_unique(
+        &mut evidence,
+        source_evidence(format!("Zod {label} schema"), location),
+    );
+    Schema {
+        recognized: true,
+        input: union_side(&input_branches, any_unrecognized),
+        output: union_side(&output_branches, any_unrecognized),
+        evidence: dedupe_evidence(evidence),
+    }
+}
+
+fn resolve_intersection_gap<F: SideField>(
+    known: &F,
+    known_gaps: Option<&Vec<Gap>>,
+    unknown_origin: Option<&ExplainLocalGap>,
+    name: &str,
+    label: &str,
+    location: Option<&SourceLocation>,
+    out: &mut SchemaSide<F>,
+) {
+    out.fields.insert(name.to_string(), known.clone());
+    if let Some(fgaps) = known_gaps {
+        out.field_gaps.insert(name.to_string(), fgaps.clone());
+    }
+    if let Some(mut origin) = unknown_origin.cloned() {
+        let override_at = known
+            .first_evidence_location()
+            .or_else(|| location.cloned());
+        origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+        origin.resolved_by = Some(ExplainGapResolution {
+            provider_id: "zod".to_string(),
+            operation: label.to_string(),
+            conclusion: known.conclusion_summary(name),
+            at: override_at,
+        });
+        out.resolved_local_gaps.push(origin);
+    }
+}
+
+fn intersect_one_sided_field<F: SideField>(
+    known: &F,
+    known_side: &SchemaSide<F>,
+    other_side: &SchemaSide<F>,
+    name: &str,
+    label: &str,
+    location: Option<&SourceLocation>,
+    out: &mut SchemaSide<F>,
+) {
+    let known_gaps = known_side.field_gaps.get(name);
+    let known_origin = known_side.field_gap_origins.get(name);
+    let other_gaps = other_side.field_gaps.get(name);
+    let other_origin = other_side.field_gap_origins.get(name);
+    if other_gaps.is_some() {
+        if known.is_definitely_required() {
+            resolve_intersection_gap(known, known_gaps, other_origin, name, label, location, out);
+        } else {
+            let combined: Vec<Gap> = known_gaps
+                .into_iter()
+                .flatten()
+                .chain(other_gaps.into_iter().flatten())
+                .cloned()
+                .collect();
+            out.field_gaps
+                .insert(name.to_string(), dedupe_gaps(combined));
+            if let Some(origin) = other_origin.or(known_origin) {
+                out.field_gap_origins
+                    .insert(name.to_string(), origin.clone());
+            }
+        }
+        return;
+    }
+    out.fields.insert(name.to_string(), known.clone());
+    if let Some(fgaps) = known_gaps {
+        out.field_gaps.insert(name.to_string(), fgaps.clone());
+    }
+    if let Some(origin) = known_origin {
+        out.field_gap_origins
+            .insert(name.to_string(), origin.clone());
+    }
+}
+
+fn intersection_side<F: SideField>(
+    location: Option<&SourceLocation>,
+    left_recognized: bool,
+    right_recognized: bool,
+    left: &SchemaSide<F>,
+    right: &SchemaSide<F>,
+    label: &str,
+) -> SchemaSide<F> {
+    let mut out = SchemaSide {
+        explicit_dynamic: !left_recognized
+            || !right_recognized
+            || left.explicit_dynamic
+            || right.explicit_dynamic,
+        shape_local_gaps: [
+            left.shape_local_gaps.clone(),
+            right.shape_local_gaps.clone(),
+        ]
+        .concat(),
+        resolved_local_gaps: [
+            left.resolved_local_gaps.clone(),
+            right.resolved_local_gaps.clone(),
+        ]
+        .concat(),
+        gaps: dedupe_gaps([left.gaps.clone(), right.gaps.clone()].concat()),
+        ..SchemaSide::default()
+    };
+
+    let names: BTreeSet<String> = left
+        .fields
+        .keys()
+        .chain(left.field_gaps.keys())
+        .chain(right.fields.keys())
+        .chain(right.field_gaps.keys())
+        .cloned()
+        .collect();
+
+    for name in names {
+        let lf = left.fields.get(&name);
+        let rf = right.fields.get(&name);
+        let lgaps = left.field_gaps.get(&name);
+        let rgaps = right.field_gaps.get(&name);
+        let lorigin = left.field_gap_origins.get(&name);
+        let rorigin = right.field_gap_origins.get(&name);
+
+        match (lf, rf) {
+            (Some(l), Some(r)) => {
+                out.fields.insert(name.clone(), l.intersect(r));
+                let combined: Vec<Gap> = lgaps
+                    .into_iter()
+                    .flatten()
+                    .chain(rgaps.into_iter().flatten())
+                    .cloned()
+                    .collect();
+                if !combined.is_empty() {
+                    out.field_gaps.insert(name, dedupe_gaps(combined));
+                }
+            }
+            (Some(l), None) => {
+                intersect_one_sided_field(l, left, right, &name, label, location, &mut out);
+            }
+            (None, Some(r)) => {
+                intersect_one_sided_field(r, right, left, &name, label, location, &mut out);
+            }
+            (None, None) => {
+                let combined: Vec<Gap> = lgaps
+                    .into_iter()
+                    .flatten()
+                    .chain(rgaps.into_iter().flatten())
+                    .cloned()
+                    .collect();
+                if !combined.is_empty() {
+                    out.field_gaps.insert(name.clone(), dedupe_gaps(combined));
+                }
+                if let Some(origin) = lorigin.or(rorigin) {
+                    out.field_gap_origins.insert(name, origin.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn intersection_schema(
@@ -1848,177 +2350,78 @@ fn intersection_schema(
     right: Schema,
     label: &str,
 ) -> Schema {
-    let mut output = Schema {
+    let input = intersection_side(
+        location.as_ref(),
+        left.recognized,
+        right.recognized,
+        &left.input,
+        &right.input,
+        label,
+    );
+    let output = intersection_side(
+        location.as_ref(),
+        left.recognized,
+        right.recognized,
+        &left.output,
+        &right.output,
+        label,
+    );
+    let mut evidence = [left.evidence, right.evidence].concat();
+    push_unique(
+        &mut evidence,
+        source_evidence(format!("Zod {label} schema"), location),
+    );
+    Schema {
         recognized: left.recognized || right.recognized,
-        explicit_dynamic: !left.recognized
-            || !right.recognized
-            || left.explicit_dynamic
-            || right.explicit_dynamic,
-        fields: left.fields.clone(),
-        field_gaps: left.field_gaps.clone(),
-        field_gap_origins: left.field_gap_origins,
-        shape_local_gaps: [left.shape_local_gaps, right.shape_local_gaps].concat(),
-        resolved_local_gaps: [left.resolved_local_gaps, right.resolved_local_gaps].concat(),
-        gaps: [left.gaps.clone(), right.gaps.clone()].concat(),
-        evidence: [left.evidence, right.evidence.clone()].concat(),
-        ..Schema::default()
-    };
-    for (name, fgaps) in right.field_gaps {
-        if !output.fields.contains_key(&name) {
-            output.field_gaps.entry(name).or_default().extend(fgaps);
-        }
+        input,
+        output,
+        evidence: dedupe_evidence(evidence),
     }
-    for (name, origin) in right.field_gap_origins {
-        if !output.fields.contains_key(&name) {
-            output.field_gap_origins.entry(name).or_insert(origin);
-        }
-    }
-    for (name, right_field) in right.fields {
-        if let Some(left_field) = output.fields.get_mut(&name) {
-            left_field.requirement = if left_field.requirement == InputRequirement::Required
-                || right_field.requirement == InputRequirement::Required
-            {
-                InputRequirement::Required
-            } else if left_field.requirement == InputRequirement::Defaulted
-                || right_field.requirement == InputRequirement::Defaulted
-            {
-                InputRequirement::Defaulted
-            } else {
-                InputRequirement::Optional
-            };
-            left_field.presence = if left_field.presence == OutputPresence::Required
-                || right_field.presence == OutputPresence::Required
-            {
-                OutputPresence::Required
-            } else {
-                OutputPresence::Optional
-            };
-            left_field.nullable &= right_field.nullable;
-            left_field.from_default |= right_field.from_default;
-            left_field.evidence.extend(right_field.evidence);
-            left_field.evidence = dedupe_evidence(std::mem::take(&mut left_field.evidence));
-        } else {
-            if let Some(mut origin) = output.field_gap_origins.remove(&name) {
-                let override_at = right_field
-                    .evidence
-                    .first()
-                    .and_then(|ev| ev.at.clone())
-                    .or_else(|| location.clone());
-                origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
-                origin.resolved_by = Some(ExplainGapResolution {
-                    provider_id: "zod".to_string(),
-                    operation: label.to_string(),
-                    conclusion: format!(
-                        "field \"{name}\": {} (nullable={})",
-                        right_field.requirement.as_str(),
-                        right_field.nullable
-                    ),
-                    at: override_at,
-                });
-                output.resolved_local_gaps.push(origin);
-            }
-            output.fields.insert(name.clone(), right_field);
-            output.field_gaps.remove(&name);
-        }
-    }
-    output.add_evidence(source_evidence(format!("Zod {label} schema"), location));
-    output.gaps = dedupe_gaps(output.gaps);
-    output.evidence = dedupe_evidence(output.evidence);
-    output.recompute_dynamic();
-    output
 }
 
-fn pipe_schema(location: Option<SourceLocation>, input: &Schema, output: &Schema) -> Schema {
-    let names = input
-        .fields
-        .keys()
-        .chain(output.fields.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut schema = Schema {
+fn pipe_schema(
+    location: Option<SourceLocation>,
+    input: &Schema,
+    output: &Schema,
+    label: &str,
+) -> Schema {
+    let input_side = input.input.clone();
+    let mut output_side = output.output.clone();
+    let mut resolved = input.output.resolved_local_gaps.clone();
+    resolved.extend(std::mem::take(&mut output_side.resolved_local_gaps));
+    for (name, mut origin) in input.output.field_gap_origins.clone() {
+        if let Some(output_field) = output_side.fields.get(&name) {
+            let override_at = output_field
+                .first_evidence_location()
+                .or_else(|| location.clone());
+            origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
+            origin.resolved_by = Some(ExplainGapResolution {
+                provider_id: "zod".to_string(),
+                operation: label.to_string(),
+                conclusion: output_field.conclusion_summary(&name),
+                at: override_at,
+            });
+            resolved.push(origin);
+        }
+    }
+    output_side.resolved_local_gaps = resolved;
+
+    let mut evidence = [input.evidence.clone(), output.evidence.clone()].concat();
+    push_unique(
+        &mut evidence,
+        source_evidence("Zod pipe schema".to_string(), location),
+    );
+    Schema {
         recognized: input.recognized || output.recognized,
-        explicit_dynamic: input.explicit_dynamic || output.explicit_dynamic,
-        field_gaps: input.field_gaps.clone(),
-        field_gap_origins: input.field_gap_origins.clone(),
-        shape_local_gaps: [
-            input.shape_local_gaps.clone(),
-            output.shape_local_gaps.clone(),
-        ]
-        .concat(),
-        resolved_local_gaps: [
-            input.resolved_local_gaps.clone(),
-            output.resolved_local_gaps.clone(),
-        ]
-        .concat(),
-        gaps: [input.gaps.clone(), output.gaps.clone()].concat(),
-        evidence: [input.evidence.clone(), output.evidence.clone()].concat(),
-        ..Schema::default()
-    };
-    for (name, fgaps) in &output.field_gaps {
-        if !output.fields.contains_key(name) {
-            schema
-                .field_gaps
-                .entry(name.clone())
-                .or_default()
-                .extend(fgaps.clone());
-        }
+        input: input_side,
+        output: output_side,
+        evidence: dedupe_evidence(evidence),
     }
-    for (name, origin) in &output.field_gap_origins {
-        if !output.fields.contains_key(name) {
-            schema
-                .field_gap_origins
-                .entry(name.clone())
-                .or_insert_with(|| origin.clone());
-        }
-    }
-    for name in names {
-        let input_field = input.fields.get(&name);
-        let output_field = output.fields.get(&name);
-        let mut field = input_field
-            .or(output_field)
-            .cloned()
-            .unwrap_or_else(|| Field::required(Vec::new()));
-        if let Some(output_field) = output_field {
-            if input_field.is_none() {
-                if let Some(mut origin) = schema.field_gap_origins.remove(&name) {
-                    let override_at = output_field
-                        .evidence
-                        .first()
-                        .and_then(|ev| ev.at.clone())
-                        .or_else(|| location.clone());
-                    origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
-                    origin.resolved_by = Some(ExplainGapResolution {
-                        provider_id: "zod".to_string(),
-                        operation: ".pipe()".to_string(),
-                        conclusion: format!(
-                            "field \"{name}\": {} (nullable={})",
-                            output_field.requirement.as_str(),
-                            output_field.nullable
-                        ),
-                        at: override_at,
-                    });
-                    schema.resolved_local_gaps.push(origin);
-                }
-                schema.field_gaps.remove(&name);
-            }
-            field.presence = output_field.presence;
-            field.nullable = output_field.nullable;
-            field.from_default |= output_field.from_default;
-            field.evidence.extend(output_field.evidence.clone());
-        }
-        field.evidence = dedupe_evidence(field.evidence);
-        schema.fields.insert(name, field);
-    }
-    schema.add_evidence(source_evidence("Zod pipe schema".to_string(), location));
-    schema.gaps = dedupe_gaps(schema.gaps);
-    schema.evidence = dedupe_evidence(schema.evidence);
-    schema.recompute_dynamic();
-    schema
 }
 
-fn merge_schema(
-    target: &mut Schema,
-    incoming: Schema,
+fn merge_side<F: SideField>(
+    target: &mut SchemaSide<F>,
+    incoming: SchemaSide<F>,
     operation: &str,
     operation_at: Option<&SourceLocation>,
 ) {
@@ -2029,19 +2432,13 @@ fn merge_schema(
     for (name, field) in incoming.fields {
         if let Some(mut origin) = target.field_gap_origins.remove(&name) {
             let override_at = field
-                .evidence
-                .first()
-                .and_then(|ev| ev.at.clone())
+                .first_evidence_location()
                 .or_else(|| operation_at.cloned());
             origin.status = ExplainGapResolutionStatus::ResolvedByOverride;
             origin.resolved_by = Some(ExplainGapResolution {
                 provider_id: "zod".to_string(),
                 operation: operation.to_string(),
-                conclusion: format!(
-                    "field \"{name}\": {} (nullable={})",
-                    field.requirement.as_str(),
-                    field.nullable
-                ),
+                conclusion: field.conclusion_summary(&name),
                 at: override_at,
             });
             target.resolved_local_gaps.push(origin);
@@ -2053,20 +2450,29 @@ fn merge_schema(
             target.field_gaps.remove(&name);
         }
     }
-    for (name, origin) in incoming.field_gap_origins {
-        if !target.fields.contains_key(&name) {
-            target.field_gap_origins.insert(name, origin);
-        }
-    }
     for (name, fgaps) in incoming.field_gaps {
         if !target.fields.contains_key(&name) {
             target.field_gaps.insert(name, fgaps);
         }
     }
+    for (name, origin) in incoming.field_gap_origins {
+        if !target.fields.contains_key(&name) {
+            target.field_gap_origins.insert(name, origin);
+        }
+    }
     target.explicit_dynamic |= incoming.explicit_dynamic;
     target.gaps.extend(incoming.gaps);
+}
+
+fn merge_schema(
+    target: &mut Schema,
+    incoming: Schema,
+    operation: &str,
+    operation_at: Option<&SourceLocation>,
+) {
+    merge_side(&mut target.input, incoming.input, operation, operation_at);
+    merge_side(&mut target.output, incoming.output, operation, operation_at);
     target.evidence.extend(incoming.evidence);
-    target.recompute_dynamic();
 }
 
 fn call_parts(call: NodeRef<'_>) -> Result<Option<(String, Option<NodeRef<'_>>)>, AdapterError> {
@@ -2177,16 +2583,23 @@ fn text(node: NodeRef<'_>) -> Result<String, AdapterError> {
 }
 
 fn unresolved_field(at: Option<SourceLocation>) -> FieldResult {
+    let gap = Gap {
+        kind: "unresolved-schema-field".to_string(),
+        message: "Zod field schema could not be statically resolved.".to_string(),
+        at,
+    };
     FieldResult {
-        field: None,
+        input: FieldSideResult {
+            has_dynamic_fields: true,
+            gaps: vec![gap.clone()],
+            ..FieldSideResult::default()
+        },
+        output: FieldSideResult {
+            has_dynamic_fields: true,
+            gaps: vec![gap],
+            ..FieldSideResult::default()
+        },
         nullability_explicit: false,
-        has_dynamic_fields: true,
-        gaps: vec![Gap {
-            kind: "unresolved-schema-field".to_string(),
-            message: "Zod field schema could not be statically resolved.".to_string(),
-            at,
-        }],
-        local_gaps: Vec::new(),
     }
 }
 
