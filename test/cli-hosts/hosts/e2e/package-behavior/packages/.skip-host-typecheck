@@ -1,0 +1,1 @@
+Skipped in static host discovery because packages/{esm,cjs} resolve dual-pkg from node_modules after materialization.
