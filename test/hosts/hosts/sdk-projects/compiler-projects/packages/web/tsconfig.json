@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@runtime": ["./src/web.ts"],
+      "ext-lib": [
+        "../../node_modules/ext-lib/index.d.ts",
+        "../../deps/ext-lib/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*.ts", "../shared/shared.ts"]
+}
