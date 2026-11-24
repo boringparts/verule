@@ -29,7 +29,8 @@
     "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
     "@verule/acceptance-host-provider-session-data": "workspace:*",
     "@verule/acceptance-host-zod-app": "workspace:*",
-    "@verule/acceptance-host-zod-data": "workspace:*"
+    "@verule/acceptance-host-zod-data": "workspace:*",
+    "@verule/test-hosts": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",
