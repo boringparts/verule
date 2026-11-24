@@ -12,7 +12,7 @@
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",
     "fix": "node --conditions=source scripts/task-gates.ts fix",
-    "perf": "pnpm --filter @verule/acceptance perf",
+    "perf": "VERULE_PERF_CWD=\"${INIT_CWD:-$PWD}\" turbo run @verule/acceptance#perf --",
     "boundaries": "turbo boundaries",
     "toolchain:prepare": "cargo --version",
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",

@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import type { CheckReport } from "@verule/sdk";
 import { runTscTypecheck } from "@verule/test-hosts";
@@ -179,9 +178,6 @@ export type RunPoolOwnershipPerfOptions = {
 };
 
 const defaultOperationTimeoutMs = 120_000;
-const defaultWorkspaceRoot = resolve(
-  fileURLToPath(new URL("../../..", import.meta.url)),
-);
 const poolOwnershipAdditionalPackages = [
   "@verule/rules-reference",
   "@verule/adapter-drizzle",
@@ -1179,10 +1175,11 @@ function summarizeTierResult(
   };
 }
 
-function buildNotRunTierResult(
+function buildUnattemptedTierResult(
   tier: PoolOwnershipScaleSpec,
   samples: number,
   reason: string,
+  preflightStatus: "not_run" | "failed",
 ): PerfTierResult {
   const rounds: PerfRoundResult[] = Array.from(
     { length: samples },
@@ -1196,7 +1193,7 @@ function buildNotRunTierResult(
   );
   return summarizeTierResult(tier, {
     preflight: {
-      status: "not_run",
+      status: preflightStatus,
       coldReconcileStates: [],
       failureReason: reason,
     },
@@ -1303,7 +1300,7 @@ export async function runPoolOwnershipPerfBaseline(
   const samples = options.samples ?? 5;
   const retries = options.retries ?? 0;
   const timeoutMs = options.timeoutMs ?? defaultOperationTimeoutMs;
-  const workspaceRoot = options.workspaceRoot ?? defaultWorkspaceRoot;
+  const workspaceRoot = options.workspaceRoot ?? process.cwd();
   const executeTier = options.executeTier ?? defaultPoolOwnershipTierExecutor;
   const log = options.logProgress;
 
@@ -1332,10 +1329,11 @@ export async function runPoolOwnershipPerfBaseline(
       const label = formatTierLabel(tier);
       if (abortReason !== undefined || bundle === undefined) {
         tierResults.push(
-          buildNotRunTierResult(
+          buildUnattemptedTierResult(
             tier,
             samples,
             abortReason ?? "Artifact bundle unavailable",
+            "not_run",
           ),
         );
         continue;
@@ -1370,7 +1368,9 @@ export async function runPoolOwnershipPerfBaseline(
         }
       } catch (error) {
         const message = `Unrecoverable setup error in tier ${label}: ${error instanceof Error ? error.message : String(error)}`;
-        tierResults.push(buildNotRunTierResult(tier, samples, message));
+        tierResults.push(
+          buildUnattemptedTierResult(tier, samples, message, "failed"),
+        );
         abortReason = message;
       }
     }

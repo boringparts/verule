@@ -23,6 +23,7 @@ import { type HostTypecheckResult, runTscTypecheck } from "./typecheck.ts";
 export type PrepareTempHostOptions = {
   readonly host?: string;
   readonly hosts?: readonly string[];
+  readonly hostDirs?: readonly string[];
   readonly files?: Readonly<Record<string, string | Uint8Array>>;
   readonly lineEnding?: LineEnding;
   readonly packageLinks?: Readonly<Record<string, string>>;
@@ -60,13 +61,14 @@ export async function prepareTempHost(
   });
 
   try {
-    const selectedHosts = [
-      ...(options.host === undefined ? [] : [options.host]),
-      ...(options.hosts ?? []),
+    const selectedHostDirs = [
+      ...(options.host === undefined ? [] : [resolveHostDir(options.host)]),
+      ...(options.hosts ?? []).map(resolveHostDir),
+      ...(options.hostDirs ?? []),
     ];
-    for (const hostName of selectedHosts) {
+    for (const hostDir of selectedHostDirs) {
       copyDirectory(
-        resolveHostDir(hostName),
+        hostDir,
         rootDir,
         options.lineEnding === undefined
           ? {}

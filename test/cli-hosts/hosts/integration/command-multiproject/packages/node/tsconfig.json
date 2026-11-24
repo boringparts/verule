@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "composite": true,
-    "tsBuildInfoFile": "./.tsbuildinfo",
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
     "strict": false,
     "strictNullChecks": true,
     "allowJs": true,

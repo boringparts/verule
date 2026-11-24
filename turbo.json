@@ -23,6 +23,7 @@
       "tags": ["work:repair"]
     },
     "//#perf": {
+      "dependsOn": ["@verule/acceptance#perf"],
       "cache": false,
       "tags": ["work:on-demand"]
     },

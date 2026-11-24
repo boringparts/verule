@@ -24,23 +24,14 @@ import {
   type ValuePropagationTargetResult,
 } from "@verule/sdk";
 
-/** Specification of a scope whose executions create coexisting child items. */
-export type ChildItemScopeSpec =
-  | {
-      readonly id: string;
-      readonly kind: "factory-delegation";
-      readonly label: string;
-      readonly match: InstanceModelMatch;
-      readonly callbackArgumentIndex?: number;
-    }
-  | {
-      readonly id: string;
-      readonly kind: "lifecycle-callback";
-      readonly label: string;
-      readonly match: InstanceModelMatch;
-      readonly callbackArgumentIndex?: number;
-      readonly endLifecycleEvents?: readonly string[];
-    };
+/** Specification of a factory-delegation scope whose executions create coexisting child items. */
+export type ChildItemScopeSpec = {
+  readonly id: string;
+  readonly kind: "factory-delegation";
+  readonly label: string;
+  readonly match: InstanceModelMatch;
+  readonly callbackArgumentIndex?: number;
+};
 
 /** Specification of an outer container registration API whose lifetime outlives child items. */
 export type OuterHostContainerSpec = {
@@ -82,7 +73,6 @@ type ParsedModelConfig = {
   readonly childItemScopes: readonly ScopedSpec<ChildItemScopeSpec>[];
   readonly outerHostContainers: readonly ScopedSpec<OuterHostContainerSpec>[];
   readonly containerInternalMatches: readonly InstanceModelMatch[];
-  readonly endLifecycleMatches: readonly InstanceModelMatch[];
 };
 
 type CallInfo = {
@@ -191,41 +181,23 @@ function parseChildScopeSpec(raw: unknown): ChildItemScopeSpec | null {
   if (typeof raw.id !== "string" || typeof raw.label !== "string") {
     return null;
   }
-  const cbIndex =
-    typeof raw.callbackArgumentIndex === "number"
+  if (raw.kind !== "factory-delegation") {
+    return null;
+  }
+  return {
+    id: raw.id,
+    kind: "factory-delegation",
+    label: raw.label,
+    match: raw.match,
+    ...(typeof raw.callbackArgumentIndex === "number"
       ? { callbackArgumentIndex: raw.callbackArgumentIndex }
-      : {};
-  if (raw.kind === "factory-delegation") {
-    return {
-      id: raw.id,
-      kind: "factory-delegation",
-      label: raw.label,
-      match: raw.match,
-      ...cbIndex,
-    };
-  }
-  if (raw.kind === "lifecycle-callback") {
-    const endEvents = Array.isArray(raw.endLifecycleEvents)
-      ? raw.endLifecycleEvents.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : undefined;
-    return {
-      id: raw.id,
-      kind: "lifecycle-callback",
-      label: raw.label,
-      match: raw.match,
-      ...cbIndex,
-      ...(endEvents ? { endLifecycleEvents: endEvents } : {}),
-    };
-  }
-  return null;
+      : {}),
+  };
 }
 
 function parseModelConfig(models: readonly Model[]): ParsedModelConfig {
   const childItemScopes: ScopedSpec<ChildItemScopeSpec>[] = [];
   const outerHostContainers: ScopedSpec<OuterHostContainerSpec>[] = [];
-  const endLifecycleMatches: InstanceModelMatch[] = [];
 
   for (const model of models) {
     const facts = model.facts;
@@ -259,12 +231,6 @@ function parseModelConfig(models: readonly Model[]): ParsedModelConfig {
             });
           }
         }
-      }
-    }
-
-    for (const ev of model.lifecycleEvents ?? []) {
-      if (ev.kind === "lifecycle-end-callback") {
-        endLifecycleMatches.push(ev.match);
       }
     }
   }
@@ -308,7 +274,6 @@ function parseModelConfig(models: readonly Model[]): ParsedModelConfig {
           .map((b) => b.match),
       ),
     ],
-    endLifecycleMatches,
   };
 }
 
@@ -325,29 +290,46 @@ function collectMatchKeywords(match: InstanceModelMatch): string[] {
   return out;
 }
 
-function matchesSpec(match: InstanceModelMatch, info: CallInfo): boolean {
-  if (match.module && info.declLocation) {
-    if (!info.declLocation.file.includes(match.module)) {
-      return false;
-    }
-  }
-  if (match.container && info.containerName !== match.container) {
+function matchesTargetSpec(
+  match: InstanceModelMatch,
+  target: {
+    readonly name: string | null;
+    readonly containerName: string | null;
+    readonly file: string | null;
+  },
+): boolean {
+  if (
+    match.module &&
+    target.file !== null &&
+    !target.file.includes(match.module)
+  ) {
     return false;
   }
-  if (match.member && info.memberName !== match.member) {
+  if (match.container && target.containerName !== match.container) {
+    return false;
+  }
+  if (match.member && target.name !== match.member) {
     return false;
   }
   if (match.symbol) {
     if (match.symbol.includes(".")) {
-      const qualified = info.containerName
-        ? `${info.containerName}.${info.memberName ?? ""}`
-        : (info.memberName ?? "");
+      const qualified = target.containerName
+        ? `${target.containerName}.${target.name ?? ""}`
+        : (target.name ?? "");
       if (qualified !== match.symbol) return false;
-    } else if (info.memberName !== match.symbol) {
+    } else if (target.name !== match.symbol) {
       return false;
     }
   }
   return true;
+}
+
+function matchesSpec(match: InstanceModelMatch, info: CallInfo): boolean {
+  return matchesTargetSpec(match, {
+    name: info.memberName,
+    containerName: info.containerName,
+    file: info.declLocation?.file ?? null,
+  });
 }
 
 function extractCalleeTextName(text: string): string | null {
@@ -569,7 +551,6 @@ async function getFileSyntaxNodes(
 
 async function resolveScopeFunctionNode(
   ctx: RuleContext,
-  spec: ChildItemScopeSpec,
   cbArgRef: SyntaxRef,
   triggerFile: string,
   fileSyntaxCache: FileSyntaxCache,
@@ -614,51 +595,47 @@ async function resolveScopeFunctionNode(
   if (!fnNode) return null;
 
   // Follow trivial wrapper arrows like `() => this.listFactory()` up to MAX_FACTORY_HOPS.
-  if (spec.kind === "factory-delegation") {
-    let current = fnNode;
-    for (let hop = 0; hop < MAX_FACTORY_HOPS; hop += 1) {
-      const currentNodes = await getFileSyntaxNodes(
-        ctx,
-        current.location.file,
-        fileSyntaxCache,
-      );
-      const innerCalls = currentNodes.filter(
-        (n) =>
-          n.kind === "CallExpression" &&
-          isLocationWithin(n.location, current.location),
-      );
-      const innerVars = currentNodes.filter(
-        (n) =>
-          n.kind === "VariableDeclaration" &&
-          isLocationWithin(n.location, current.location),
-      );
-      if (innerCalls.length !== 1 || innerVars.length > 0) break;
+  let current = fnNode;
+  for (let hop = 0; hop < MAX_FACTORY_HOPS; hop += 1) {
+    const currentNodes = await getFileSyntaxNodes(
+      ctx,
+      current.location.file,
+      fileSyntaxCache,
+    );
+    const innerCalls = currentNodes.filter(
+      (n) =>
+        n.kind === "CallExpression" &&
+        isLocationWithin(n.location, current.location),
+    );
+    const innerVars = currentNodes.filter(
+      (n) =>
+        n.kind === "VariableDeclaration" &&
+        isLocationWithin(n.location, current.location),
+    );
+    if (innerCalls.length !== 1 || innerVars.length > 0) break;
 
-      const [resolvedCall] = await ctx.resolveCalls([innerCalls[0]!.ref]);
-      if (!resolvedCall?.call) break;
-      const [cRes] = await ctx.calleesOf([resolvedCall.call]);
-      const targetDecl = cRes?.resolvedTargets[0];
-      if (!targetDecl || targetDecl.isExternal || !targetDecl.location) break;
+    const [resolvedCall] = await ctx.resolveCalls([innerCalls[0]!.ref]);
+    if (!resolvedCall?.call) break;
+    const [cRes] = await ctx.calleesOf([resolvedCall.call]);
+    const targetDecl = cRes?.resolvedTargets[0];
+    if (!targetDecl || targetDecl.isExternal || !targetDecl.location) break;
 
-      visitedFiles.add(targetDecl.location.file);
-      const nextNodes = await getFileSyntaxNodes(
-        ctx,
-        targetDecl.location.file,
-        fileSyntaxCache,
-      );
-      const nextFn = nextNodes.find(
-        (n) =>
-          isFunctionKind(n.kind) &&
-          n.location.start === targetDecl.location!.start &&
-          n.location.end === targetDecl.location!.end,
-      );
-      if (!nextFn) break;
-      current = nextFn;
-    }
-    return { scopeFn: current, visitedFiles: [...visitedFiles] };
+    visitedFiles.add(targetDecl.location.file);
+    const nextNodes = await getFileSyntaxNodes(
+      ctx,
+      targetDecl.location.file,
+      fileSyntaxCache,
+    );
+    const nextFn = nextNodes.find(
+      (n) =>
+        isFunctionKind(n.kind) &&
+        n.location.start === targetDecl.location!.start &&
+        n.location.end === targetDecl.location!.end,
+    );
+    if (!nextFn) break;
+    current = nextFn;
   }
-
-  return { scopeFn: fnNode, visitedFiles: [...visitedFiles] };
+  return { scopeFn: current, visitedFiles: [...visitedFiles] };
 }
 
 async function discoverCandidateCalls(
@@ -869,8 +846,6 @@ async function extractChildEndScopes(
   ctx: RuleContext,
   entry: ScopeEntry,
   partition: ScopeAstPartition,
-  scopeCallInfos: readonly CallInfo[],
-  config: ParsedModelConfig,
 ): Promise<{
   readonly childEndScopes: readonly CleanupScopeRef[];
   readonly childEndRanges: readonly DiagnosticLocation[];
@@ -880,160 +855,110 @@ async function extractChildEndScopes(
   const childEndRanges: DiagnosticLocation[] = [];
   const returnedExprs: SyntaxRef[] = [];
 
-  if (entry.spec.kind === "factory-delegation") {
-    const directReturns = partition.scopeReturnStmts.filter(
-      (r) =>
-        resolveEnclosingScopeFunction(
-          r.location,
-          partition.scopeFunctions,
-          entry.scopeFn,
-        ) === entry.scopeFn,
+  const directReturns = partition.scopeReturnStmts.filter(
+    (r) =>
+      resolveEnclosingScopeFunction(
+        r.location,
+        partition.scopeFunctions,
+        entry.scopeFn,
+      ) === entry.scopeFn,
+  );
+  if (directReturns.length > 0) {
+    const retSyntax = await ctx.syntaxOf(
+      directReturns.map((r) => r.ref),
+      { select: { expression: true } },
     );
-    if (directReturns.length > 0) {
-      const retSyntax = await ctx.syntaxOf(
-        directReturns.map((r) => r.ref),
-        { select: { expression: true } },
-      );
-      const retExprRefs = retSyntax
-        .map((s) => s.expression)
-        .filter((e): e is SyntaxRef => e !== undefined);
-      const retExprSnaps =
-        retExprRefs.length > 0
-          ? await ctx.syntaxOf(retExprRefs, {
-              select: { kind: true, location: true },
-            })
-          : [];
-      let snapCursor = 0;
-
-      for (const [idx, r] of directReturns.entries()) {
-        const retExpr = retSyntax[idx]?.expression;
-        if (!retExpr) continue;
-        returnedExprs.push(retExpr);
-
-        const retExprSnap = retExprSnaps[snapCursor];
-        snapCursor += 1;
-        const wrapperLoc =
-          retExprSnap?.kind === "ObjectLiteralExpression" &&
-          retExprSnap.location
-            ? retExprSnap.location
-            : r.location;
-
-        const isNestedInsideWrapper = (loc: DiagnosticLocation): boolean =>
-          partition.scopeCallsRaw.some(
-            (c) =>
-              isLocationWithin(c.location, wrapperLoc) &&
-              isLocationWithin(loc, c.location),
-          ) ||
-          partition.scopeFunctions.some(
-            (f) =>
-              f !== entry.scopeFn &&
-              isLocationWithin(f.location, wrapperLoc) &&
-              isLocationWithin(loc, f.location) &&
-              !(loc.start === f.location.start && loc.end === f.location.end),
-          );
-
-        const topProps = partition.scopePropAssignments.filter(
-          (p) =>
-            isLocationWithin(p.location, wrapperLoc) &&
-            !isNestedInsideWrapper(p.location),
-        );
-        if (topProps.length > 0) {
-          const propRows = await ctx.syntaxOf(
-            topProps.map((p) => p.ref),
-            { select: { initializer: true } },
-          );
-          for (const [pIdx, propNode] of topProps.entries()) {
-            const initRef = propRows[pIdx]?.initializer;
-            if (!initRef) continue;
-            if (/^\s*dispose\s*:/u.test(propNode.text)) {
-              childEndScopes.push(initRef);
-              childEndRanges.push(propNode.location);
-            } else {
-              returnedExprs.push(initRef);
-            }
-          }
-        }
-
-        const topShorthands = partition.scopeShorthandProps.filter(
-          (sp) =>
-            isLocationWithin(sp.location, wrapperLoc) &&
-            !isNestedInsideWrapper(sp.location),
-        );
-        for (const sp of topShorthands) {
-          const targetRef = sp.name ?? sp.ref;
-          if (sp.text.trim() === "dispose") {
-            childEndScopes.push(targetRef);
-            childEndRanges.push(sp.location);
-          } else {
-            returnedExprs.push(targetRef);
-          }
-        }
-
-        const disposeMethod = partition.scopeFunctions.find(
-          (m) =>
-            m.kind === "MethodDeclaration" &&
-            isLocationWithin(m.location, wrapperLoc) &&
-            !isNestedInsideWrapper(m.location) &&
-            /^\s*(?:public\s+)?dispose\s*\(/u.test(m.text),
-        );
-        if (disposeMethod) {
-          childEndScopes.push(disposeMethod.ref);
-          childEndRanges.push(disposeMethod.location);
-        }
-      }
-    } else if (entry.scopeFn.kind === "ArrowFunction" && entry.scopeFn.body) {
-      returnedExprs.push(entry.scopeFn.body);
-    }
-  } else if (entry.spec.kind === "lifecycle-callback") {
-    const lifecycleSpec = entry.spec;
-    const endCalls = scopeCallInfos.filter(
-      (callInfo) =>
-        config.endLifecycleMatches.some((m) => matchesSpec(m, callInfo)) ||
-        (lifecycleSpec.endLifecycleEvents ?? []).some(
-          (evName) => callInfo.memberName === evName,
-        ),
-    );
-    const cbArgs = endCalls
-      .map((c) => c.arguments[0])
-      .filter((a): a is SyntaxRef => a !== undefined);
-    const cbRows =
-      cbArgs.length > 0
-        ? await ctx.syntaxOf(cbArgs, { select: { location: true } })
+    const retExprRefs = retSyntax
+      .map((s) => s.expression)
+      .filter((e): e is SyntaxRef => e !== undefined);
+    const retExprSnaps =
+      retExprRefs.length > 0
+        ? await ctx.syntaxOf(retExprRefs, {
+            select: { kind: true, location: true },
+          })
         : [];
-    let cbCursor = 0;
-    for (const callInfo of endCalls) {
-      childEndScopes.push(callInfo.syntax.ref);
-      if (callInfo.arguments[0]) {
-        const loc = cbRows[cbCursor]?.location;
-        cbCursor += 1;
-        if (loc) childEndRanges.push(loc);
+    let snapCursor = 0;
+
+    for (const [idx, r] of directReturns.entries()) {
+      const retExpr = retSyntax[idx]?.expression;
+      if (!retExpr) continue;
+      returnedExprs.push(retExpr);
+
+      const retExprSnap = retExprSnaps[snapCursor];
+      snapCursor += 1;
+      const wrapperLoc =
+        retExprSnap?.kind === "ObjectLiteralExpression" && retExprSnap.location
+          ? retExprSnap.location
+          : r.location;
+
+      const isNestedInsideWrapper = (loc: DiagnosticLocation): boolean =>
+        partition.scopeCallsRaw.some(
+          (c) =>
+            isLocationWithin(c.location, wrapperLoc) &&
+            isLocationWithin(loc, c.location),
+        ) ||
+        partition.scopeFunctions.some(
+          (f) =>
+            f !== entry.scopeFn &&
+            isLocationWithin(f.location, wrapperLoc) &&
+            isLocationWithin(loc, f.location) &&
+            !(loc.start === f.location.start && loc.end === f.location.end),
+        );
+
+      const topProps = partition.scopePropAssignments.filter(
+        (p) =>
+          isLocationWithin(p.location, wrapperLoc) &&
+          !isNestedInsideWrapper(p.location),
+      );
+      if (topProps.length > 0) {
+        const propRows = await ctx.syntaxOf(
+          topProps.map((p) => p.ref),
+          { select: { initializer: true } },
+        );
+        for (const [pIdx, propNode] of topProps.entries()) {
+          const initRef = propRows[pIdx]?.initializer;
+          if (!initRef) continue;
+          if (/^\s*dispose\s*:/u.test(propNode.text)) {
+            childEndScopes.push(initRef);
+            childEndRanges.push(propNode.location);
+          } else {
+            returnedExprs.push(initRef);
+          }
+        }
+      }
+
+      const topShorthands = partition.scopeShorthandProps.filter(
+        (sp) =>
+          isLocationWithin(sp.location, wrapperLoc) &&
+          !isNestedInsideWrapper(sp.location),
+      );
+      for (const sp of topShorthands) {
+        const targetRef = sp.name ?? sp.ref;
+        if (sp.text.trim() === "dispose") {
+          childEndScopes.push(targetRef);
+          childEndRanges.push(sp.location);
+        } else {
+          returnedExprs.push(targetRef);
+        }
+      }
+
+      const disposeMethod = partition.scopeFunctions.find(
+        (m) =>
+          m.kind === "MethodDeclaration" &&
+          isLocationWithin(m.location, wrapperLoc) &&
+          !isNestedInsideWrapper(m.location) &&
+          /^\s*(?:public\s+)?dispose\s*\(/u.test(m.text),
+      );
+      if (disposeMethod) {
+        childEndScopes.push(disposeMethod.ref);
+        childEndRanges.push(disposeMethod.location);
       }
     }
+  } else if (entry.scopeFn.kind === "ArrowFunction" && entry.scopeFn.body) {
+    returnedExprs.push(entry.scopeFn.body);
   }
 
   return { childEndScopes, childEndRanges, returnedExprs };
-}
-
-function matchesDeclarationMatch(
-  match: InstanceModelMatch,
-  name: string | null,
-  containerName: string | null,
-  file: string,
-): boolean {
-  if (match.module && !file.includes(match.module)) return false;
-  if (match.container && containerName !== match.container) return false;
-  if (match.member && name !== match.member) return false;
-  if (match.symbol) {
-    if (match.symbol.includes(".")) {
-      const qualified = containerName
-        ? `${containerName}.${name ?? ""}`
-        : (name ?? "");
-      if (qualified !== match.symbol) return false;
-    } else if (name !== match.symbol) {
-      return false;
-    }
-  }
-  return true;
 }
 
 async function isInsideModeledContainerImpl(
@@ -1061,12 +986,11 @@ async function isInsideModeledContainerImpl(
   });
   if (!decl) return false;
   return config.containerInternalMatches.some((m) =>
-    matchesDeclarationMatch(
-      m,
-      decl.name,
-      decl.containerName,
-      innermost.location.file,
-    ),
+    matchesTargetSpec(m, {
+      name: decl.name,
+      containerName: decl.containerName,
+      file: innermost.location.file,
+    }),
   );
 }
 
@@ -1472,11 +1396,11 @@ async function evaluateRegistrations(
         localContainersByKey.set(containerRes.instanceKey, {
           instance: containerRes.instance,
           instanceKey: containerRes.instanceKey,
-          allocationLocation: containerRes.allocationLocation!,
+          allocationLocation: containerRes.allocationLocation,
           firstRegistration: reg.info,
         });
         localContainerVarLocKeys.add(
-          `${containerRes.allocationLocation!.file}:${String(containerRes.allocationLocation!.start)}:${String(containerRes.allocationLocation!.end)}`,
+          `${containerRes.allocationLocation.file}:${String(containerRes.allocationLocation.start)}:${String(containerRes.allocationLocation.end)}`,
         );
       }
       continue;
@@ -1588,7 +1512,6 @@ async function verifyLocalContainers(
     let cleanupScopeRes: InstanceCleanupScopeResult | undefined;
 
     if (
-      entry.spec.kind === "factory-delegation" &&
       returnedExprs.length > 0 &&
       localContainer.firstRegistration.receiverExpr
     ) {
@@ -1732,7 +1655,7 @@ async function verifyUnregisteredDisposables(
   if (disposableVars.length === 0) return;
 
   const returnedHandleIds = new Set<string>();
-  if (entry.spec.kind === "factory-delegation" && returnedExprs.length > 0) {
+  if (returnedExprs.length > 0) {
     const prop = await ctx.valuePropagation({
       propagation: "value",
       from: disposableVars.map((v) => v.initRef),
@@ -1866,7 +1789,7 @@ async function checkChildScope(
   );
 
   const { childEndScopes, childEndRanges, returnedExprs } =
-    await extractChildEndScopes(ctx, entry, partition, scopeCallInfos, config);
+    await extractChildEndScopes(ctx, entry, partition);
 
   const checkedItemExprHandles = new Set<string>();
   const regCalls = await collectRegistrations(
@@ -2099,7 +2022,6 @@ export function createPoolResourceOwnershipRule(
 
         const resolvedScope = await resolveScopeFunctionNode(
           ctx,
-          matched.spec,
           cbArg,
           info.syntax.location.file,
           fileSyntaxCache,
