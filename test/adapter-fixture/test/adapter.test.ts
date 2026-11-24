@@ -16,7 +16,9 @@ import {
 
 import {
   FixtureCallSourceFact,
+  FixtureSourceSpecFact,
   type FixtureCallSourceValue,
+  type FixtureSourceSpecValue,
 } from "../src/index.ts";
 
 const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -268,6 +270,82 @@ export default {
         await session.close();
       }
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  void it("extracts fixture.source-spec facts on declarations and targeted references", async () => {
+    const root = createProject();
+    writeFileSync(
+      join(root, "src/source.ts"),
+      [
+        "export function defineFixtureSource(name: string, fields: Record<string, unknown>) {",
+        "  return { name, fields };",
+        "}",
+        "declare function dynamicField(): string;",
+        'export const orderSpec = defineFixtureSource("order", {',
+        '  id: "required",',
+        '  note: "optional",',
+        "  extra: dynamicField(),",
+        "});",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    let allSpecs: readonly FactResult<
+      "syntax" | "declaration" | "call",
+      FixtureSourceSpecValue
+    >[] = [];
+    let targetedSpecs: readonly FactResult<
+      "syntax" | "declaration" | "call",
+      FixtureSourceSpecValue
+    >[] = [];
+
+    const specRule = defineRule({
+      id: "fixture-source-spec-rule",
+      run: async (context) => {
+        allSpecs = await context.facts(FixtureSourceSpecFact);
+        const decls = await context.findSyntax({
+          files: ["src/source.ts"],
+          kinds: ["VariableDeclaration"],
+        });
+        const orderDecl = decls.find((d) => d.text.startsWith("orderSpec"));
+        assert.ok(orderDecl);
+        targetedSpecs = await context.facts(FixtureSourceSpecFact, {
+          targets: [orderDecl.ref],
+        });
+      },
+    });
+
+    const session = await openSession({
+      cwd: root,
+      adapterResolutionRoot: fixtureRoot,
+      config: defineConfig({
+        tsconfig: "tsconfig.json",
+        adapters: ["@verule/adapter-fixture"],
+        rules: [specRule],
+      }),
+    });
+    try {
+      const report = await session.check();
+      assert.equal(report.status, "clean");
+      assert.equal(allSpecs.length, 1);
+      assert.deepEqual(allSpecs[0]?.value, {
+        sourceName: "order",
+        fields: { id: "required", note: "optional" },
+        requiredFields: ["id"],
+        optionalFields: ["note"],
+        defaultedFields: [],
+        unknownFields: ["extra"],
+        hasDynamicFields: true,
+      });
+      assert.equal(allSpecs[0]?.gaps.length, 1);
+      assert.equal(allSpecs[0]?.gaps[0]?.kind, "unresolved-fixture-field");
+      assert.equal(targetedSpecs.length, 1);
+      assert.deepEqual(targetedSpecs[0]?.value, allSpecs[0]?.value);
+    } finally {
+      await session.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

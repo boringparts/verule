@@ -12,8 +12,9 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    ADAPTER_ABI_VERSION, Adapter, AdapterError, Context, DeclarationInfo, FactRequest, HostValue,
-    NativeAdapterOutput, NativeContribution, NodeKind, NodeOperation, SourceLocation,
+    ADAPTER_ABI_VERSION, Adapter, AdapterError, Context, DeclarationInfo, FactRequest,
+    HostQueriedFact, HostValue, NativeAdapterInputAttribution, NativeAdapterOutput,
+    NativeContribution, NodeKind, NodeOperation, SourceLocation,
 };
 
 pub const MANIFEST_SYMBOL: &[u8] = b"verule_adapter_manifest_v1\0";
@@ -74,11 +75,22 @@ pub struct FfiReply {
     pub location: FfiLocation,
 }
 
+#[repr(C)]
+pub struct FfiFactQuery {
+    pub fact_type_id: FfiSlice,
+    pub provider_id: FfiSlice,
+    pub has_provider_id: bool,
+    pub condition: FfiSlice,
+    pub targets: FfiNodeList,
+    pub has_targets: bool,
+}
+
 pub type ReadNodeCallback = unsafe extern "C" fn(*mut c_void, u64, u32) -> FfiReply;
 pub type ReadInputCallback = unsafe extern "C" fn(*mut c_void, FfiSlice) -> FfiReply;
 pub type RegisterInputCallback = unsafe extern "C" fn(*mut c_void, FfiSlice) -> i32;
 pub type FinishCallback = unsafe extern "C" fn(*mut c_void, FfiSlice);
 pub type FailCallback = unsafe extern "C" fn(*mut c_void, FfiSlice);
+pub type QueryFactsCallback = unsafe extern "C" fn(*mut c_void, *const FfiFactQuery) -> FfiReply;
 
 #[repr(C)]
 pub struct FfiHostApi {
@@ -89,6 +101,7 @@ pub struct FfiHostApi {
     pub register_additional_input: Option<RegisterInputCallback>,
     pub finish: Option<FinishCallback>,
     pub fail: Option<FailCallback>,
+    pub query_facts: Option<QueryFactsCallback>,
 }
 
 #[repr(C)]
@@ -117,6 +130,7 @@ pub(crate) const REPLY_KIND: u32 = 4;
 pub(crate) const REPLY_LOCATION: u32 = 5;
 pub(crate) const REPLY_DECLARATION: u32 = 6;
 pub(crate) const REPLY_ERROR: u32 = 7;
+pub(crate) const REPLY_FACTS: u32 = 8;
 
 /// Builds a stable manifest slice cached in storage emitted for a single plugin.
 pub fn manifest_slice<A: Adapter>(storage: &'static OnceLock<Box<[u8]>>) -> FfiManifestSlice {
@@ -245,9 +259,19 @@ unsafe fn invoke_adapter_inner<A: Adapter>(
             gaps: contribution.gaps,
         });
     }
+    let additional_inputs: Vec<String> =
+        context.additional_inputs.into_inner().into_iter().collect();
+    let adapter_inputs = additional_inputs
+        .iter()
+        .map(|path| NativeAdapterInputAttribution {
+            adapter_id: manifest.id.clone(),
+            path: path.clone(),
+        })
+        .collect();
     let output = NativeAdapterOutput {
         contributions: output_contributions,
-        additional_inputs: context.additional_inputs.into_inner().into_iter().collect(),
+        additional_inputs,
+        adapter_inputs,
     };
     let bytes = serde_json::to_vec(&output).map_err(|error| AdapterError::InvalidOutput {
         message: error.to_string(),
@@ -328,6 +352,41 @@ pub(crate) fn register_additional_input(host: &FfiHostApi, path: &str) -> Result
     }
 }
 
+pub(crate) fn query_facts(
+    host: &FfiHostApi,
+    fact_type_id: &str,
+    provider_id: Option<&str>,
+    condition_json: Option<&str>,
+    target_ids: Option<&[u64]>,
+) -> Result<Vec<HostQueriedFact>, AdapterError> {
+    let Some(callback) = host.query_facts else {
+        return Err(AdapterError::Host {
+            message: "host API is missing the fact query callback".to_string(),
+        });
+    };
+    let wire_query = FfiFactQuery {
+        fact_type_id: FfiSlice::from_bytes(fact_type_id.as_bytes()),
+        provider_id: provider_id
+            .map_or_else(FfiSlice::empty, |id| FfiSlice::from_bytes(id.as_bytes())),
+        has_provider_id: provider_id.is_some(),
+        condition: condition_json.map_or_else(FfiSlice::empty, |json| {
+            FfiSlice::from_bytes(json.as_bytes())
+        }),
+        targets: FfiNodeList {
+            data: target_ids.map_or(std::ptr::null(), <[u64]>::as_ptr),
+            len: target_ids.map_or(0, <[u64]>::len),
+        },
+        has_targets: target_ids.is_some(),
+    };
+    let reply = unsafe { callback(host.context, &raw const wire_query) };
+    match unsafe { decode_reply(reply) }? {
+        HostValue::Facts(facts) => Ok(facts),
+        _ => Err(AdapterError::Host {
+            message: "host returned the wrong value for a fact query".to_string(),
+        }),
+    }
+}
+
 unsafe fn decode_reply(reply: FfiReply) -> Result<HostValue, AdapterError> {
     let decode_string = |slice: FfiSlice| unsafe { read_string(slice) };
     match reply.tag {
@@ -375,6 +434,15 @@ unsafe fn decode_reply(reply: FfiReply) -> Result<HostValue, AdapterError> {
         REPLY_ERROR => Err(AdapterError::Host {
             message: decode_string(reply.bytes)?,
         }),
+        REPLY_FACTS => {
+            let bytes = unsafe { read_bytes(reply.bytes) }?;
+            let facts = serde_json::from_slice::<Vec<HostQueriedFact>>(bytes).map_err(|error| {
+                AdapterError::Host {
+                    message: format!("host returned invalid queried fact data: {error}"),
+                }
+            })?;
+            Ok(HostValue::Facts(facts))
+        }
         _ => Err(AdapterError::Host {
             message: format!("host returned unknown reply tag {}", reply.tag),
         }),

@@ -409,6 +409,27 @@ pub enum HostValue {
     Kind(NodeKind),
     Location(Option<SourceLocation>),
     Declaration(Option<DeclarationInfo>),
+    Facts(Vec<HostQueriedFact>),
+}
+
+/// Host-level query parameters passed across [`HostAccess::query_facts`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFactQuery {
+    pub fact_type_id: String,
+    pub provider_id: Option<String>,
+    pub condition: Option<Value>,
+    pub targets: Option<Vec<u64>>,
+}
+
+/// Host-level fact item returned by [`HostAccess::query_facts`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostQueriedFact {
+    pub subject_node_id: u64,
+    pub value: Value,
+    pub evidence: Vec<Evidence>,
+    pub gaps: Vec<Gap>,
+    pub providers: Vec<String>,
 }
 
 /// Synchronous access that the engine implements for the current project snapshot.
@@ -421,6 +442,9 @@ pub trait HostAccess {
 
     /// Registers an input path without reading it.
     fn register_additional_input(&mut self, path: &str) -> Result<(), String>;
+
+    /// Queries facts from other enabled native providers on the active snapshot.
+    fn query_facts(&mut self, query: HostFactQuery) -> Result<Vec<HostQueriedFact>, String>;
 }
 
 /// A request to one native provider for one project snapshot.
@@ -468,12 +492,41 @@ pub struct NativeContribution {
     pub gaps: Vec<Gap>,
 }
 
+/// Attribution pairing a read/registered additional input path with the adapter that used it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAdapterInputAttribution {
+    pub adapter_id: String,
+    pub path: String,
+}
+
 /// Result returned by a native adapter, including files used by the extraction.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeAdapterOutput {
     pub contributions: Vec<NativeContribution>,
     pub additional_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapter_inputs: Vec<NativeAdapterInputAttribution>,
+}
+
+/// Query parameters for requesting facts from other enabled providers on the active snapshot.
+#[derive(Clone, Debug)]
+pub struct FactQuery<'a> {
+    pub fact_type_id: &'a str,
+    pub provider_id: Option<&'a str>,
+    pub condition: Option<Value>,
+    pub targets: Option<&'a [NodeRef<'a>]>,
+}
+
+/// One fact item returned by [`Context::query_facts`], bound to the active [`Context`] lifetime.
+#[derive(Clone, Debug)]
+pub struct QueriedFact<'a> {
+    pub subject: NodeRef<'a>,
+    pub value: Value,
+    pub evidence: Vec<Evidence>,
+    pub gaps: Vec<Gap>,
+    pub providers: Vec<String>,
 }
 
 /// Request data available to an adapter implementation.
@@ -518,6 +571,63 @@ impl<'a> Context<'a> {
         ffi::register_additional_input(self.host, path)?;
         self.additional_inputs.borrow_mut().insert(path.to_string());
         Ok(())
+    }
+
+    /// Queries facts from other enabled native providers on the active project snapshot.
+    pub fn query_facts(
+        &'a self,
+        query: &FactQuery<'_>,
+    ) -> Result<Vec<QueriedFact<'a>>, AdapterError> {
+        if query.fact_type_id.trim().is_empty() {
+            return Err(AdapterError::Host {
+                message: "fact_type_id must not be empty".to_string(),
+            });
+        }
+        if let Some(provider_id) = query.provider_id
+            && provider_id.trim().is_empty()
+        {
+            return Err(AdapterError::Host {
+                message: "provider_id must not be empty when specified".to_string(),
+            });
+        }
+        if let Some(targets) = query.targets {
+            for target in targets {
+                if !std::ptr::eq(target.context, self) {
+                    return Err(AdapterError::Host {
+                        message: "query_facts target NodeRef belongs to a different context"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        let target_ids: Option<Vec<u64>> = query
+            .targets
+            .map(|targets| targets.iter().map(|node| node.id).collect());
+        let condition_json = query
+            .condition
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| AdapterError::Host {
+                message: format!("failed to serialize fact query condition: {error}"),
+            })?;
+        let items = ffi::query_facts(
+            self.host,
+            query.fact_type_id,
+            query.provider_id,
+            condition_json.as_deref(),
+            target_ids.as_deref(),
+        )?;
+        Ok(items
+            .into_iter()
+            .map(|item| QueriedFact {
+                subject: self.node(item.subject_node_id),
+                value: item.value,
+                evidence: item.evidence,
+                gaps: item.gaps,
+                providers: item.providers,
+            })
+            .collect())
     }
 }
 

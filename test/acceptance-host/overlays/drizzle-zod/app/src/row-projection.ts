@@ -1,16 +1,22 @@
 import {
+  gateFieldsSchema,
   getCompleteUser,
   getCompleteUserAgain,
   getDynamicUser,
+  getPageWithWorkspace,
   getUserBrief,
+  selectWorkspaceSchema,
+  strictUserSchema,
   userSchema,
 } from "@verule/acceptance-host-drizzle-zod-data";
 
-export async function checkUserRows() {
+export async function checkUserRows(externalUser: unknown = {}) {
   const complete = await getCompleteUser();
   const completeAgain = await getCompleteUserAgain();
   const brief = await getUserBrief();
   const dynamic = await getDynamicUser();
+  const unrelated = userSchema.parse(externalUser);
+  void strictUserSchema;
 
   return {
     complete: complete === undefined ? undefined : userSchema.parse(complete),
@@ -18,5 +24,17 @@ export async function checkUserRows() {
       completeAgain === undefined ? undefined : userSchema.parse(completeAgain),
     defaulted: brief === undefined ? undefined : userSchema.parse(brief),
     dynamic: dynamic === undefined ? undefined : userSchema.parse(dynamic),
+    unrelated,
   };
+}
+
+export async function checkPageAndRest() {
+  const pageRow = await getPageWithWorkspace();
+  if (pageRow === undefined) {
+    return null;
+  }
+  const ws = selectWorkspaceSchema.safeParse(pageRow.workspace);
+  const { workspace: _ws, ...restPage } = pageRow;
+  const gate = gateFieldsSchema.parse(restPage);
+  return { ws, gate };
 }

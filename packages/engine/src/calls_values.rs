@@ -1107,6 +1107,10 @@ pub struct ValuePropagationStepPayload {
     pub description: String,
     pub from_location: SourceLocation,
     pub to_location: SourceLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted_properties: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -1116,6 +1120,8 @@ pub struct ValuePropagationPathPayload {
     pub to: String,
     pub steps: Vec<ValuePropagationStepPayload>,
     pub evidence: Vec<EvidenceItem>,
+    pub source_path: Vec<String>,
+    pub omitted_properties: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1141,10 +1147,17 @@ const MAX_PROP_STATES: usize = 4096;
 const MAX_CALL_STACK_DEPTH: usize = 16;
 const MAX_PATHS_PER_PAIR: usize = 8;
 
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+struct ValueFieldState {
+    field_path: Vec<String>,
+    source_path: Vec<String>,
+    omitted_properties: BTreeSet<String>,
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TraceKey {
     node: P<Node>,
-    field_path: Vec<String>,
+    fields: ValueFieldState,
     call_stack: Vec<P<Node>>,
     is_gap_tainted: bool,
 }
@@ -1418,6 +1431,16 @@ fn collect_reachable_reads(
 }
 
 pub fn prop_key_text(node: P<Node>) -> Option<String> {
+    if node.kind() == Kind::ComputedPropertyName {
+        let expr = unwrap_expr_wrappers(node.expression()?);
+        if matches!(
+            expr.kind(),
+            Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
+        ) {
+            return prop_key_text(expr);
+        }
+        return None;
+    }
     let raw = node_text(node)?;
     if matches!(
         node.kind(),
@@ -1450,6 +1473,8 @@ fn make_step(
     description: String,
     from_node: P<Node>,
     to_node: P<Node>,
+    property: Option<String>,
+    omitted_properties: Option<Vec<String>>,
 ) -> Option<ValuePropagationStepPayload> {
     let from_location = node_location_rel(cwd, from_node)?;
     let to_location = node_location_rel(cwd, to_node)?;
@@ -1458,6 +1483,8 @@ fn make_step(
         description,
         from_location,
         to_location,
+        property,
+        omitted_properties,
     })
 }
 
@@ -1468,6 +1495,7 @@ struct PropagationRunner<'a> {
     program: &'static Program,
     checker: &'a mut CheckerHandle,
     lookup_files: Option<Vec<String>>,
+    include_member_access: bool,
     call_graph: Option<Arc<ProjectCallGraph>>,
     package_impl_cache: PackageImplCache,
     all_gaps: Vec<GapItem>,
@@ -1477,12 +1505,17 @@ struct PropagationRunner<'a> {
 }
 
 impl<'a> PropagationRunner<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Initializes propagation runner state for a batch of endpoints."
+    )]
     fn new(
         snapshot: &'a mut crate::serve::SnapshotState,
         project_id: &'a str,
         program: &'static Program,
         checker: &'a mut CheckerHandle,
         lookup_files: Option<&[String]>,
+        include_member_access: bool,
         package_impl_cache: PackageImplCache,
         target_endpoints: Vec<(String, EndpointSpec)>,
     ) -> Self {
@@ -1495,6 +1528,7 @@ impl<'a> PropagationRunner<'a> {
             program,
             checker,
             lookup_files: lookup_files.map(<[String]>::to_vec),
+            include_member_access,
             call_graph: None,
             package_impl_cache,
             all_gaps: Vec::new(),
@@ -1551,7 +1585,7 @@ impl<'a> PropagationRunner<'a> {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Queues one BFS transition with updated path, call stack, step log, and gap indices."
+        reason = "Queues one BFS transition with updated field state, call stack, step log, and gap indices."
     )]
     fn enqueue_step(
         &self,
@@ -1559,14 +1593,24 @@ impl<'a> PropagationRunner<'a> {
         visited: &mut FxHashSet<TraceKey>,
         from_node: P<Node>,
         to_node: P<Node>,
-        field_path: Vec<String>,
+        fields: ValueFieldState,
         call_stack: Vec<P<Node>>,
         kind: &'static str,
         description: String,
+        property: Option<String>,
+        omitted_properties: Option<Vec<String>>,
         mut steps: Vec<ValuePropagationStepPayload>,
         gap_indices: BTreeSet<usize>,
     ) {
-        if let Some(step) = make_step(&self.cwd, kind, description, from_node, to_node) {
+        if let Some(step) = make_step(
+            &self.cwd,
+            kind,
+            description,
+            from_node,
+            to_node,
+            property,
+            omitted_properties,
+        ) {
             steps.push(step);
         }
         let is_gap_tainted = !gap_indices.is_empty();
@@ -1575,7 +1619,7 @@ impl<'a> PropagationRunner<'a> {
             visited,
             TraceKey {
                 node: to_node,
-                field_path,
+                fields,
                 call_stack,
                 is_gap_tainted,
             },
@@ -1585,7 +1629,10 @@ impl<'a> PropagationRunner<'a> {
     }
 
     fn check_matches(&mut self, from_id: &str, item: &TraceQueueItem) {
-        if !item.key.field_path.is_empty() {
+        if !item.key.fields.field_path.is_empty() {
+            return;
+        }
+        if !self.include_member_access && !item.key.fields.source_path.is_empty() {
             return;
         }
         for (idx, (to_id, spec)) in self.target_endpoints.iter().enumerate() {
@@ -1625,6 +1672,14 @@ impl<'a> PropagationRunner<'a> {
                     to: to_id.clone(),
                     steps: item.steps.clone(),
                     evidence,
+                    source_path: item.key.fields.source_path.clone(),
+                    omitted_properties: item
+                        .key
+                        .fields
+                        .omitted_properties
+                        .iter()
+                        .cloned()
+                        .collect(),
                 });
             }
         }
@@ -1649,7 +1704,7 @@ impl<'a> PropagationRunner<'a> {
                 visited,
                 TraceKey {
                     node: decl_like,
-                    field_path: Vec::new(),
+                    fields: ValueFieldState::default(),
                     call_stack: Vec::new(),
                     is_gap_tainted: false,
                 },
@@ -1663,10 +1718,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         decl_like,
                         read,
-                        Vec::new(),
+                        ValueFieldState::default(),
                         Vec::new(),
                         "alias",
                         format!("Read value from '{}'", sym.name()),
+                        None,
+                        None,
                         Vec::new(),
                         BTreeSet::new(),
                     );
@@ -1681,7 +1738,7 @@ impl<'a> PropagationRunner<'a> {
                 visited,
                 TraceKey {
                     node: from_spec.node,
-                    field_path: Vec::new(),
+                    fields: ValueFieldState::default(),
                     call_stack: Vec::new(),
                     is_gap_tainted: false,
                 },
@@ -1698,10 +1755,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         from_spec.node,
                         read,
-                        Vec::new(),
+                        ValueFieldState::default(),
                         Vec::new(),
                         "alias",
                         format!("Reference function '{}'", sym.name()),
+                        None,
+                        None,
                         Vec::new(),
                         BTreeSet::new(),
                     );
@@ -1715,7 +1774,7 @@ impl<'a> PropagationRunner<'a> {
             visited,
             TraceKey {
                 node: from_spec.node,
-                field_path: Vec::new(),
+                fields: ValueFieldState::default(),
                 call_stack: Vec::new(),
                 is_gap_tainted: false,
             },
@@ -1747,10 +1806,12 @@ impl<'a> PropagationRunner<'a> {
                     visited,
                     node,
                     parent,
-                    item.key.field_path.clone(),
+                    item.key.fields.clone(),
                     item.key.call_stack.clone(),
                     "parenthesized",
                     "Value passes through parenthesized expression".to_string(),
+                    None,
+                    None,
                     item.steps.clone(),
                     item.gap_indices.clone(),
                 );
@@ -1765,10 +1826,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         node,
                         parent,
-                        item.key.field_path.clone(),
+                        item.key.fields.clone(),
                         item.key.call_stack.clone(),
                         "typeAssertion",
                         "Value passes through type assertion".to_string(),
+                        None,
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1781,10 +1844,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         node,
                         parent,
-                        item.key.field_path.clone(),
+                        item.key.fields.clone(),
                         item.key.call_stack.clone(),
                         "awaitUnwrap",
                         "Value unwrapped via await".to_string(),
+                        None,
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1798,10 +1863,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         node,
                         parent,
-                        item.key.field_path.clone(),
+                        item.key.fields.clone(),
                         item.key.call_stack.clone(),
                         "conditionalBranch",
                         "Value flows through conditional branch".to_string(),
+                        None,
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1820,10 +1887,12 @@ impl<'a> PropagationRunner<'a> {
                             visited,
                             node,
                             lhs,
-                            item.key.field_path.clone(),
+                            item.key.fields.clone(),
                             item.key.call_stack.clone(),
                             "assignment",
                             format!("Assigned value to '{}'", sym.name()),
+                            None,
+                            None,
                             item.steps.clone(),
                             item.gap_indices.clone(),
                         );
@@ -1833,10 +1902,12 @@ impl<'a> PropagationRunner<'a> {
                                 visited,
                                 node,
                                 decl,
-                                item.key.field_path.clone(),
+                                item.key.fields.clone(),
                                 item.key.call_stack.clone(),
                                 "assignment",
                                 format!("Assigned value to '{}'", sym.name()),
+                                None,
+                                None,
                                 item.steps.clone(),
                                 item.gap_indices.clone(),
                             );
@@ -1847,10 +1918,12 @@ impl<'a> PropagationRunner<'a> {
                                 visited,
                                 node,
                                 read,
-                                item.key.field_path.clone(),
+                                item.key.fields.clone(),
                                 item.key.call_stack.clone(),
                                 "assignment",
                                 format!("Read reassigned value of '{}'", sym.name()),
+                                None,
+                                None,
                                 item.steps.clone(),
                                 item.gap_indices.clone(),
                             );
@@ -1866,10 +1939,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         node,
                         parent,
-                        item.key.field_path.clone(),
+                        item.key.fields.clone(),
                         item.key.call_stack.clone(),
                         "conditionalBranch",
                         "Value flows through logical operator branch".to_string(),
+                        None,
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1883,11 +1958,12 @@ impl<'a> PropagationRunner<'a> {
                         node,
                         parent,
                         name_node,
-                        &item.key.field_path,
+                        &item.key.fields,
                         &item.key.call_stack,
                         &item.steps,
                         &item.gap_indices,
                         "variableInit",
+                        None,
                         queue,
                         visited,
                     );
@@ -1900,17 +1976,19 @@ impl<'a> PropagationRunner<'a> {
                     && obj_lit.kind() == Kind::ObjectLiteralExpression
                     && let Some(prop_name) = prop_key_text(pa.name())
                 {
-                    let mut next_path = item.key.field_path.clone();
-                    next_path.push(prop_name.clone());
+                    let mut next_fields = item.key.fields.clone();
+                    next_fields.field_path.push(prop_name.clone());
                     self.enqueue_step(
                         queue,
                         visited,
                         node,
                         obj_lit,
-                        next_path,
+                        next_fields,
                         item.key.call_stack.clone(),
                         "propertyWrite",
                         format!("Stored value in object property '{prop_name}'"),
+                        Some(prop_name),
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1922,17 +2000,19 @@ impl<'a> PropagationRunner<'a> {
                     && obj_lit.kind() == Kind::ObjectLiteralExpression
                     && let Some(prop_name) = prop_key_text(node)
                 {
-                    let mut next_path = item.key.field_path.clone();
-                    next_path.push(prop_name.clone());
+                    let mut next_fields = item.key.fields.clone();
+                    next_fields.field_path.push(prop_name.clone());
                     self.enqueue_step(
                         queue,
                         visited,
                         node,
                         obj_lit,
-                        next_path,
+                        next_fields,
                         item.key.call_stack.clone(),
                         "propertyWrite",
                         format!("Stored value in shorthand property '{prop_name}'"),
+                        Some(prop_name),
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1942,17 +2022,19 @@ impl<'a> PropagationRunner<'a> {
                 if parent.as_spread_assignment().expression() == node
                     && let Some(obj_lit) = parent.parent()
                     && obj_lit.kind() == Kind::ObjectLiteralExpression
-                    && !item.key.field_path.is_empty()
+                    && !item.key.fields.field_path.is_empty()
                 {
                     self.enqueue_step(
                         queue,
                         visited,
                         node,
                         obj_lit,
-                        item.key.field_path.clone(),
+                        item.key.fields.clone(),
                         item.key.call_stack.clone(),
                         "alias",
                         "Spread object properties into literal".to_string(),
+                        None,
+                        None,
                         item.steps.clone(),
                         item.gap_indices.clone(),
                     );
@@ -1962,51 +2044,114 @@ impl<'a> PropagationRunner<'a> {
                 let prop_acc = parent.as_property_access_expression();
                 if prop_acc.expression == node
                     && let Some(prop_name) = node_text(prop_acc.name)
-                    && item.key.field_path.last().is_some_and(|k| k == &prop_name)
                 {
-                    let mut next_path = item.key.field_path.clone();
-                    next_path.pop();
-                    self.enqueue_step(
-                        queue,
-                        visited,
-                        node,
-                        parent,
-                        next_path,
-                        item.key.call_stack.clone(),
-                        "propertyRead",
-                        format!("Read property '.{prop_name}'"),
-                        item.steps.clone(),
-                        item.gap_indices.clone(),
-                    );
-                }
-            }
-            Kind::ElementAccessExpression => {
-                let elem = parent.as_element_access_expression();
-                if elem.expression == node && !item.key.field_path.is_empty() {
-                    let arg = unwrap_expr_wrappers(elem.argument_expression);
-                    if matches!(
-                        arg.kind(),
-                        Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
-                    ) {
-                        if let Some(prop_name) = prop_key_text(arg)
-                            && item.key.field_path.last().is_some_and(|k| k == &prop_name)
+                    if !item.key.fields.field_path.is_empty() {
+                        if item
+                            .key
+                            .fields
+                            .field_path
+                            .last()
+                            .is_some_and(|k| k == &prop_name)
                         {
-                            let mut next_path = item.key.field_path.clone();
-                            next_path.pop();
+                            let mut next_fields = item.key.fields.clone();
+                            next_fields.field_path.pop();
                             self.enqueue_step(
                                 queue,
                                 visited,
                                 node,
                                 parent,
-                                next_path,
+                                next_fields,
                                 item.key.call_stack.clone(),
                                 "propertyRead",
-                                format!("Read element property ['{prop_name}']"),
+                                format!("Read property '.{prop_name}'"),
+                                Some(prop_name),
+                                None,
                                 item.steps.clone(),
                                 item.gap_indices.clone(),
                             );
                         }
-                    } else if let Some(loc) = node_location_rel(&self.cwd, parent) {
+                    } else if self.include_member_access
+                        && !item.key.fields.omitted_properties.contains(&prop_name)
+                    {
+                        let mut next_fields = item.key.fields.clone();
+                        next_fields.source_path.push(prop_name.clone());
+                        next_fields.omitted_properties.clear();
+                        self.enqueue_step(
+                            queue,
+                            visited,
+                            node,
+                            parent,
+                            next_fields,
+                            item.key.call_stack.clone(),
+                            "propertyRead",
+                            format!("Read property '.{prop_name}'"),
+                            Some(prop_name),
+                            None,
+                            item.steps.clone(),
+                            item.gap_indices.clone(),
+                        );
+                    }
+                }
+            }
+            Kind::ElementAccessExpression => {
+                let elem = parent.as_element_access_expression();
+                if elem.expression == node {
+                    let arg = unwrap_expr_wrappers(elem.argument_expression);
+                    if matches!(
+                        arg.kind(),
+                        Kind::StringLiteral | Kind::NoSubstitutionTemplateLiteral
+                    ) {
+                        if let Some(prop_name) = prop_key_text(arg) {
+                            if !item.key.fields.field_path.is_empty() {
+                                if item
+                                    .key
+                                    .fields
+                                    .field_path
+                                    .last()
+                                    .is_some_and(|k| k == &prop_name)
+                                {
+                                    let mut next_fields = item.key.fields.clone();
+                                    next_fields.field_path.pop();
+                                    self.enqueue_step(
+                                        queue,
+                                        visited,
+                                        node,
+                                        parent,
+                                        next_fields,
+                                        item.key.call_stack.clone(),
+                                        "propertyRead",
+                                        format!("Read element property ['{prop_name}']"),
+                                        Some(prop_name),
+                                        None,
+                                        item.steps.clone(),
+                                        item.gap_indices.clone(),
+                                    );
+                                }
+                            } else if self.include_member_access
+                                && !item.key.fields.omitted_properties.contains(&prop_name)
+                            {
+                                let mut next_fields = item.key.fields.clone();
+                                next_fields.source_path.push(prop_name.clone());
+                                next_fields.omitted_properties.clear();
+                                self.enqueue_step(
+                                    queue,
+                                    visited,
+                                    node,
+                                    parent,
+                                    next_fields,
+                                    item.key.call_stack.clone(),
+                                    "propertyRead",
+                                    format!("Read element property ['{prop_name}']"),
+                                    Some(prop_name),
+                                    None,
+                                    item.steps.clone(),
+                                    item.gap_indices.clone(),
+                                );
+                            }
+                        }
+                    } else if !item.key.fields.field_path.is_empty()
+                        && let Some(loc) = node_location_rel(&self.cwd, parent)
+                    {
                         let gap_idx = self.record_gap(GapItem {
                             kind: "dynamic-property-access",
                             message: "Computed element access prevents static property tracking."
@@ -2056,26 +2201,35 @@ impl<'a> PropagationRunner<'a> {
         source_node: P<Node>,
         decl_node: P<Node>,
         pattern_node: P<Node>,
-        field_path: &[String],
+        fields: &ValueFieldState,
         call_stack: &[P<Node>],
         steps: &[ValuePropagationStepPayload],
         gap_indices: &BTreeSet<usize>,
         step_kind: &'static str,
+        step_property: Option<String>,
         queue: &mut VecDeque<TraceQueueItem>,
         visited: &mut FxHashSet<TraceKey>,
     ) {
         if pattern_node.kind() == Kind::Identifier {
             if let Some(sym) = canonical_symbol_for_node(self.checker, pattern_node) {
-                let desc = format!("Bound value to '{}'", sym.name());
+                let desc = if step_kind == "destructure"
+                    && let Some(prop) = step_property.as_deref()
+                {
+                    format!("Destructured property '{prop}' to '{}'", sym.name())
+                } else {
+                    format!("Bound value to '{}'", sym.name())
+                };
                 self.enqueue_step(
                     queue,
                     visited,
                     source_node,
                     decl_node,
-                    field_path.to_vec(),
+                    fields.clone(),
                     call_stack.to_vec(),
                     step_kind,
                     desc.clone(),
+                    step_property.clone(),
+                    None,
                     steps.to_vec(),
                     gap_indices.clone(),
                 );
@@ -2084,24 +2238,55 @@ impl<'a> PropagationRunner<'a> {
                     visited,
                     source_node,
                     pattern_node,
-                    field_path.to_vec(),
+                    fields.clone(),
                     call_stack.to_vec(),
                     step_kind,
-                    desc,
+                    desc.clone(),
+                    step_property.clone(),
+                    None,
                     steps.to_vec(),
                     gap_indices.clone(),
                 );
+                let (read_from, read_kind, read_desc, read_steps) = if step_kind == "destructure" {
+                    let mut next_steps = steps.to_vec();
+                    if let Some(step) = make_step(
+                        &self.cwd,
+                        "destructure",
+                        desc,
+                        source_node,
+                        decl_node,
+                        step_property,
+                        None,
+                    ) {
+                        next_steps.push(step);
+                    }
+                    (
+                        decl_node,
+                        "alias",
+                        format!("Read destructured value '{}'", sym.name()),
+                        next_steps,
+                    )
+                } else {
+                    (
+                        source_node,
+                        step_kind,
+                        format!("Read bound value '{}'", sym.name()),
+                        steps.to_vec(),
+                    )
+                };
                 for read in collect_reachable_reads(self.checker, sym, decl_node) {
                     self.enqueue_step(
                         queue,
                         visited,
-                        source_node,
+                        read_from,
                         read,
-                        field_path.to_vec(),
+                        fields.clone(),
                         call_stack.to_vec(),
-                        step_kind,
-                        format!("Read bound value '{}'", sym.name()),
-                        steps.to_vec(),
+                        read_kind,
+                        read_desc.clone(),
+                        None,
+                        None,
+                        read_steps.clone(),
                         gap_indices.clone(),
                     );
                 }
@@ -2114,7 +2299,7 @@ impl<'a> PropagationRunner<'a> {
         }
 
         let elements = pattern_node.elements();
-        let mut omitted_keys = Vec::new();
+        let mut omitted_key_set = BTreeSet::new();
         for &elem in elements {
             if elem.kind() != Kind::BindingElement {
                 continue;
@@ -2128,9 +2313,10 @@ impl<'a> PropagationRunner<'a> {
                 .and_then(prop_key_text)
                 .or_else(|| be.name().and_then(node_text))
             {
-                omitted_keys.push(key);
+                omitted_key_set.insert(key);
             }
         }
+        let omitted_keys: Vec<String> = omitted_key_set.into_iter().collect();
 
         for &elem in elements {
             if elem.kind() != Kind::BindingElement {
@@ -2141,12 +2327,17 @@ impl<'a> PropagationRunner<'a> {
                 continue;
             };
             if be.dot_dot_dot_token().is_some() {
-                let survives = field_path
+                let survives = fields
+                    .field_path
                     .last()
                     .is_none_or(|k| !omitted_keys.iter().any(|om| om == k));
                 if !survives {
                     continue;
                 }
+                let mut next_fields = fields.clone();
+                next_fields
+                    .omitted_properties
+                    .extend(omitted_keys.iter().cloned());
                 let omitted_desc = if omitted_keys.is_empty() {
                     "Rest destructuring preserves remaining object properties".to_string()
                 } else {
@@ -2163,10 +2354,12 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         source_node,
                         elem,
-                        field_path.to_vec(),
+                        next_fields.clone(),
                         call_stack.to_vec(),
                         "restDestructure",
                         omitted_desc.clone(),
+                        None,
+                        Some(omitted_keys.clone()),
                         steps.to_vec(),
                         gap_indices.clone(),
                     );
@@ -2175,24 +2368,40 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         source_node,
                         target_name,
-                        field_path.to_vec(),
+                        next_fields.clone(),
                         call_stack.to_vec(),
                         "restDestructure",
-                        omitted_desc,
+                        omitted_desc.clone(),
+                        None,
+                        Some(omitted_keys.clone()),
                         steps.to_vec(),
                         gap_indices.clone(),
                     );
+                    let mut steps_with_rest = steps.to_vec();
+                    if let Some(rest_step) = make_step(
+                        &self.cwd,
+                        "restDestructure",
+                        omitted_desc,
+                        source_node,
+                        elem,
+                        None,
+                        Some(omitted_keys.clone()),
+                    ) {
+                        steps_with_rest.push(rest_step);
+                    }
                     for read in collect_reachable_reads(self.checker, sym, elem) {
                         self.enqueue_step(
                             queue,
                             visited,
-                            source_node,
+                            elem,
                             read,
-                            field_path.to_vec(),
+                            next_fields.clone(),
                             call_stack.to_vec(),
                             "restDestructure",
                             format!("Read rest-destructured '{}'", sym.name()),
-                            steps.to_vec(),
+                            None,
+                            None,
+                            steps_with_rest.clone(),
                             gap_indices.clone(),
                         );
                     }
@@ -2209,21 +2418,64 @@ impl<'a> PropagationRunner<'a> {
             }) else {
                 continue;
             };
-            if field_path.last().is_some_and(|k| k == &key) {
-                let mut next_path = field_path.to_vec();
-                next_path.pop();
-                self.bind_pattern(
-                    source_node,
-                    elem,
-                    target_name,
-                    &next_path,
-                    call_stack,
-                    steps,
-                    gap_indices,
-                    "destructure",
-                    queue,
-                    visited,
-                );
+            let next_fields = if !fields.field_path.is_empty() {
+                if fields.field_path.last().is_some_and(|k| k == &key) {
+                    let mut nf = fields.clone();
+                    nf.field_path.pop();
+                    Some(nf)
+                } else {
+                    None
+                }
+            } else if self.include_member_access && !fields.omitted_properties.contains(&key) {
+                let mut nf = fields.clone();
+                nf.source_path.push(key.clone());
+                nf.omitted_properties.clear();
+                Some(nf)
+            } else {
+                None
+            };
+            if let Some(next_fields) = next_fields {
+                if target_name.kind() == Kind::Identifier {
+                    self.bind_pattern(
+                        source_node,
+                        elem,
+                        target_name,
+                        &next_fields,
+                        call_stack,
+                        steps,
+                        gap_indices,
+                        "destructure",
+                        Some(key),
+                        queue,
+                        visited,
+                    );
+                } else {
+                    let mut steps_with_destructure = steps.to_vec();
+                    if let Some(step) = make_step(
+                        &self.cwd,
+                        "destructure",
+                        format!("Destructured property '{key}'"),
+                        source_node,
+                        elem,
+                        Some(key),
+                        None,
+                    ) {
+                        steps_with_destructure.push(step);
+                    }
+                    self.bind_pattern(
+                        elem,
+                        elem,
+                        target_name,
+                        &next_fields,
+                        call_stack,
+                        &steps_with_destructure,
+                        gap_indices,
+                        "destructure",
+                        None,
+                        queue,
+                        visited,
+                    );
+                }
             }
         }
     }
@@ -2248,10 +2500,12 @@ impl<'a> PropagationRunner<'a> {
                 visited,
                 ret_expr,
                 top_call,
-                item.key.field_path.clone(),
+                item.key.fields.clone(),
                 rest_stack.to_vec(),
                 "returnValue",
                 format!("Return value from '{fn_name}' to call site"),
+                None,
+                None,
                 item.steps.clone(),
                 item.gap_indices.clone(),
             );
@@ -2279,10 +2533,12 @@ impl<'a> PropagationRunner<'a> {
                 visited,
                 ret_expr,
                 call_node,
-                item.key.field_path.clone(),
+                item.key.fields.clone(),
                 Vec::new(),
                 "returnValue",
                 format!("Return value from '{fn_name}' to caller"),
+                None,
+                None,
                 item.steps.clone(),
                 item.gap_indices.clone(),
             );
@@ -2319,7 +2575,7 @@ impl<'a> PropagationRunner<'a> {
                 visited,
                 TraceKey {
                     node: call_node,
-                    field_path: item.key.field_path.clone(),
+                    fields: item.key.fields.clone(),
                     call_stack: item.key.call_stack.clone(),
                     is_gap_tainted: !next_gaps.is_empty(),
                 },
@@ -2393,11 +2649,12 @@ impl<'a> PropagationRunner<'a> {
                             arg_node,
                             param,
                             param_name_node,
-                            &item.key.field_path,
+                            &item.key.fields,
                             &next_stack,
                             &item.steps,
                             &item.gap_indices,
                             "callArgument",
+                            None,
                             queue,
                             visited,
                         );
@@ -2418,7 +2675,7 @@ impl<'a> PropagationRunner<'a> {
                         visited,
                         TraceKey {
                             node: call_node,
-                            field_path: item.key.field_path.clone(),
+                            fields: item.key.fields.clone(),
                             call_stack: item.key.call_stack.clone(),
                             is_gap_tainted: !next_gaps.is_empty(),
                         },
@@ -2524,6 +2781,7 @@ pub fn run_value_propagation(
     program: &'static Program,
     checker: &mut CheckerHandle,
     propagation: Option<&str>,
+    include_member_access: bool,
     from_handles: &[String],
     to_handles: &[String],
     lookup_files: Option<&[String]>,
@@ -2560,6 +2818,7 @@ pub fn run_value_propagation(
         program,
         checker,
         lookup_files,
+        include_member_access,
         package_impl_cache,
         to_specs,
     );

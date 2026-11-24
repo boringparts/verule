@@ -861,4 +861,308 @@ void describe("@verule/sdk fact providers, replacement, and conflict semantics",
       rmSync(valibotStyleRoot, { recursive: true, force: true });
     }
   });
+
+  void it("supports AdapterContext.facts composition across objects, transitive input attribution, explain traces, and cycle rejection", async () => {
+    const root = createTempProject({
+      "src/source.ts": [
+        "export function defineSpec(name: string, fields: Record<string, string>) {",
+        "  return { name, fields };",
+        "}",
+        'export const orderSpec = defineSpec("order", { orderId: "required", coupon: "optional" });',
+        "",
+      ].join("\n"),
+      "src/consumer.ts": [
+        'import { orderSpec } from "./source.js";',
+        "export function useSpec(spec: unknown, overrides: Record<string, string>) {",
+        "  return { spec, overrides };",
+        "}",
+        'export const orderConsumer = useSpec(orderSpec, { coupon: "defaulted" });',
+        "",
+      ].join("\n"),
+      "a.inputs.json": JSON.stringify({ mode: "strict" }),
+    });
+
+    const SourceSpecFact = defineFactType<
+      "syntax",
+      undefined,
+      {
+        readonly sourceName: string;
+        readonly fields: Readonly<Record<string, string>>;
+      }
+    >({
+      id: "ts.composition.source-spec",
+      subjectKind: "syntax",
+    });
+
+    const DerivedConsumerFact = defineFactType<
+      "syntax",
+      undefined,
+      {
+        readonly sourceName: string;
+        readonly fields: Readonly<Record<string, string>>;
+      }
+    >({
+      id: "ts.composition.derived-consumer",
+      subjectKind: "syntax",
+    });
+
+    const UnusedFact = defineFactType<
+      "syntax",
+      undefined,
+      { readonly ok: true }
+    >({
+      id: "ts.composition.unused",
+      subjectKind: "syntax",
+    });
+
+    let unusedExtractCount = 0;
+
+    const adapterA = defineAdapter({
+      id: "ts-adapter-a",
+      provides: [
+        defineFactProvider(SourceSpecFact, async (ctx, request) => {
+          const policyText = ctx.readAdditionalInput("a.inputs.json");
+          const policy = JSON.parse(policyText) as { readonly mode: string };
+          assert.equal(policy.mode, "strict");
+          const calls = await ctx.findSyntax({
+            files: ["src/source.ts"],
+            kinds: ["CallExpression"],
+          });
+          const specCall = calls.find((c) => c.text.startsWith("defineSpec("));
+          if (!specCall) return [];
+          if (
+            request.targets &&
+            !request.targets.some((t) => t.handleId === specCall.ref.handleId)
+          ) {
+            return [];
+          }
+          return [
+            {
+              subject: specCall.ref,
+              value: {
+                sourceName: "order",
+                fields: { orderId: "required", coupon: "optional" },
+              },
+              evidence: [
+                {
+                  kind: "source",
+                  message: "Adapter A extracted source spec on Object A.",
+                  at: specCall.location,
+                },
+              ],
+            },
+          ];
+        }),
+      ],
+    });
+
+    const adapterB = defineAdapter({
+      id: "ts-adapter-b",
+      provides: [
+        defineFactProvider(DerivedConsumerFact, async (ctx) => {
+          const calls = await ctx.findSyntax({
+            files: ["src/consumer.ts"],
+            kinds: ["CallExpression"],
+          });
+          const consumerCall = calls.find((c) => c.text.startsWith("useSpec("));
+          const sourceCalls = await ctx.findSyntax({
+            files: ["src/source.ts"],
+            kinds: ["CallExpression"],
+          });
+          const targetA = sourceCalls.find((c) =>
+            c.text.startsWith("defineSpec("),
+          );
+          if (!consumerCall || !targetA) return [];
+
+          const sourceFacts = await ctx.facts(SourceSpecFact, {
+            targets: [targetA.ref],
+          });
+          assert.equal(sourceFacts.length, 1);
+          const factA = sourceFacts[0]!;
+          return [
+            {
+              subject: consumerCall.ref,
+              value: {
+                sourceName: factA.value.sourceName,
+                fields: { ...factA.value.fields, coupon: "defaulted" },
+              },
+              basis: [factA],
+              evidence: [
+                {
+                  kind: "source",
+                  message: "Adapter B derived consumer spec on Object B.",
+                  at: consumerCall.location,
+                },
+              ],
+            },
+          ];
+        }),
+      ],
+    });
+
+    const unusedAdapter = defineAdapter({
+      id: "ts-unused-adapter",
+      provides: [
+        defineFactProvider(UnusedFact, () => {
+          unusedExtractCount += 1;
+          return [];
+        }),
+      ],
+    });
+
+    const consumerRule = defineRule({
+      id: "ts-composition-rule",
+      run: async (ctx) => {
+        const items = await ctx.facts(DerivedConsumerFact);
+        for (const item of items) {
+          const at = item.evidence.find((ev) =>
+            ev.message.includes("Adapter B derived consumer spec"),
+          )?.at;
+          if (!at) continue;
+          ctx.report({
+            at,
+            findingKey: "ts-derived-consumer",
+            message: JSON.stringify(item.value),
+            basis: [item],
+          });
+        }
+      },
+    });
+
+    const cacheReuseRule = defineRule({
+      id: "ts-composition-cache-rule",
+      run: async (ctx) => {
+        const items = await ctx.facts(DerivedConsumerFact);
+        assert.equal(items.length, 1);
+      },
+    });
+
+    try {
+      const report = await runCheck({
+        cwd: root,
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          adapters: [adapterA, adapterB, unusedAdapter],
+          rules: [consumerRule, cacheReuseRule],
+        }),
+        observe: "detail",
+        at: "src/consumer.ts:5:30",
+      });
+
+      assert.equal(unusedExtractCount, 0);
+      assert.equal(report.status, "findings");
+      assert.equal(report.diagnostics.length, 1);
+      const diag = report.diagnostics[0]!;
+      assert.equal(diag.at.file, "src/consumer.ts");
+      assert.deepEqual(JSON.parse(diag.message), {
+        sourceName: "order",
+        fields: { orderId: "required", coupon: "defaulted" },
+      });
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.message === "Adapter A extracted source spec on Object A." &&
+            ev.at?.file === "src/source.ts",
+        ),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.message === "Adapter B derived consumer spec on Object B." &&
+            ev.at?.file === "src/consumer.ts",
+        ),
+      );
+      assert.equal(report.additionalInputs.length, 1);
+      assert.equal(report.additionalInputs[0]?.file, "a.inputs.json");
+      assert.equal(report.additionalInputs[0]?.exists, true);
+      assert.deepEqual(report.additionalInputs[0]?.sources, [
+        { kind: "adapter", id: "ts-adapter-a" },
+      ]);
+      const explanation = report.explanations?.find(
+        (item) => item.ruleId === "ts-composition-rule",
+      );
+      assert.ok(explanation);
+      assert.deepEqual(explanation.providers, ["ts-adapter-a", "ts-adapter-b"]);
+      assert.ok(
+        explanation.queries.some(
+          (q) => q.op === "facts:ts.composition.derived-consumer",
+        ),
+      );
+      assert.ok(
+        explanation.queries.some(
+          (q) => q.op === "facts:ts.composition.source-spec",
+        ),
+      );
+      const cacheExplanation = report.explanations?.find(
+        (item) => item.ruleId === "ts-composition-cache-rule",
+      );
+      assert.ok(cacheExplanation);
+      assert.equal(
+        cacheExplanation.queries.find(
+          (q) => q.op === "facts:ts.composition.derived-consumer",
+        )?.cacheStatus,
+        "reused",
+      );
+
+      // Cycle detection between Adapter B -> Adapter A -> Adapter B
+      const CyclicA = defineFactType<
+        "syntax",
+        undefined,
+        { readonly v: number }
+      >({
+        id: "ts.cycle.a",
+        subjectKind: "syntax",
+      });
+      const CyclicB = defineFactType<
+        "syntax",
+        undefined,
+        { readonly v: number }
+      >({
+        id: "ts.cycle.b",
+        subjectKind: "syntax",
+      });
+      const cyclicAdapterA = defineAdapter({
+        id: "cyclic-a",
+        provides: [
+          defineFactProvider(CyclicA, async (ctx) => {
+            await ctx.facts(CyclicB);
+            return [];
+          }),
+        ],
+      });
+      const cyclicAdapterB = defineAdapter({
+        id: "cyclic-b",
+        provides: [
+          defineFactProvider(CyclicB, async (ctx) => {
+            await ctx.facts(CyclicA);
+            return [];
+          }),
+        ],
+      });
+      await assert.rejects(
+        () =>
+          runCheck({
+            cwd: root,
+            config: defineConfig({
+              tsconfig: "tsconfig.json",
+              adapters: [cyclicAdapterA, cyclicAdapterB],
+              rules: [
+                defineRule({
+                  id: "trigger-cycle",
+                  run: async (ctx) => {
+                    await ctx.facts(CyclicB);
+                  },
+                }),
+              ],
+            }),
+          }),
+        (err: unknown) =>
+          err instanceof VeruleExecutionError &&
+          err.code === "INVALID_QUERY" &&
+          /cyclic/iu.test(err.message),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

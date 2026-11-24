@@ -151,6 +151,8 @@ pub enum QueryStep {
     ValuePropagation {
         #[serde(default)]
         propagation: Option<String>,
+        #[serde(default, rename = "includeMemberAccess")]
+        include_member_access: bool,
         from: Vec<String>,
         to: Vec<String>,
         #[serde(default, rename = "lookupFiles")]
@@ -451,6 +453,10 @@ enum StepResult {
     NativeFacts {
         items: Vec<verule_adapter_api::NativeContribution>,
         additional_inputs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adapter_inputs: Vec<verule_adapter_api::NativeAdapterInputAttribution>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sub_queries: Vec<native_adapter::NativeSubQueryTrace>,
     },
 }
 
@@ -808,6 +814,7 @@ fn execute_step(
         ),
         QueryStep::ValuePropagation {
             propagation,
+            include_member_access,
             from,
             to,
             lookup_files,
@@ -817,6 +824,7 @@ fn execute_step(
             program,
             checker,
             propagation.as_deref(),
+            include_member_access,
             &from,
             &to,
             lookup_files.as_deref(),
@@ -886,7 +894,7 @@ fn execute_extended_step(
             condition,
         } => {
             let target_list = targets.as_deref().unwrap_or(&[]);
-            let output = native_adapter::extract(
+            let outcome = native_adapter::extract(
                 snapshot,
                 project_id,
                 program,
@@ -901,8 +909,10 @@ fn execute_extended_step(
                 observer,
             )?;
             Ok(StepResult::NativeFacts {
-                items: output.contributions,
-                additional_inputs: output.additional_inputs,
+                items: outcome.output.contributions,
+                additional_inputs: outcome.output.additional_inputs,
+                adapter_inputs: outcome.output.adapter_inputs,
+                sub_queries: outcome.sub_queries,
             })
         }
         other => execute_effects_step(
@@ -1075,6 +1085,7 @@ fn execute_value_propagation_step(
     program: &'static Program,
     checker: &mut CheckerHandle,
     propagation: Option<&str>,
+    include_member_access: bool,
     from: &[String],
     to: &[String],
     lookup_files: Option<&[String]>,
@@ -1087,6 +1098,7 @@ fn execute_value_propagation_step(
         program,
         checker,
         propagation,
+        include_member_access,
         from,
         to,
         lookup_files,

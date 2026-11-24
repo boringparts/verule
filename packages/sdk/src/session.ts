@@ -41,6 +41,7 @@ import {
   validateAdapters,
   type AdapterContext,
   type EngineFactExtractionOptions,
+  type EngineNativeSubQueryTrace,
   type FactContribution,
   type FactQueryOptions,
   type FactType,
@@ -179,6 +180,11 @@ type EngineBatchResult = {
   readonly results: readonly {
     readonly items: readonly unknown[];
     readonly additionalInputs?: readonly string[];
+    readonly adapterInputs?: readonly {
+      readonly adapterId: string;
+      readonly path: string;
+    }[];
+    readonly subQueries?: readonly EngineNativeSubQueryTrace[];
   }[];
 };
 
@@ -1757,7 +1763,9 @@ export async function openSession(
 
     const createAdapterContext = (
       adapterId: string,
-      onAdditionalInput: (filePath: string) => void,
+      onAdditionalInput: (filePath: string, sourceAdapterId?: string) => void,
+      facts: RuleContext["facts"],
+      onEngineSubQuery: (trace: EngineNativeSubQueryTrace) => void,
     ): AdapterContext => {
       const scopedAdapterInputs = createScopedAdditionalInputRegistrar(
         additionalInputRegistrar,
@@ -1771,6 +1779,7 @@ export async function openSession(
         ...adapterCallsValuesQueries,
         ...adapterPackageImplQueries,
         ...adapterCallEffectsQueries,
+        facts,
         findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
         typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
         listBranches: (functions: readonly SyntaxRef[]) =>
@@ -1841,9 +1850,28 @@ export async function openSession(
             readonly gaps?: readonly Gap[];
           }[];
           const additionalInputs = batch.results[0]?.additionalInputs ?? [];
+          const adapterInputs = batch.results[0]?.adapterInputs ?? [];
+          const attributedPaths = new Set<string>();
+          for (const entry of adapterInputs) {
+            const attributedId =
+              entry.adapterId === extractOptions.providerId
+                ? (extractOptions.reportProviderId ?? entry.adapterId)
+                : entry.adapterId;
+            attributedPaths.add(entry.path);
+            onAdditionalInput(entry.path, attributedId);
+            additionalInputRegistrar.registerAdditionalInput(entry.path, {
+              kind: "adapter",
+              id: attributedId,
+            });
+          }
           for (const filePath of additionalInputs) {
-            onAdditionalInput(filePath);
-            scopedAdapterInputs.registerAdditionalInput(filePath);
+            if (!attributedPaths.has(filePath)) {
+              onAdditionalInput(filePath);
+              scopedAdapterInputs.registerAdditionalInput(filePath);
+            }
+          }
+          for (const subQuery of batch.results[0]?.subQueries ?? []) {
+            onEngineSubQuery(subQuery);
           }
 
           return rawItems.map((item) => {

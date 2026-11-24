@@ -26,9 +26,15 @@ const packageNames = [
 ] as const;
 const nativeConfig =
   "packages/app/provider-session-overlay/app/verule.provider-session.native.config.ts";
+const compositionConfig =
+  "packages/app/provider-session-overlay/app/verule.provider-session.composition.config.ts";
 const rootInputPath = "fixture.inputs.json";
 const sourceRelPath =
   "packages/app/provider-session-overlay/app/src/provider-session.ts";
+const compositionSourceRelPath =
+  "packages/app/provider-session-overlay/app/src/provider-session-source.ts";
+const compositionConsumerRelPath =
+  "packages/app/provider-session-overlay/app/src/provider-session-composition.ts";
 
 type ProviderSessionFact = FactType<
   "call",
@@ -651,6 +657,284 @@ void test("loads independent native providers together and updates facts across 
           ),
         ).startsWith(host.hostDir),
       );
+    },
+  );
+});
+
+void test("composes third-party native facts across objects, traces A and B in targeted explain, skips unused providers, and updates on Object A edits", async () => {
+  await withAcceptanceHost(
+    {
+      overlay: "provider-session",
+      additionalPackages: [...packageNames],
+    },
+    async (host) => {
+      const initial = await host.check({
+        config: compositionConfig,
+        observe: "detail",
+      });
+      assert.equal(initial.status, 1, initial.stderr + initial.stdout);
+      const diag = initial.report.diagnostics.find(
+        (item) => item.ruleId === "provider-session-composition",
+      );
+      assert.ok(diag, JSON.stringify(initial.report.diagnostics));
+      assert.equal(diag.at.file, compositionConsumerRelPath);
+      assert.deepEqual(JSON.parse(diag.message), {
+        consumerName: "sessionOrderConsumer",
+        sourceName: "order",
+        fields: {
+          orderId: "required",
+          couponCode: "defaulted",
+        },
+        requiredFields: ["orderId"],
+        optionalFields: [],
+        defaultedFields: ["couponCode"],
+        unknownFields: [],
+        hasDynamicFields: false,
+        sourceProviders: ["third-party-fixture"],
+      });
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.at?.file === compositionSourceRelPath &&
+            ev.message.includes('Fixture source "order" defined here.'),
+        ),
+        JSON.stringify(diag.evidence),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.at?.file === compositionSourceRelPath &&
+            ev.message.includes('Fixture source field "orderId"'),
+        ),
+        JSON.stringify(diag.evidence),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.at?.file === compositionConsumerRelPath &&
+            ev.message.includes(
+              'Fixture consumer overrode field "couponCode" to "defaulted".',
+            ),
+        ),
+        JSON.stringify(diag.evidence),
+      );
+      assert.ok(
+        diag.evidence.some(
+          (ev) =>
+            ev.at?.file === compositionConsumerRelPath &&
+            ev.message.includes(
+              'Fixture consumer "sessionOrderConsumer" derived from source "order".',
+            ),
+        ),
+        JSON.stringify(diag.evidence),
+      );
+
+      // Unused Drizzle adapter is loaded in registry but never extracted.
+      assert.deepEqual(nativeExtractionProviders(initial.report), [
+        "third-party-fixture",
+        "third-party-fixture-complement",
+      ]);
+      assert.equal(
+        initial.report.observation?.engineExtractions["drizzle"],
+        undefined,
+      );
+      assert.equal(
+        initial.report.observation?.engineExtractions["third-party-fixture"]
+          ?.extractions,
+        1,
+      );
+      assert.equal(
+        initial.report.observation?.engineExtractions[
+          "third-party-fixture-complement"
+        ]?.extractions,
+        1,
+      );
+      const cacheQueries = (initial.report.observation?.details ?? []).filter(
+        (detail) =>
+          detail.kind === "query" &&
+          detail.name === "facts:fixture.derived-consumer",
+      );
+      assert.deepEqual(
+        cacheQueries.map((query) => query.cacheStatus),
+        ["computed", "reused"],
+      );
+
+      // Targeted --at explain traces B -> A -> respective objects & evidence.
+      const consumerText = host.readText(compositionConsumerRelPath);
+      const consumerOffset = consumerText.indexOf("sessionOrderConsumer =");
+      assert.notEqual(consumerOffset, -1);
+      const prefix = consumerText.slice(0, consumerOffset);
+      const consumerLine = prefix.split("\n").length;
+      const consumerColumn = consumerOffset - prefix.lastIndexOf("\n");
+      const consumerAt = `${compositionConsumerRelPath}:${consumerLine}:${consumerColumn}`;
+
+      const explainedCli = await host.check({
+        config: compositionConfig,
+        rule: "provider-session-composition",
+        at: consumerAt,
+        observe: "detail",
+      });
+      assert.equal(explainedCli.status, 1);
+      const cliExplanation = explainedCli.report.explanation;
+      assert.ok(cliExplanation);
+      assert.equal(cliExplanation.status, "reported");
+      assert.deepEqual(cliExplanation.providers, [
+        "third-party-fixture",
+        "third-party-fixture-complement",
+      ]);
+      assert.ok(
+        cliExplanation.queries.some(
+          (q) =>
+            q.op === "facts:fixture.derived-consumer" &&
+            q.provider.includes("third-party-fixture-complement"),
+        ),
+      );
+      assert.ok(
+        cliExplanation.queries.some(
+          (q) =>
+            q.op === "facts:fixture.source-spec" &&
+            q.provider.includes("third-party-fixture"),
+        ),
+      );
+      assert.equal(
+        explainedCli.report.observation?.engineExtractions["drizzle"],
+        undefined,
+      );
+
+      // Same-snapshot SDK session reuses cached results and traces explain without re-extracting.
+      const sdk = await host.loadSdk();
+      const configPath = host.resolvePath(compositionConfig);
+      const config =
+        await host.loadConfig<NormalizedVeruleConfig>(compositionConfig);
+      const sdkSession = await sdk.openSession({
+        cwd: host.hostDir,
+        config,
+        adapterResolutionRoot: dirname(configPath),
+        observe: "detail",
+      });
+      try {
+        const firstCheck = await sdkSession.check();
+        assert.equal(
+          firstCheck.observation?.engineExtractions["third-party-fixture"]
+            ?.extractions,
+          1,
+        );
+        const sameSnapshotExplain = await sdkSession.explain({
+          at: consumerAt,
+          ruleId: "provider-session-composition",
+          observe: "detail",
+        });
+        assert.equal(sameSnapshotExplain.explanation.status, "reported");
+        assert.deepEqual(sameSnapshotExplain.explanation.providers, [
+          "third-party-fixture",
+          "third-party-fixture-complement",
+        ]);
+        assert.equal(
+          sameSnapshotExplain.observation?.engineExtractions[
+            "third-party-fixture"
+          ]?.extractions,
+          undefined,
+        );
+        assert.equal(
+          sameSnapshotExplain.observation?.engineExtractions[
+            "third-party-fixture-complement"
+          ]?.extractions,
+          undefined,
+        );
+      } finally {
+        await sdkSession.close();
+      }
+
+      // Editing Object A's source updates B's conclusion in shared session, watch, and cold check.
+      const initialObjectASource = host.readText(compositionSourceRelPath);
+      const shared = await host.startSession({ config: compositionConfig });
+      try {
+        const baselineShared = (await shared.check({ observe: "detail" }))
+          .report;
+        assertReportsAlign(
+          baselineShared,
+          await runInstalledSdk(host, compositionConfig),
+          "composition-shared-initial",
+        );
+
+        host.replaceText(
+          compositionSourceRelPath,
+          'orderId: "required",',
+          'orderId: "optional",\n  notes: "required",',
+        );
+        const editedShared = (await shared.check({ observe: "detail" })).report;
+        const editedCold = await runInstalledSdk(host, compositionConfig);
+        assertReportsAlign(
+          editedShared,
+          editedCold,
+          "composition-shared-edited-A",
+        );
+        const editedDiag = editedShared.diagnostics.find(
+          (item) => item.ruleId === "provider-session-composition",
+        );
+        assert.ok(editedDiag);
+        assert.deepEqual(JSON.parse(editedDiag.message), {
+          consumerName: "sessionOrderConsumer",
+          sourceName: "order",
+          fields: {
+            orderId: "optional",
+            notes: "required",
+            couponCode: "defaulted",
+          },
+          requiredFields: ["notes"],
+          optionalFields: ["orderId"],
+          defaultedFields: ["couponCode"],
+          unknownFields: [],
+          hasDynamicFields: false,
+          sourceProviders: ["third-party-fixture"],
+        });
+
+        host.writeText(compositionSourceRelPath, initialObjectASource);
+        const restoredShared = (await shared.check({ observe: "detail" }))
+          .report;
+        assertReportsAlign(
+          restoredShared,
+          await runInstalledSdk(host, compositionConfig),
+          "composition-shared-restored-A",
+        );
+      } finally {
+        host.writeText(compositionSourceRelPath, initialObjectASource);
+        await shared.close();
+      }
+
+      const watch = await host.startWatch({ config: compositionConfig });
+      try {
+        const firstWatch = await watch.nextReport();
+        assertReportsAlign(
+          firstWatch,
+          await runInstalledSdk(host, compositionConfig),
+          "composition-watch-initial",
+        );
+
+        host.replaceText(
+          compositionSourceRelPath,
+          'orderId: "required",',
+          'orderId: "optional",\n  notes: "required",',
+        );
+        const updatedWatch = await watch.nextReport();
+        assert.equal(updatedWatch.trigger, "change");
+        assertReportsAlign(
+          updatedWatch,
+          await runInstalledSdk(host, compositionConfig),
+          "composition-watch-edited-A",
+        );
+
+        host.writeText(compositionSourceRelPath, initialObjectASource);
+        const restoredWatch = await watch.nextReport();
+        assertReportsAlign(
+          restoredWatch,
+          await runInstalledSdk(host, compositionConfig),
+          "composition-watch-restored-A",
+        );
+      } finally {
+        host.writeText(compositionSourceRelPath, initialObjectASource);
+        await watch.close();
+      }
     },
   );
 });

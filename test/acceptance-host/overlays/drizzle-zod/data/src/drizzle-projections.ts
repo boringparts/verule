@@ -71,3 +71,15 @@ export function getDynamicUser() {
     .from(users)
     .get();
 }
+
+export function getPageWithWorkspace() {
+  return db.query.page.findFirst({
+    columns: {
+      slug: true,
+      customDomain: true,
+    },
+    with: {
+      workspace: true,
+    },
+  });
+}
