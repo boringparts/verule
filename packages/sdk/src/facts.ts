@@ -147,6 +147,8 @@ export type AdapterContext = {
   valuePropagation: RuleContext["valuePropagation"];
   callEffects: RuleContext["callEffects"];
   instanceCleanup: RuleContext["instanceCleanup"];
+  /** Queries facts from other enabled providers on the active project snapshot. */
+  facts: RuleContext["facts"];
   /** Invokes an engine-internal built-in fact provider on the active project snapshot. */
   extractEngineFacts: <
     SubjectKind extends ProgramObjectKind,
@@ -637,14 +639,31 @@ export type CachedAdapterAdditionalInput = {
   readonly filePath: string;
 };
 
+export type EngineNativeSubQueryTrace = {
+  readonly factTypeId: string;
+  readonly providers: readonly string[];
+  readonly cacheStatus: "computed" | "reused";
+  readonly candidateCount: number;
+  readonly durationMs: number;
+  readonly subjectLocations: readonly DiagnosticLocation[];
+};
+
+export type ActiveFactQueryFrame = {
+  readonly adapterId: string;
+  readonly factTypeId: string;
+  readonly targetHandleIds: readonly string[] | undefined;
+};
+
 type CachedFullEntry = {
   readonly results: readonly FactResult[];
   readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
+  readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
 };
 
 type CachedTargetEntry = {
   readonly item: FactResult | null;
   readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
+  readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
 };
 
 /** Per-session cache storing computed fact results across rules for the active snapshot. */
@@ -720,7 +739,9 @@ export async function executeFactQuery<
   readonly assertActiveSnapshot: () => void;
   readonly createAdapterContext: (
     adapterId: string,
-    onAdditionalInput: (filePath: string) => void,
+    onAdditionalInput: (filePath: string, sourceAdapterId?: string) => void,
+    facts: RuleContext["facts"],
+    onEngineSubQuery: (trace: EngineNativeSubQueryTrace) => void,
   ) => AdapterContext;
   readonly replayAdapterAdditionalInput: (
     adapterId: string,
@@ -729,6 +750,11 @@ export async function executeFactQuery<
   readonly recordGaps: (gaps: readonly Gap[]) => void;
   readonly collector: ObservationCollector;
   readonly syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>;
+  readonly activeQueryStack?: readonly ActiveFactQueryFrame[];
+  readonly onTransitiveAdditionalInput?: (
+    adapterId: string,
+    filePath: string,
+  ) => void;
 }): Promise<readonly FactResult<SubjectKind, Value>[]> {
   const {
     factType,
@@ -745,6 +771,8 @@ export async function executeFactQuery<
     recordGaps,
     collector,
     syntaxLocations,
+    activeQueryStack = [],
+    onTransitiveAdditionalInput,
   } = params;
 
   assertActiveSnapshot();
@@ -782,6 +810,30 @@ export async function executeFactQuery<
   }
   matchedProviders.sort((a, b) => compareCodepoint(a.adapterId, b.adapterId));
 
+  const requestedHandles = targets?.map((target) => target.handleId);
+  for (const entry of matchedProviders) {
+    const hasCycle = activeQueryStack.some(
+      (frame) =>
+        frame.adapterId === entry.adapterId &&
+        frame.factTypeId === factType.id &&
+        (frame.targetHandleIds === undefined ||
+          requestedHandles === undefined ||
+          requestedHandles.some((handleId) =>
+            frame.targetHandleIds!.includes(handleId),
+          )),
+    );
+    if (hasCycle) {
+      const chain = [
+        ...activeQueryStack.map((f) => `${f.adapterId}(${f.factTypeId})`),
+        `${entry.adapterId}(${factType.id})`,
+      ].join(" -> ");
+      throw new VeruleExecutionError(
+        "INVALID_QUERY",
+        `Cyclic fact query detected: ${chain}`,
+      );
+    }
+  }
+
   const providerFilterStatus:
     | "matched"
     | "not_enabled"
@@ -816,6 +868,7 @@ export async function executeFactQuery<
   const queryStart = collector.isActive() ? performance.now() : 0;
   let cacheStatus: "computed" | "reused";
   let results: readonly FactResult<SubjectKind, Value>[];
+  let engineSubQueries: readonly EngineNativeSubQueryTrace[] = [];
 
   const replayInputs = (
     inputs: readonly CachedAdapterAdditionalInput[],
@@ -826,6 +879,7 @@ export async function executeFactQuery<
       if (!seen.has(key)) {
         seen.add(key);
         replayAdapterAdditionalInput(input.adapterId, input.filePath);
+        onTransitiveAdditionalInput?.(input.adapterId, input.filePath);
       }
     }
   };
@@ -835,12 +889,14 @@ export async function executeFactQuery<
   ): Promise<{
     readonly results: readonly FactResult<SubjectKind, Value>[];
     readonly additionalInputs: readonly CachedAdapterAdditionalInput[];
+    readonly engineSubQueries: readonly EngineNativeSubQueryTrace[];
   }> => {
     if (matchedProviders.length === 0) {
-      return { results: [], additionalInputs: [] };
+      return { results: [], additionalInputs: [], engineSubQueries: [] };
     }
     const recordedInputs: CachedAdapterAdditionalInput[] = [];
     const seenRecorded = new Set<string>();
+    const recordedEngineSubQueries: EngineNativeSubQueryTrace[] = [];
     const request: FactExtractionRequest<SubjectKind, Condition> = {
       factType: factType,
       ...(requestedTargets !== undefined ? { targets: requestedTargets } : {}),
@@ -854,13 +910,62 @@ export async function executeFactQuery<
     }[] = [];
 
     for (const entry of matchedProviders) {
-      const adapterCtx = createAdapterContext(entry.adapterId, (filePath) => {
-        const key = `${entry.adapterId}\0${filePath}`;
+      const recordInput = (
+        filePath: string,
+        sourceAdapterId?: string,
+      ): void => {
+        const attributedId = sourceAdapterId ?? entry.adapterId;
+        const key = `${attributedId}\0${filePath}`;
         if (!seenRecorded.has(key)) {
           seenRecorded.add(key);
-          recordedInputs.push({ adapterId: entry.adapterId, filePath });
+          recordedInputs.push({ adapterId: attributedId, filePath });
         }
-      });
+        onTransitiveAdditionalInput?.(attributedId, filePath);
+      };
+      const nextStack: readonly ActiveFactQueryFrame[] = [
+        ...activeQueryStack,
+        {
+          adapterId: entry.adapterId,
+          factTypeId: factType.id,
+          targetHandleIds: requestedTargets?.map((target) => target.handleId),
+        },
+      ];
+      const nestedFacts: RuleContext["facts"] = <
+        SubSubjectKind extends ProgramObjectKind,
+        SubCondition,
+        SubValue,
+      >(
+        subFactType: FactType<SubSubjectKind, SubCondition, SubValue>,
+        subOptions?: FactQueryOptions<SubSubjectKind, SubCondition>,
+      ) =>
+        executeFactQuery({
+          factType: subFactType,
+          options: subOptions,
+          adapters,
+          factCache,
+          sessionToken,
+          snapshotId,
+          projectId,
+          ruleId,
+          assertActiveSnapshot,
+          createAdapterContext,
+          replayAdapterAdditionalInput,
+          recordGaps,
+          collector,
+          syntaxLocations,
+          activeQueryStack: nextStack,
+          onTransitiveAdditionalInput: (srcAdapterId, filePath) => {
+            recordInput(filePath, srcAdapterId);
+          },
+        });
+      const adapterCtx = createAdapterContext(
+        entry.adapterId,
+        recordInput,
+        nestedFacts,
+        (trace) => {
+          recordedEngineSubQueries.push(trace);
+        },
+      );
       const rawContributions = (await entry.provider.extract(
         adapterCtx,
         request,
@@ -887,6 +992,7 @@ export async function executeFactQuery<
         perProvider,
       ),
       additionalInputs: recordedInputs,
+      engineSubQueries: recordedEngineSubQueries,
     };
   };
 
@@ -903,6 +1009,7 @@ export async function executeFactQuery<
               (item) => item.subject.handleId === target.handleId,
             ) ?? null,
           additionalInputs: computed.additionalInputs,
+          engineSubQueries: computed.engineSubQueries,
         }),
         (err: unknown) => {
           factCache.deleteTarget(baseKey, target.handleId);
@@ -922,6 +1029,10 @@ export async function executeFactQuery<
       const loaded = await cachedFull;
       replayInputs(loaded.additionalInputs);
       results = loaded.results as readonly FactResult<SubjectKind, Value>[];
+      engineSubQueries = loaded.engineSubQueries.map((sub) => ({
+        ...sub,
+        cacheStatus: "reused",
+      }));
     } else {
       cacheStatus = "computed";
       const fullPromise = runExtraction(undefined).then(
@@ -934,6 +1045,7 @@ export async function executeFactQuery<
               Promise.resolve({
                 item,
                 additionalInputs: computed.additionalInputs,
+                engineSubQueries: computed.engineSubQueries,
               }),
             );
           }
@@ -947,6 +1059,7 @@ export async function executeFactQuery<
       factCache.setFull(baseKey, fullPromise);
       const computed = await fullPromise;
       results = computed.results;
+      engineSubQueries = computed.engineSubQueries;
     }
   } else if (factCache.isFullLoaded(baseKey)) {
     const loaded = await factCache.getFull(baseKey)!;
@@ -973,12 +1086,17 @@ export async function executeFactQuery<
           return {
             item: found,
             additionalInputs: loaded.additionalInputs,
+            engineSubQueries: loaded.engineSubQueries.map((sub) => ({
+              ...sub,
+              cacheStatus: "reused" as const,
+            })),
           };
         }
         return factCache.getTarget(baseKey, target.handleId)!;
       }),
     );
     replayInputs(resolved.flatMap((entry) => entry.additionalInputs));
+    engineSubQueries = resolved.flatMap((entry) => entry.engineSubQueries);
     results = resolved
       .map((entry) => entry.item)
       .filter((item): item is FactResult<SubjectKind, Value> => item !== null);
@@ -1006,6 +1124,7 @@ export async function executeFactQuery<
       targets.map((target) => factCache.getTarget(baseKey, target.handleId)!),
     );
     replayInputs(resolved.flatMap((entry) => entry.additionalInputs));
+    engineSubQueries = resolved.flatMap((entry) => entry.engineSubQueries);
     results = resolved
       .map((entry) => entry.item)
       .filter((item): item is FactResult<SubjectKind, Value> => item !== null);
@@ -1020,6 +1139,39 @@ export async function executeFactQuery<
   if (collector.isActive()) {
     const durationMs = performance.now() - queryStart;
     const explainTarget = collector.explainTarget;
+    for (const sub of engineSubQueries) {
+      const subMatchedLocations = explainTarget
+        ? sub.subjectLocations.filter((loc) =>
+            locationMatchesTarget(loc, explainTarget),
+          )
+        : undefined;
+      const subProviderLabel =
+        sub.providers.length > 0 ? sub.providers.join(",") : "none";
+      collector.recordQuery({
+        ruleId,
+        op: `facts:${sub.factTypeId}`,
+        projectId,
+        provider: subProviderLabel,
+        providers: sub.providers,
+        cacheStatus: sub.cacheStatus,
+        candidateCount: sub.candidateCount,
+        durationMs: sub.durationMs,
+        summary: `facts(${sub.factTypeId}) [${subProviderLabel}] -> ${sub.candidateCount} result(s)`,
+        ...(subMatchedLocations !== undefined
+          ? { matchedLocations: subMatchedLocations }
+          : {}),
+        ...(collector.mode === "detail" || collector.isExplainEnabled()
+          ? {
+              detail: {
+                factTypeId: sub.factTypeId,
+                providers: sub.providers,
+                candidateCount: sub.candidateCount,
+              },
+            }
+          : {}),
+      });
+    }
+
     const matchedLocations: DiagnosticLocation[] | undefined = explainTarget
       ? collectMatchedFactLocations(results, explainTarget, syntaxLocations)
       : undefined;

@@ -451,6 +451,10 @@ enum StepResult {
     NativeFacts {
         items: Vec<verule_adapter_api::NativeContribution>,
         additional_inputs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adapter_inputs: Vec<verule_adapter_api::NativeAdapterInputAttribution>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sub_queries: Vec<native_adapter::NativeSubQueryTrace>,
     },
 }
 
@@ -886,7 +890,7 @@ fn execute_extended_step(
             condition,
         } => {
             let target_list = targets.as_deref().unwrap_or(&[]);
-            let output = native_adapter::extract(
+            let outcome = native_adapter::extract(
                 snapshot,
                 project_id,
                 program,
@@ -901,8 +905,10 @@ fn execute_extended_step(
                 observer,
             )?;
             Ok(StepResult::NativeFacts {
-                items: output.contributions,
-                additional_inputs: output.additional_inputs,
+                items: outcome.output.contributions,
+                additional_inputs: outcome.output.additional_inputs,
+                adapter_inputs: outcome.output.adapter_inputs,
+                sub_queries: outcome.sub_queries,
             })
         }
         other => execute_effects_step(
