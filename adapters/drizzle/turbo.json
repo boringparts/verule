@@ -44,6 +44,17 @@
       "cache": false,
       "tags": ["work:repair"]
     },
+    "test": {
+      "dependsOn": ["^build", "build", "//#toolchain:prepare"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "native/Cargo.toml",
+        "native/Cargo.lock",
+        "native/src/**"
+      ],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
     "typecheck": {
       "dependsOn": ["@verule/sdk#typecheck"],
       "inputs": [],
