@@ -170,7 +170,10 @@ impl Adapter for DrizzleAdapter {
             abi_version: ADAPTER_ABI_VERSION,
             id: "drizzle".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            fact_type_ids: vec!["verule.query.row-projection".to_string()],
+            fact_type_ids: vec![
+                "verule.query.row-projection".to_string(),
+                "verule.drizzle.table-columns".to_string(),
+            ],
         }
     }
 
@@ -179,91 +182,143 @@ impl Adapter for DrizzleAdapter {
         _context: &'a Context<'_>,
         request: &FactRequest<'a>,
     ) -> Result<Vec<FactContribution<'a>>, AdapterError> {
-        if request.fact_type_id != "verule.query.row-projection" {
-            return Err(AdapterError::UnsupportedFactType {
+        match request.fact_type_id {
+            "verule.query.row-projection" => extract_row_projections(request),
+            "verule.drizzle.table-columns" => extract_table_columns(request),
+            _ => Err(AdapterError::UnsupportedFactType {
                 adapter_id: "drizzle".to_string(),
                 fact_type_id: request.fact_type_id.to_string(),
-            });
+            }),
         }
-        if request
-            .condition
-            .as_ref()
-            .and_then(|condition| condition.get("library"))
-            .and_then(Value::as_str)
-            .is_some_and(|library| library != "drizzle")
-        {
-            return Ok(Vec::new());
-        }
-
-        let calls = request
-            .calls
-            .iter()
-            .copied()
-            .map(NodeRef)
-            .collect::<Vec<_>>();
-        let variables = request
-            .variables
-            .iter()
-            .copied()
-            .map(NodeRef)
-            .collect::<Vec<_>>();
-        let nodes = CollectedDrizzleNodes {
-            all_calls: calls,
-            all_var_decls: variables,
-            inner_receiver_locs: classify_receiver_locations(
-                "",
-                &request
-                    .calls
-                    .iter()
-                    .copied()
-                    .map(NodeRef)
-                    .collect::<Vec<_>>(),
-            ),
-        };
-        let requested_nodes = request.targets.as_ref().map(|targets| {
-            targets
-                .iter()
-                .copied()
-                .map(NodeRef)
-                .collect::<FxHashSet<_>>()
-        });
-        let mut checker = CheckerHandle;
-        let extracted =
-            extract_all_drizzle_items("", &mut checker, &nodes, requested_nodes.as_ref());
-
-        extracted
-            .into_iter()
-            .map(|item| {
-                let value = serde_json::to_value(item.value).map_err(|error| {
-                    AdapterError::InvalidOutput {
-                        message: format!("failed to serialize Drizzle projection: {error}"),
-                    }
-                })?;
-                let mut contribution = FactContribution::new(item.call.0, value);
-                contribution.evidence = item
-                    .evidence
-                    .into_iter()
-                    .map(|evidence| Evidence {
-                        kind: evidence.kind.to_string(),
-                        message: evidence.message,
-                        at: evidence.at,
-                        model_id: None,
-                        declaration: None,
-                    })
-                    .collect();
-                contribution.gaps = item
-                    .gaps
-                    .into_iter()
-                    .map(|gap| Gap {
-                        kind: gap.kind.to_string(),
-                        message: gap.message,
-                        at: gap.at,
-                    })
-                    .collect();
-                Ok(contribution)
-            })
-            .collect()
     }
+}
+
+fn collect_drizzle_nodes<'a>(request: &FactRequest<'a>) -> CollectedDrizzleNodes<'a> {
+    let calls = request
+        .calls
+        .iter()
+        .copied()
+        .map(NodeRef)
+        .collect::<Vec<_>>();
+    let variables = request
+        .variables
+        .iter()
+        .copied()
+        .map(NodeRef)
+        .collect::<Vec<_>>();
+    let inner_receiver_locs = classify_receiver_locations("", &calls);
+    CollectedDrizzleNodes {
+        all_calls: calls,
+        all_var_decls: variables,
+        inner_receiver_locs,
+    }
+}
+
+fn convert_contribution<'a, T: Serialize>(
+    subject: NodeRef<'a>,
+    value: T,
+    evidence: Vec<EvidenceItem>,
+    gaps: Vec<GapItem>,
+    context_label: &str,
+) -> Result<FactContribution<'a>, AdapterError> {
+    let value = serde_json::to_value(value).map_err(|error| AdapterError::InvalidOutput {
+        message: format!("failed to serialize Drizzle {context_label}: {error}"),
+    })?;
+    let mut contribution = FactContribution::new(subject.0, value);
+    contribution.evidence = evidence
+        .into_iter()
+        .map(|item| Evidence {
+            kind: item.kind.to_string(),
+            message: item.message,
+            at: item.at,
+            model_id: None,
+            declaration: None,
+        })
+        .collect();
+    contribution.gaps = gaps
+        .into_iter()
+        .map(|item| Gap {
+            kind: item.kind.to_string(),
+            message: item.message,
+            at: item.at,
+        })
+        .collect();
+    Ok(contribution)
+}
+
+fn extract_row_projections<'a>(
+    request: &FactRequest<'a>,
+) -> Result<Vec<FactContribution<'a>>, AdapterError> {
+    if request
+        .condition
+        .as_ref()
+        .and_then(|condition| condition.get("library"))
+        .and_then(Value::as_str)
+        .is_some_and(|library| library != "drizzle")
+    {
+        return Ok(Vec::new());
+    }
+
+    let nodes = collect_drizzle_nodes(request);
+    let requested_nodes = request.targets.as_ref().map(|targets| {
+        targets
+            .iter()
+            .copied()
+            .map(NodeRef)
+            .collect::<FxHashSet<_>>()
+    });
+    let mut checker = CheckerHandle;
+    let extracted = extract_all_drizzle_items("", &mut checker, &nodes, requested_nodes.as_ref());
+
+    extracted
+        .into_iter()
+        .map(|item| {
+            convert_contribution(
+                item.call,
+                item.value,
+                item.evidence,
+                item.gaps,
+                "projection",
+            )
+        })
+        .collect()
+}
+
+fn extract_table_columns<'a>(
+    request: &FactRequest<'a>,
+) -> Result<Vec<FactContribution<'a>>, AdapterError> {
+    let requested_table_name = request
+        .condition
+        .as_ref()
+        .and_then(|condition| condition.get("tableName"))
+        .and_then(Value::as_str);
+
+    let nodes = collect_drizzle_nodes(request);
+    let requested_targets = request
+        .targets
+        .as_ref()
+        .map(|targets| targets.iter().copied().map(NodeRef).collect::<Vec<_>>());
+    let mut checker = CheckerHandle;
+    let extracted = extract_all_table_columns_items(
+        "",
+        &mut checker,
+        &nodes,
+        requested_targets.as_deref(),
+        requested_table_name,
+    );
+
+    extracted
+        .into_iter()
+        .map(|item| {
+            convert_contribution(
+                item.subject,
+                item.value,
+                item.evidence,
+                item.gaps,
+                "table columns",
+            )
+        })
+        .collect()
 }
 
 verule_adapter_api::export_adapter!(DrizzleAdapter);

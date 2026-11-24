@@ -5,6 +5,8 @@
     "package.json",
     "src/drizzle-projections.ts",
     "src/drizzle-schema.ts",
+    "src/drizzle-tables.ts",
+    "src/index.ts",
     "tsconfig.json"
   ]
 }

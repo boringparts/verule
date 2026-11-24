@@ -7,6 +7,8 @@
     "host-root/tsconfig.json",
     "package.json",
     "src/drizzle-projection-rule.ts",
+    "src/drizzle-table-columns-rule.ts",
+    "src/drizzle-table-consumer.ts",
     "tsconfig.json",
     "verule.drizzle.native.config.ts"
   ]

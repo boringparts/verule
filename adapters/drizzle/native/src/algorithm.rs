@@ -73,6 +73,30 @@ pub struct QueryRowProjectionValuePayload {
     pub has_dynamic_columns: bool,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrizzleTableColumnInfoPayload {
+    pub name: String,
+    pub sql_name: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    pub has_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Vec<EvidenceItem>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrizzleTableColumnsValuePayload {
+    pub library: &'static str,
+    pub table_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_table_name: Option<String>,
+    pub column_names: Vec<String>,
+    pub columns: BTreeMap<String, DrizzleTableColumnInfoPayload>,
+    pub has_dynamic_columns: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineFactContributionPayload {
@@ -83,11 +107,20 @@ pub struct EngineFactContributionPayload {
     pub gaps: Vec<GapItem>,
 }
 
+struct ColumnChainMeta {
+    sql_name: String,
+    nullable: bool,
+    primary_key: bool,
+    has_default: bool,
+}
+
 #[derive(Clone)]
 struct TableColumnDef {
     ts_name: String,
     sql_name: String,
     nullable: bool,
+    primary_key: bool,
+    has_default: bool,
     location: SourceLocation,
 }
 
@@ -278,6 +311,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
         &self,
         name_node: NodeRef<'nodes>,
         member_loc: &SourceLocation,
+        gap_kind: &'static str,
     ) -> Result<String, Option<GapItem>> {
         match name_node.kind() {
             Kind::Identifier => node_text(name_node).ok_or(None),
@@ -296,7 +330,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 let text = node_text(name_node).unwrap_or_default();
                 let at = self.loc(name_node).unwrap_or_else(|| member_loc.clone());
                 Err(Some(GapItem {
-                    kind: "dynamic-query-projection",
+                    kind: gap_kind,
                     message: format!(
                         "Computed property name \"{text}\" cannot be statically resolved."
                     ),
@@ -307,7 +341,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 let text = node_text(name_node).unwrap_or_default();
                 let at = self.loc(name_node).unwrap_or_else(|| member_loc.clone());
                 Err(Some(GapItem {
-                    kind: "dynamic-query-projection",
+                    kind: gap_kind,
                     message: format!(
                         "Dynamic property key \"{text}\" ({}) cannot be statically resolved.",
                         kind_label(name_node)
@@ -318,10 +352,12 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
         }
     }
 
-    fn extract_column_chain_metadata(ts_name: &str, expr_node: NodeRef<'nodes>) -> (String, bool) {
+    fn extract_column_chain_metadata(ts_name: &str, expr_node: NodeRef<'nodes>) -> ColumnChainMeta {
         let mut current = Some(unwrap_expr_wrappers(expr_node));
         let mut seen = FxHashSet::default();
         let mut nullable = true;
+        let mut primary_key = false;
+        let mut has_default = false;
         let mut sql_name = ts_name.to_string();
 
         while let Some(node) = current {
@@ -341,8 +377,22 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                         break;
                     };
                     let method_name = callee.name().and_then(node_text).unwrap_or_default();
-                    if method_name == "notNull" || method_name == "primaryKey" {
+                    if method_name == "notNull" {
                         nullable = false;
+                        current = Some(unwrap_expr_wrappers(recv));
+                        continue;
+                    }
+                    if method_name == "primaryKey" {
+                        nullable = false;
+                        primary_key = true;
+                        current = Some(unwrap_expr_wrappers(recv));
+                        continue;
+                    }
+                    if matches!(
+                        method_name.as_str(),
+                        "default" | "defaultRandom" | "defaultNow" | "$defaultFn" | "$default"
+                    ) {
+                        has_default = true;
                         current = Some(unwrap_expr_wrappers(recv));
                         continue;
                     }
@@ -380,7 +430,12 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
             }
         }
 
-        (sql_name, nullable)
+        ColumnChainMeta {
+            sql_name,
+            nullable,
+            primary_key,
+            has_default,
+        }
     }
 
     fn extract_table_columns_object(
@@ -404,16 +459,17 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                     let Some(init_node) = child.initializer() else {
                         continue;
                     };
-                    match self.resolve_property_key(name_node, &child_loc) {
+                    match self.resolve_property_key(name_node, &child_loc, "dynamic-table-columns") {
                         Ok(key) => {
-                            let (sql_name, nullable) =
-                                Self::extract_column_chain_metadata(&key, init_node);
+                            let meta = Self::extract_column_chain_metadata(&key, init_node);
                             columns.insert(
                                 key.clone(),
                                 TableColumnDef {
                                     ts_name: key,
-                                    sql_name,
-                                    nullable,
+                                    sql_name: meta.sql_name,
+                                    nullable: meta.nullable,
+                                    primary_key: meta.primary_key,
+                                    has_default: meta.has_default,
                                     location: child_loc,
                                 },
                             );
@@ -432,16 +488,23 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                         .and_then(node_text)
                         .or_else(|| node_text(child))
                         .unwrap_or_default();
-                    let resolved = resolve_decl_for_ref(self.cwd, self.checker, child)
+                    let meta = resolve_decl_for_ref(self.cwd, self.checker, child)
                         .and_then(|(_, decl_node)| safe_initializer(decl_node))
-                        .map(|init| Self::extract_column_chain_metadata(&key_name, init));
-                    let (sql_name, nullable) = resolved.unwrap_or_else(|| (key_name.clone(), true));
+                        .map(|init| Self::extract_column_chain_metadata(&key_name, init))
+                        .unwrap_or(ColumnChainMeta {
+                            sql_name: key_name.clone(),
+                            nullable: true,
+                            primary_key: false,
+                            has_default: false,
+                        });
                     columns.insert(
                         key_name.clone(),
                         TableColumnDef {
                             ts_name: key_name,
-                            sql_name,
-                            nullable,
+                            sql_name: meta.sql_name,
+                            nullable: meta.nullable,
+                            primary_key: meta.primary_key,
+                            has_default: meta.has_default,
                             location: child_loc,
                         },
                     );
@@ -759,7 +822,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
             else {
                 continue;
             };
-            let Ok(rel_key) = self.resolve_property_key(name_node, &child_loc) else {
+            let Ok(rel_key) = self.resolve_property_key(name_node, &child_loc, "dynamic-query-projection") else {
                 continue;
             };
             let init_unwrapped = unwrap_expr_wrappers(init_node);
@@ -833,7 +896,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 continue;
             };
             if self
-                .resolve_property_key(name_node, &prop_loc)
+                .resolve_property_key(name_node, &prop_loc, "dynamic-query-projection")
                 .ok()
                 .as_deref()
                 != Some("schema")
@@ -843,8 +906,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
             let Some(schema_obj) = self.resolve_object_literal(init_node, empty) else {
                 continue;
             };
-            for &entry in properties(schema_obj).iter()
-            {
+            for &entry in properties(schema_obj).iter() {
                 match entry.kind() {
                     Kind::PropertyAssignment => {
                         let (Some(e_name), Some(e_init), Some(e_loc)) =
@@ -852,7 +914,8 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                         else {
                             continue;
                         };
-                        if let Ok(entry_key) = self.resolve_property_key(e_name, &e_loc)
+                        if let Ok(entry_key) =
+                            self.resolve_property_key(e_name, &e_loc, "dynamic-query-projection")
                             && let Some(table) = self.evaluate_table_expr(e_init, empty)
                         {
                             index.schema_tables.insert(entry_key, table);
@@ -1134,7 +1197,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 let (Some(name_node), Some(init_node)) = (child.name(), child.initializer()) else {
                     return;
                 };
-                match self.resolve_property_key(name_node, &child_loc) {
+                match self.resolve_property_key(name_node, &child_loc, "dynamic-query-projection") {
                     Ok(key) => {
                         let col_meta = self.evaluate_column_ref(init_node, fallback_table);
                         self.record_projected_column(key, child_loc, col_meta, out);
@@ -1278,7 +1341,9 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 else {
                     continue;
                 };
-                if let Ok(key) = self.resolve_property_key(name_node, &child_loc) {
+                if let Ok(key) =
+                    self.resolve_property_key(name_node, &child_loc, "dynamic-query-projection")
+                {
                     if key == "columns" {
                         columns_arg = Some(init_node);
                     } else if key == "with" {
@@ -1505,7 +1570,7 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
                 && let Some(name_node) = child.name()
                 && let Some(init_node) = child.initializer()
             {
-                match self.resolve_property_key(name_node, &child_loc) {
+                match self.resolve_property_key(name_node, &child_loc, "dynamic-query-projection") {
                     Ok(key) => {
                         let val = unwrap_expr_wrappers(init_node);
                         let val_text = node_text(val).map_or_default(|s| s.trim().to_string());
@@ -1581,8 +1646,9 @@ impl<'nodes, 'checker> DrizzleEvaluator<'nodes, 'checker> {
         let (Some(name_node), Some(init_node)) = (child.name(), child.initializer()) else {
             return;
         };
-        let rel_name = match self.resolve_property_key(name_node, &child_loc) {
-            Ok(k) => k,
+        let rel_name =
+            match self.resolve_property_key(name_node, &child_loc, "dynamic-query-projection") {
+                Ok(k) => k,
             Err(gap) => {
                 out.has_dynamic_columns = true;
                 if let Some(g) = gap {
@@ -2013,6 +2079,128 @@ fn extract_all_drizzle_items<'nodes>(
         }
     }
     drop(evaluator);
+    out
+}
+
+struct ExtractedTableColumnsItem<'nodes> {
+    subject: NodeRef<'nodes>,
+    value: DrizzleTableColumnsValuePayload,
+    evidence: Vec<EvidenceItem>,
+    gaps: Vec<GapItem>,
+}
+
+fn table_matches_condition(table: &ExtractedTable<'_>, requested_table_name: Option<&str>) -> bool {
+    let Some(name) = requested_table_name else {
+        return true;
+    };
+    table.display_name == name || table.sql_table_name.as_deref() == Some(name)
+}
+
+fn build_table_columns_item<'nodes>(
+    subject: NodeRef<'nodes>,
+    table: ExtractedTable<'nodes>,
+) -> ExtractedTableColumnsItem<'nodes> {
+    let mut columns = BTreeMap::new();
+    let mut column_names = Vec::with_capacity(table.columns.len());
+    let mut evidence = vec![EvidenceItem::simple(
+        "source",
+        format!("Drizzle table \"{}\" definition", table.display_name),
+        Some(table.location.clone()),
+    )];
+
+    for (name, col) in table.columns {
+        let col_evidence = EvidenceItem::simple(
+            "source",
+            format!(
+                "Column \"{}\" defined in Drizzle table \"{}\"",
+                col.ts_name, table.display_name
+            ),
+            Some(col.location.clone()),
+        );
+        evidence.push(col_evidence.clone());
+        column_names.push(name.clone());
+        columns.insert(
+            name.clone(),
+            DrizzleTableColumnInfoPayload {
+                name,
+                sql_name: col.sql_name,
+                nullable: col.nullable,
+                primary_key: col.primary_key,
+                has_default: col.has_default,
+                evidence: Some(vec![col_evidence]),
+            },
+        );
+    }
+
+    column_names.sort_by(|a, b| compare_utf16(a, b));
+    let value = DrizzleTableColumnsValuePayload {
+        library: "drizzle",
+        table_name: table.display_name,
+        sql_table_name: table.sql_table_name,
+        column_names,
+        columns,
+        has_dynamic_columns: table.has_dynamic_columns,
+    };
+
+    ExtractedTableColumnsItem {
+        subject,
+        value,
+        evidence: dedupe_evidence(evidence),
+        gaps: dedupe_gaps(table.gaps),
+    }
+}
+
+fn extract_all_table_columns_items<'nodes>(
+    cwd: &str,
+    checker: &mut CheckerHandle,
+    nodes: &CollectedDrizzleNodes<'nodes>,
+    requested_targets: Option<&[NodeRef<'nodes>]>,
+    requested_table_name: Option<&str>,
+) -> Vec<ExtractedTableColumnsItem<'nodes>> {
+    let mut evaluator = DrizzleEvaluator::new(cwd, checker);
+    let empty = FxHashSet::default();
+    let mut out = Vec::new();
+
+    if let Some(targets) = requested_targets {
+        let mut seen_targets = FxHashSet::default();
+        for &target in targets {
+            if !seen_targets.insert(target) {
+                continue;
+            }
+            if let Some(table) = evaluator.evaluate_table_expr(target, &empty)
+                && table_matches_condition(&table, requested_table_name)
+            {
+                out.push(build_table_columns_item(target, table));
+            }
+        }
+        return out;
+    }
+
+    let mut emitted_call_locs = FxHashSet::default();
+    for &var_decl in &nodes.all_var_decls {
+        if let Some(table) = evaluator.evaluate_table_expr(var_decl, &empty) {
+            emitted_call_locs.insert(location_key(&table.location));
+            if table_matches_condition(&table, requested_table_name) {
+                out.push(build_table_columns_item(var_decl, table));
+            }
+        }
+    }
+
+    for &call in &nodes.all_calls {
+        let Some(call_loc) = evaluator.loc(call) else {
+            continue;
+        };
+        if emitted_call_locs.contains(&location_key(&call_loc)) {
+            continue;
+        }
+        if let Some(table) = evaluator.evaluate_table_expr(call, &empty) {
+            emitted_call_locs.insert(location_key(&table.location));
+            if table_matches_condition(&table, requested_table_name) {
+                out.push(build_table_columns_item(call, table));
+            }
+        }
+    }
+
     out
 }
 
