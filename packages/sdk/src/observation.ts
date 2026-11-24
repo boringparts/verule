@@ -9,9 +9,12 @@ import {
   type EngineProviderExtractionStats,
   type ExplainCheckpointTrace,
   type ExplainCleanupPath,
+  type ExplainLocalGap,
+  type ExplainProviderEvaluation,
   type ExplainQueryStep,
   type ExplainResult,
   type ExplainStatus,
+  type Gap,
   type ObservationDetailEntry,
   type ObservationReport,
   type NativeAdapterObservation,
@@ -377,6 +380,10 @@ export class ObservationCollector {
   readonly limit: ObserveLimit | undefined;
   readonly explainTarget: SourceTarget | undefined;
   readonly #nativeAdapters: readonly NativeAdapterObservation[];
+  readonly #configuredAdapters: readonly {
+    readonly id: string;
+    readonly factTypeIds: readonly string[];
+  }[];
   readonly #startedAt: number;
   #configAndOpenMs: number;
   #engineQueryMs = 0;
@@ -412,6 +419,25 @@ export class ObservationCollector {
       readonly path: ExplainCleanupPath;
     }[]
   >();
+  readonly #gapsByRule = new Map<string, Gap[]>();
+  readonly #factGapsByRule = new Map<
+    string,
+    {
+      readonly gap: Gap;
+      readonly subjectLocation?: DiagnosticLocation;
+    }[]
+  >();
+  readonly #localGapsByRule = new Map<
+    string,
+    {
+      readonly localGap: ExplainLocalGap;
+      readonly consumerLocation?: DiagnosticLocation;
+    }[]
+  >();
+  readonly #providerEvaluationsByRule = new Map<
+    string,
+    ExplainProviderEvaluation[]
+  >();
 
   constructor(options: {
     readonly mode: ObserveMode;
@@ -419,12 +445,17 @@ export class ObservationCollector {
     readonly explainTarget?: SourceTarget;
     readonly configAndOpenMs?: number;
     readonly nativeAdapters?: readonly NativeAdapterObservation[];
+    readonly configuredAdapters?: readonly {
+      readonly id: string;
+      readonly factTypeIds: readonly string[];
+    }[];
   }) {
     this.mode = options.mode;
     this.limit = options.limit;
     this.explainTarget = options.explainTarget;
     this.#configAndOpenMs = options.configAndOpenMs ?? 0;
     this.#nativeAdapters = options.nativeAdapters ?? [];
+    this.#configuredAdapters = options.configuredAdapters ?? [];
     this.#startedAt = this.isObserveEnabled() ? performance.now() : 0;
   }
 
@@ -694,6 +725,62 @@ export class ObservationCollector {
     this.#cleanupPathsByRule.set(params.ruleId, list);
   }
 
+  recordRuleGaps(ruleId: string, gaps: readonly Gap[]): void {
+    if (!this.isExplainEnabled() || gaps.length === 0) {
+      return;
+    }
+    const list = this.#gapsByRule.get(ruleId) ?? [];
+    list.push(...gaps);
+    this.#gapsByRule.set(ruleId, list);
+  }
+
+  recordFactExplain(params: {
+    readonly ruleId: string;
+    readonly subjectLocation?: DiagnosticLocation;
+    readonly gaps: readonly Gap[];
+    readonly localGaps: readonly ExplainLocalGap[];
+  }): void {
+    if (!this.isExplainEnabled()) {
+      return;
+    }
+    if (params.gaps.length > 0) {
+      const list = this.#factGapsByRule.get(params.ruleId) ?? [];
+      for (const gap of params.gaps) {
+        list.push({
+          gap,
+          ...(params.subjectLocation !== undefined
+            ? { subjectLocation: params.subjectLocation }
+            : {}),
+        });
+      }
+      this.#factGapsByRule.set(params.ruleId, list);
+    }
+    if (params.localGaps.length > 0) {
+      const list = this.#localGapsByRule.get(params.ruleId) ?? [];
+      for (const localGap of params.localGaps) {
+        list.push({
+          localGap,
+          ...(params.subjectLocation !== undefined
+            ? { consumerLocation: params.subjectLocation }
+            : {}),
+        });
+      }
+      this.#localGapsByRule.set(params.ruleId, list);
+    }
+  }
+
+  recordProviderEvaluation(params: {
+    readonly ruleId: string;
+    readonly evaluation: ExplainProviderEvaluation;
+  }): void {
+    if (!this.isExplainEnabled()) {
+      return;
+    }
+    const list = this.#providerEvaluationsByRule.get(params.ruleId) ?? [];
+    list.push(params.evaluation);
+    this.#providerEvaluationsByRule.set(params.ruleId, list);
+  }
+
   #isItemLimitReached(): boolean {
     return (
       this.#truncated ||
@@ -887,6 +974,93 @@ export class ObservationCollector {
       }
     }
 
+    const matchesLoc = (loc: DiagnosticLocation | undefined): boolean =>
+      loc !== undefined &&
+      (locationMatchesTarget(loc, target) ||
+        matchingCandidates.some((cand) => locationsOverlap(cand, loc)));
+
+    const relevantGaps: Gap[] = [];
+    const seenGapKeys = new Set<string>();
+    const pushGap = (gap: Gap): void => {
+      const key = JSON.stringify([
+        gap.kind,
+        gap.message,
+        gap.at?.file ?? null,
+        gap.at?.start ?? null,
+        gap.at?.end ?? null,
+      ]);
+      if (!seenGapKeys.has(key)) {
+        seenGapKeys.add(key);
+        relevantGaps.push(gap);
+      }
+    };
+    for (const gap of this.#gapsByRule.get(params.ruleId) ?? []) {
+      if (matchesLoc(gap.at) || (gap.at === undefined && inCandidates)) {
+        pushGap(gap);
+      }
+    }
+    for (const entry of this.#factGapsByRule.get(params.ruleId) ?? []) {
+      if (matchesLoc(entry.gap.at) || matchesLoc(entry.subjectLocation)) {
+        pushGap(entry.gap);
+      }
+    }
+
+    const relevantLocalGaps: ExplainLocalGap[] = [];
+    const seenLocalGapKeys = new Set<string>();
+    for (const entry of this.#localGapsByRule.get(params.ruleId) ?? []) {
+      const lg = entry.localGap;
+      if (
+        matchesLoc(lg.gap.at) ||
+        matchesLoc(lg.subjectLocation) ||
+        matchesLoc(entry.consumerLocation) ||
+        matchesLoc(lg.resolvedBy?.at)
+      ) {
+        const key = JSON.stringify(lg);
+        if (!seenLocalGapKeys.has(key)) {
+          seenLocalGapKeys.add(key);
+          relevantLocalGaps.push(lg);
+        }
+      }
+    }
+
+    const providerEvaluations: ExplainProviderEvaluation[] = [];
+    const seenEvalKeys = new Set<string>();
+    const activeProviderIds = new Set<string>();
+    const skippedProviderIds = new Set<string>();
+    for (const evalEntry of this.#providerEvaluationsByRule.get(
+      params.ruleId,
+    ) ?? []) {
+      if (evalEntry.status === "skipped") {
+        skippedProviderIds.add(evalEntry.providerId);
+      } else {
+        activeProviderIds.add(evalEntry.providerId);
+      }
+      const key = JSON.stringify([
+        evalEntry.providerId,
+        evalEntry.factTypeId ?? null,
+        evalEntry.status,
+        evalEntry.reason ?? null,
+        evalEntry.subjectLocation?.file ?? null,
+        evalEntry.subjectLocation?.start ?? null,
+      ]);
+      if (!seenEvalKeys.has(key)) {
+        seenEvalKeys.add(key);
+        providerEvaluations.push(evalEntry);
+      }
+    }
+    for (const adapter of this.#configuredAdapters) {
+      if (
+        !activeProviderIds.has(adapter.id) &&
+        !skippedProviderIds.has(adapter.id)
+      ) {
+        providerEvaluations.push({
+          providerId: adapter.id,
+          status: "skipped",
+          reason: "Not queried during rule execution.",
+        });
+      }
+    }
+
     if (matchingDiagnostic) {
       status = "reported";
       summary = `Rule "${params.ruleId}" reported a diagnostic at ${formatTarget(target)}.`;
@@ -909,6 +1083,10 @@ export class ObservationCollector {
       status = "excluded_by_checkpoint";
       excludedByCheckpoint = excludedCheckpoint;
       summary = `Target entered candidates and was excluded at checkpoint "${excludedCheckpoint.name}".`;
+    } else if (relevantGaps.length > 0) {
+      status = "blocked_by_gap";
+      excludedByQuery = lastMatchingQuery ?? querySteps[0];
+      summary = `Target conclusion was blocked by ${relevantGaps.length} active gap(s) (${relevantGaps.map((g) => g.kind).join(", ")}).`;
     } else if (!inCandidates) {
       status = "not_in_candidates";
       excludedByQuery = firstNonMatchingFindSyntax ?? querySteps[0];
@@ -934,7 +1112,9 @@ export class ObservationCollector {
       ...(inlineIgnore !== undefined ? { inlineIgnore } : {}),
       queries: querySteps,
       checkpoints: relevantCheckpoints,
-      gaps: [],
+      gaps: relevantGaps,
+      localGaps: relevantLocalGaps,
+      providerEvaluations,
       providers,
       cleanupPaths,
     };

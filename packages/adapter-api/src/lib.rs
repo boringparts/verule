@@ -421,6 +421,51 @@ pub struct HostFactQuery {
     pub targets: Option<Vec<u64>>,
 }
 
+/// Resolution status of a local unknown recorded during targeted explain.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainGapResolutionStatus {
+    Unresolved,
+    ResolvedByOverride,
+}
+
+/// Override or downstream conclusion that resolved an earlier local unknown.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainGapResolution {
+    pub provider_id: String,
+    pub operation: String,
+    pub conclusion: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<SourceLocation>,
+}
+
+/// Local unknown recorded during targeted explain (`request.explain == true`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainLocalGap {
+    pub status: ExplainGapResolutionStatus,
+    pub fact_type_id: String,
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    pub gap: Gap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_location: Option<SourceLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<ExplainGapResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
+}
+
+/// Per-contribution explain trace populated only when `request.explain` is true.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactExplainTrace {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_gaps: Vec<ExplainLocalGap>,
+}
+
 /// Host-level fact item returned by [`HostAccess::query_facts`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -430,6 +475,8 @@ pub struct HostQueriedFact {
     pub evidence: Vec<Evidence>,
     pub gaps: Vec<Gap>,
     pub providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_trace: Option<FactExplainTrace>,
 }
 
 /// Synchronous access that the engine implements for the current project snapshot.
@@ -457,6 +504,7 @@ pub struct NativeFactRequest<'a> {
     pub calls: &'a [u64],
     pub variables: &'a [u64],
     pub targets: Option<&'a [u64]>,
+    pub explain: bool,
 }
 
 /// Raw fact contribution returned by an adapter through the public Rust API.
@@ -466,6 +514,7 @@ pub struct FactContribution<'a> {
     pub value: Value,
     pub evidence: Vec<Evidence>,
     pub gaps: Vec<Gap>,
+    pub explain_trace: Option<FactExplainTrace>,
 }
 
 impl<'a> FactContribution<'a> {
@@ -477,6 +526,7 @@ impl<'a> FactContribution<'a> {
             value,
             evidence: Vec::new(),
             gaps: Vec::new(),
+            explain_trace: None,
         }
     }
 }
@@ -490,6 +540,8 @@ pub struct NativeContribution {
     pub value: Value,
     pub evidence: Vec<Evidence>,
     pub gaps: Vec<Gap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_trace: Option<FactExplainTrace>,
 }
 
 /// Attribution pairing a read/registered additional input path with the adapter that used it.
@@ -527,6 +579,7 @@ pub struct QueriedFact<'a> {
     pub evidence: Vec<Evidence>,
     pub gaps: Vec<Gap>,
     pub providers: Vec<String>,
+    pub explain_trace: Option<FactExplainTrace>,
 }
 
 /// Request data available to an adapter implementation.
@@ -538,6 +591,7 @@ pub struct FactRequest<'a> {
     pub calls: Vec<NodeRef<'a>>,
     pub variables: Vec<NodeRef<'a>>,
     pub targets: Option<Vec<NodeRef<'a>>>,
+    pub explain: bool,
 }
 
 /// Read-only access to the active project snapshot and its source files.
@@ -626,6 +680,7 @@ impl<'a> Context<'a> {
                 evidence: item.evidence,
                 gaps: item.gaps,
                 providers: item.providers,
+                explain_trace: item.explain_trace,
             })
             .collect())
     }

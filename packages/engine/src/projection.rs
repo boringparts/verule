@@ -206,6 +206,8 @@ pub enum QueryStep {
         targets: Option<Vec<String>>,
         #[serde(default)]
         condition: Option<Value>,
+        #[serde(default)]
+        explain: bool,
     },
 }
 
@@ -892,6 +894,7 @@ fn execute_extended_step(
             report_provider_id,
             targets,
             condition,
+            explain,
         } => {
             let target_list = targets.as_deref().unwrap_or(&[]);
             let outcome = native_adapter::extract(
@@ -905,6 +908,7 @@ fn execute_extended_step(
                 target_list,
                 targets.is_some(),
                 condition.as_ref(),
+                explain,
                 step_start,
                 observer,
             )?;
