@@ -151,6 +151,8 @@ pub enum QueryStep {
     ValuePropagation {
         #[serde(default)]
         propagation: Option<String>,
+        #[serde(default, rename = "includeMemberAccess")]
+        include_member_access: bool,
         from: Vec<String>,
         to: Vec<String>,
         #[serde(default, rename = "lookupFiles")]
@@ -812,6 +814,7 @@ fn execute_step(
         ),
         QueryStep::ValuePropagation {
             propagation,
+            include_member_access,
             from,
             to,
             lookup_files,
@@ -821,6 +824,7 @@ fn execute_step(
             program,
             checker,
             propagation.as_deref(),
+            include_member_access,
             &from,
             &to,
             lookup_files.as_deref(),
@@ -1081,6 +1085,7 @@ fn execute_value_propagation_step(
     program: &'static Program,
     checker: &mut CheckerHandle,
     propagation: Option<&str>,
+    include_member_access: bool,
     from: &[String],
     to: &[String],
     lookup_files: Option<&[String]>,
@@ -1093,6 +1098,7 @@ fn execute_value_propagation_step(
         program,
         checker,
         propagation,
+        include_member_access,
         from,
         to,
         lookup_files,
