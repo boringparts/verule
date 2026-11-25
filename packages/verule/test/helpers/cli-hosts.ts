@@ -36,10 +36,6 @@ export type PrepareCliTempHostOptions = {
   readonly setup?: (host: PreparedTempHost) => Promise<void> | void;
 };
 
-function resolveDefaultSdkPackageDir(): string {
-  return packageRootDir;
-}
-
 /**
  * Resolves a checked CLI host directory under `test/fixtures/cli-hosts/`.
  */
@@ -66,7 +62,7 @@ export function prepareCliTempHost(
     packageLinks["@boringparts/verule"] =
       options.sdkPackageDir ??
       packageLinks["@boringparts/verule"] ??
-      resolveDefaultSdkPackageDir();
+      packageRootDir;
   }
 
   return prepareTempHost({

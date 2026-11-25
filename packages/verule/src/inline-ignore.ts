@@ -188,7 +188,6 @@ export function resolveInlineIgnores(params: {
   readonly configuredRuleIds: ReadonlySet<string>;
   readonly executedRuleIds: ReadonlySet<string>;
   readonly isPartialRuleSelection: boolean;
-  readonly incompleteRuleIds?: ReadonlySet<string>;
 }): InlineIgnoreSettlement {
   if (params.directives.length === 0) {
     return {
@@ -306,9 +305,7 @@ export function resolveInlineIgnores(params: {
       compareLocations,
     );
 
-    const isRuleComplete =
-      params.executedRuleIds.has(rawDirective.ruleId) &&
-      !(params.incompleteRuleIds?.has(rawDirective.ruleId) ?? false);
+    const isRuleComplete = params.executedRuleIds.has(rawDirective.ruleId);
 
     if (uniqueLocations.length >= 2) {
       const locLabels = uniqueLocations

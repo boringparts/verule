@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -23,7 +22,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const maxOutputBytes = 64 * 1024 * 1024;
-const defaultRustChannel = "1.100.0";
+const EXTERNAL_RUST_TOOLCHAIN_CHANNEL = "1.100.0";
 
 export type PackedAdapterApiCrate = {
   readonly crateName: string;
@@ -140,24 +139,6 @@ async function readDynamicSymbols(libraryPath: string): Promise<string[]> {
     }
   }
   return symbols;
-}
-
-function resolvePinnedRustChannel(): string {
-  try {
-    const repoToolchainPath = fileURLToPath(
-      new URL("../../../rust-toolchain.toml", import.meta.url),
-    );
-    if (existsSync(repoToolchainPath)) {
-      const content = readFileSync(repoToolchainPath, "utf8");
-      const match = /^channel\s*=\s*"([^"]+)"/mu.exec(content);
-      if (match?.[1] !== undefined && match[1].trim().length > 0) {
-        return match[1].trim();
-      }
-    }
-  } catch {
-    // Fall back to the pinned repository channel when invoked outside the repo layout.
-  }
-  return defaultRustChannel;
 }
 
 /**
@@ -482,10 +463,9 @@ export async function buildExternalRustAdapter(
 
   try {
     mkdirSync(join(projectDir, "src"), { recursive: true });
-    const rustChannel = resolvePinnedRustChannel();
     writeFileSync(
       join(projectDir, "rust-toolchain.toml"),
-      `[toolchain]\nchannel = ${JSON.stringify(rustChannel)}\n`,
+      `[toolchain]\nchannel = ${JSON.stringify(EXTERNAL_RUST_TOOLCHAIN_CHANNEL)}\n`,
       "utf8",
     );
     const cargoToml = renderExternalRustCargoToml({
