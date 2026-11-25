@@ -86,6 +86,14 @@ void test("renders Cargo.toml and cargo args for both local .crate and public cr
     resolveInstalledPackageVersion("@tssae/adapters"),
     /^\d+\.\d+\.\d+/u,
   );
+  assert.match(
+    resolveInstalledPackageVersion("tssae", import.meta.url),
+    /^\d+\.\d+\.\d+/u,
+  );
+  assert.throws(
+    () => resolveInstalledPackageVersion("@verule/nonexistent-pkg"),
+    /Could not resolve installed version for package "@verule\/nonexistent-pkg"/u,
+  );
 });
 
 void test("tryPackAdapterApiCrate returns undefined without local env overrides while packAdapterApiCrate throws", async () => {

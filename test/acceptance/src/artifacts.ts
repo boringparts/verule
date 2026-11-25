@@ -226,43 +226,32 @@ async function discoverPrepackedTarballs(
 }
 
 /**
- * Resolves the actually installed `version` of `packageName` from `cwd` or the
- * acceptance package's own dependency graph so upstream tarballs are never
- * pinned to a stale hardcoded version.
+ * Resolves the actually installed `version` of `packageName` from the
+ * acceptance package's own dependency graph (or `resolveFromUrl`) so upstream
+ * tarballs are never pinned to a stale hardcoded version.
  */
 export function resolveInstalledPackageVersion(
   packageName: string,
-  cwd: string = process.cwd(),
+  resolveFromUrl: string = import.meta.url,
 ): string {
-  const candidateManifests = [
-    join(resolve(cwd), "package.json"),
-    join(resolve(cwd), "packages", "verule", "package.json"),
-  ];
-  const resolvers = [
-    ...candidateManifests
-      .filter((manifestPath) => existsSync(manifestPath))
-      .map((manifestPath) => createRequire(manifestPath)),
-    createRequire(import.meta.url),
-  ];
-  for (const resolver of resolvers) {
-    try {
-      const pkgJsonPath = resolver.resolve(`${packageName}/package.json`);
-      const parsed: unknown = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        "version" in parsed &&
-        typeof parsed.version === "string" &&
-        parsed.version.length > 0
-      ) {
-        return parsed.version;
-      }
-    } catch {
-      // Try next resolution root.
+  const resolver = createRequire(resolveFromUrl);
+  try {
+    const pkgJsonPath = resolver.resolve(`${packageName}/package.json`);
+    const parsed: unknown = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "version" in parsed &&
+      typeof parsed.version === "string" &&
+      parsed.version.length > 0
+    ) {
+      return parsed.version;
     }
+  } catch {
+    // Fall through to structured error below.
   }
   throw new Error(
-    `Could not resolve installed version for package "${packageName}" from ${cwd}.`,
+    `Could not resolve installed version for package "${packageName}" from ${resolveFromUrl}.`,
   );
 }
 
@@ -416,7 +405,7 @@ export async function packWorkspaceArtifacts(
         continue;
       }
 
-      const resolvedVersion = resolveInstalledPackageVersion(pkg, cwd);
+      const resolvedVersion = resolveInstalledPackageVersion(pkg);
       const destDir = ensureFallbackPackDir();
       const { stdout } = await execFileAsync(
         "npm",

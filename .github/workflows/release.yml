@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Check source (light)
-        run: pnpm run check
+        run: node --conditions=source scripts/task-gates.ts check
       - name: Build packages in dependency order
         run: pnpm exec turbo run build
       - name: Pack unpublished versions
@@ -55,9 +55,10 @@ jobs:
           artifact-ids: ${{ steps.pack.outputs.pack-dir-artifact-id }}
           path: .changeset/packed
       - name: Verify packed candidates (heavy)
+        if: steps.pack.outputs.pack-dir-artifact-id != ''
         env:
           VERULE_ACCEPTANCE_PACK_DIR: ${{ github.workspace }}/.changeset/packed
-        run: pnpm run check:heavy
+        run: node --conditions=source scripts/task-gates.ts check:heavy
 
   publish:
     name: Publish npm packages and GitHub Release
