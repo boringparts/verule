@@ -36,13 +36,23 @@ jobs:
           cache: true
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Check source
-        run: pnpm run check && pnpm run check:heavy
+      - name: Check source (light)
+        run: pnpm run check
       - name: Build packages in dependency order
         run: pnpm exec turbo run build
       - name: Pack unpublished versions
         id: pack
         uses: changesets/action/pack@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+      - name: Download packed artifacts for verification
+        if: steps.pack.outputs.pack-dir-artifact-id != ''
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ steps.pack.outputs.pack-dir-artifact-id }}
+          path: .changeset/packed
+      - name: Verify packed candidates (heavy)
+        env:
+          VERULE_ACCEPTANCE_PACK_DIR: ${{ github.workspace }}/.changeset/packed
+        run: pnpm run check:heavy
 
   publish:
     name: Publish npm packages and GitHub Release

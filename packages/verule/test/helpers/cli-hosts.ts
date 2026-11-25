@@ -48,7 +48,7 @@ export function resolveCliHostDir(hostName: string): string {
 }
 
 /**
- * Materializes checked CLI hosts from `@verule/cli-hosts/hosts/`, applies
+ * Materializes checked CLI hosts from `test/fixtures/cli-hosts/`, applies
  * overlays, links `@boringparts/verule` (workspace by default or `sdkPackageDir`),
  * and wraps `@verule/test-hosts` lifecycle and LIFO cleanup.
  */
