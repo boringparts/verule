@@ -11,7 +11,7 @@ import {
   defineRule,
   openSession,
   type FactResult,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 import { withTempHost, type SyntheticPackageSpec } from "@verule/test-hosts";
 
 import {

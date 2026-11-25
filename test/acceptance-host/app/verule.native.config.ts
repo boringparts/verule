@@ -1,4 +1,4 @@
-import { defineConfig, defineFactType, defineRule } from "@verule/sdk";
+import { defineConfig, defineFactType, defineRule } from "@boringparts/verule";
 
 import { neutralProductReviewRule } from "./src/rule.ts";
 

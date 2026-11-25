@@ -1,7 +1,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 
-import type { CheckReport, ProjectSummary } from "@verule/sdk";
+import type { CheckReport, ProjectSummary } from "@boringparts/verule";
 
 import {
   type IsolationEvidence,
@@ -139,6 +139,7 @@ export function parseCheckJsonResult(result: {
       `Failed to parse verule check JSON output (status ${String(result.status)}): ${
         error instanceof Error ? error.message : String(error)
       }\nstdout=${result.stdout}\nstderr=${result.stderr}`,
+      { cause: error },
     );
   }
 

@@ -5,13 +5,6 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  DrizzleTableColumnsFact,
-  QueryRowProjectionFact,
-  buildDrizzleTableColumnsValue,
-  type DrizzleTableColumnsFactValue,
-  type QueryRowProjectionFactValue,
-} from "@verule/adapter-drizzle";
-import {
   VeruleExecutionError,
   defineAdapter,
   defineConfig,
@@ -19,7 +12,14 @@ import {
   defineRule,
   runCheck,
   type FactResult,
-} from "@verule/sdk";
+} from "@boringparts/verule";
+import {
+  DrizzleTableColumnsFact,
+  QueryRowProjectionFact,
+  buildDrizzleTableColumnsValue,
+  type DrizzleTableColumnsFactValue,
+  type QueryRowProjectionFactValue,
+} from "@verule/adapter-drizzle";
 import {
   linkNodeModulesPackage,
   withTempHost,

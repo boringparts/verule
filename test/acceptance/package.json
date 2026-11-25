@@ -38,15 +38,14 @@
     "@verule/test-hosts": "workspace:*"
   },
   "devDependencies": {
+    "@boringparts/verule": "workspace:*",
     "@types/node": "catalog:",
     "@verule/adapter-drizzle": "workspace:*",
     "@verule/adapter-fixture": "workspace:*",
     "@verule/adapter-fixture-complement": "workspace:*",
     "@verule/adapter-zod": "workspace:*",
-    "@verule/cli": "workspace:*",
     "@verule/engine": "workspace:*",
     "@verule/rules-reference": "workspace:*",
-    "@verule/sdk": "workspace:*",
     "@verule/tooling-config": "workspace:*",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",

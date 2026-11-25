@@ -3,7 +3,7 @@ import {
   type Evidence,
   type FactMergeOutcome,
   type FactProviderContribution,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 
 export type ValidatorSubjectKind = "syntax" | "call" | "declaration";
 

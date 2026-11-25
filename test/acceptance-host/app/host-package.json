@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@verule/acceptance-host-data": "workspace:*",
-    "@verule/sdk": "catalog:"
+    "@boringparts/verule": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

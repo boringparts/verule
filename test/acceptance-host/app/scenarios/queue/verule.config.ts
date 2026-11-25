@@ -1,8 +1,8 @@
+import { defineConfig } from "@boringparts/verule";
 import {
   defineReentrantQueueModel,
   reentrantQueueFlagRule,
 } from "@verule/rules-reference";
-import { defineConfig } from "@verule/sdk";
 
 export const schedulerQueueModel = defineReentrantQueueModel({
   id: "acceptance-scheduler-queue",

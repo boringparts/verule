@@ -1,4 +1,4 @@
-import { defineFactType, defineRule } from "@verule/sdk";
+import { defineFactType, defineRule } from "@boringparts/verule";
 
 type ProviderSessionCondition = {
   readonly mode: "normal" | "conflict";

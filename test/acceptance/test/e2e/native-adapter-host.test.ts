@@ -4,11 +4,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
+import type { CheckReport } from "@boringparts/verule";
 import {
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
-import type { CheckReport, NormalizedVeruleConfig } from "@verule/sdk";
 
 const adapterPackageName = "@verule/adapter-fixture";
 const nativeConfigPath = "packages/app/verule.native.config.ts";
@@ -20,8 +20,7 @@ async function runInstalledSdk(
 ): Promise<CheckReport> {
   const sdk = await host.loadSdk();
   const configFile = host.resolvePath(nativeConfigPath);
-  const config =
-    await host.loadConfig<NormalizedVeruleConfig>(nativeConfigPath);
+  const config = await host.loadConfig(nativeConfigPath);
   assert.deepEqual(config.adapterPackages, [adapterPackageName]);
   return sdk.runCheck({
     cwd: host.hostDir,

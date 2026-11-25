@@ -10,7 +10,7 @@ import {
   type RuleContext,
   type SyntaxNodeResult,
   type SyntaxRef,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 
 /** Declarative contract describing a reentrant queue, its queued flag, and its reentrancy opt-in flag. */
 export type ReentrantQueueContract = {

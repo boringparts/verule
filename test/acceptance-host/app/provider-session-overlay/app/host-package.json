@@ -21,7 +21,7 @@
     "@verule/adapter-drizzle": "catalog:",
     "@verule/adapter-fixture": "catalog:",
     "@verule/adapter-fixture-complement": "catalog:",
-    "@verule/sdk": "catalog:"
+    "@boringparts/verule": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

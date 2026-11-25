@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { INLINE_IGNORE_RULE_ID } from "@boringparts/verule";
+import type { CheckReport, VeruleConfig } from "@boringparts/verule";
 import {
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
-import { INLINE_IGNORE_RULE_ID } from "@verule/sdk";
-import type { CheckReport, VeruleConfig } from "@verule/sdk";
+import { runTscTypecheck } from "@verule/test-hosts";
 
 const configPath = "packages/app/verule.config.ts";
 const reviewPath = "packages/app/src/review.ts";
@@ -27,17 +28,70 @@ async function runInstalledSdk(
   const sdk = await host.loadSdk();
   const config = await host.loadConfig<VeruleConfig>(configPath);
   assert.deepEqual(config.adapters, []);
-  return sdk.runCheck({ cwd: host.hostDir, config });
+  const checkReport = await sdk.runCheck({ cwd: host.hostDir, config });
+  const session = await sdk.openSession({ cwd: host.hostDir, config });
+  try {
+    const sessionReport = await session.check();
+    assert.deepEqual(sessionReport, checkReport);
+  } finally {
+    await session.close();
+  }
+  return checkReport;
 }
 
 void test("runs the packed CLI on the neutral cross-package host", async (t) => {
   await withAcceptanceHost({}, async (host) => {
-    const cliArtifact = host.artifact("@verule/cli");
+    const veruleArtifact = host.artifact("@boringparts/verule");
     const engineArtifact = host.artifact("@verule/engine");
+    assert.equal(veruleArtifact.version, "0.1.0");
+    assert.notEqual(veruleArtifact.manifest.private, true);
+    assert.deepEqual(veruleArtifact.manifest.bin, {
+      verule: "./dist/cli.js",
+    });
+    assert.deepEqual(veruleArtifact.manifest.exports, {
+      ".": {
+        types: "./dist/index.d.ts",
+        default: "./dist/index.js",
+      },
+    });
+    assert.deepEqual(veruleArtifact.manifest.publishConfig, {
+      access: "public",
+    });
     assert.ok(engineArtifact.binarySha256);
-    assert.equal(host.audit.cliVersion, cliArtifact.version);
+    assert.equal(host.audit.cliVersion, veruleArtifact.version);
     assert.equal(host.audit.engineBinarySha256, engineArtifact.binarySha256);
     assert.ok(host.audit.workspaceSymlinkCount > 0);
+
+    const rootManifest = JSON.parse(host.readText("package.json")) as {
+      readonly dependencies?: Record<string, string>;
+      readonly devDependencies?: Record<string, string>;
+    };
+    assert.deepEqual(Object.keys(rootManifest.devDependencies ?? {}), [
+      "@boringparts/verule",
+    ]);
+    assert.equal(rootManifest.dependencies, undefined);
+
+    const appManifest = JSON.parse(
+      host.readText("packages/app/package.json"),
+    ) as {
+      readonly dependencies?: Record<string, string>;
+    };
+    assert.deepEqual(Object.keys(appManifest.dependencies ?? {}).toSorted(), [
+      "@boringparts/verule",
+      "@verule/acceptance-host-data",
+    ]);
+
+    await runTscTypecheck(host.appDir, "tsconfig.json");
+
+    const versionCmd = await host.runCli(["version"]);
+    assert.equal(versionCmd.status, 0, versionCmd.stderr);
+    assert.match(
+      versionCmd.stdout,
+      new RegExp(`^verule ${veruleArtifact.version} \\(engine .+\\)\\n$`, "u"),
+    );
+    const shortVersionCmd = await host.runCli(["--version"]);
+    assert.equal(shortVersionCmd.status, 0, shortVersionCmd.stderr);
+    assert.equal(shortVersionCmd.stdout, `verule ${veruleArtifact.version}\n`);
 
     const reviewSource = host.readText(reviewPath);
     const result = await host.check({ config: configPath });
@@ -285,7 +339,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     assert.ok(sourceFiles.has("packages/app/src/review.ts"));
     assert.ok(sourceFiles.has("packages/data/src/product.ts"));
     t.diagnostic(
-      `Packed CLI ${cliArtifact.version}; engine SHA-256 ${host.audit.engineBinarySha256}; isolation ${result.isolation?.mode}`,
+      `Packed Verule ${veruleArtifact.version}; engine SHA-256 ${host.audit.engineBinarySha256}; isolation ${result.isolation?.mode}`,
     );
   });
 });

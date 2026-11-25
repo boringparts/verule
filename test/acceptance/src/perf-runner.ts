@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { dirname, resolve } from "node:path";
 
-import type { CheckReport } from "@verule/sdk";
+import type { CheckReport } from "@boringparts/verule";
 import { runTscTypecheck } from "@verule/test-hosts";
 
 import {

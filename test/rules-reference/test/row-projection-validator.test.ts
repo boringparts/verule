@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { defineConfig, openSession, runCheck } from "@boringparts/verule";
 import { drizzleAdapter } from "@verule/adapter-drizzle";
 import { zodAdapter } from "@verule/adapter-zod";
 import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";
-import { defineConfig, openSession, runCheck } from "@verule/sdk";
 import {
   installPackedWorkspacePackages,
   linkNodeModulesPackage,
@@ -375,14 +375,14 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     );
   });
 
-  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @verule/sdk .d.ts", async () => {
+  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @boringparts/verule .d.ts", async () => {
     await withTempHost(
       { prefix: "verule-rules-ref-typecheck-" },
       async (host) => {
         await installPackedWorkspacePackages(
           host.rootDir,
           [
-            "@verule/sdk",
+            "@boringparts/verule",
             "@verule/adapter-zod",
             "@verule/adapter-drizzle",
             "@verule/rules-reference",

@@ -15,9 +15,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@boringparts/verule": "catalog:",
     "@verule/acceptance-host-zod-data": "workspace:*",
     "@verule/adapter-zod": "catalog:",
-    "@verule/sdk": "catalog:",
     "drizzle-orm": "catalog:",
     "drizzle-zod": "catalog:",
     "zod": "catalog:"

@@ -15,9 +15,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@boringparts/verule": "catalog:",
     "@verule/acceptance-host-drizzle-data": "workspace:*",
-    "@verule/adapter-drizzle": "catalog:",
-    "@verule/sdk": "catalog:"
+    "@verule/adapter-drizzle": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

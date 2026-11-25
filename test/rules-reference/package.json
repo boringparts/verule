@@ -31,9 +31,9 @@
     "test": "node --conditions=source --test --test-reporter=spec 'test/**/*.test.ts'"
   },
   "dependencies": {
+    "@boringparts/verule": "workspace:*",
     "@verule/adapter-drizzle": "workspace:*",
-    "@verule/adapter-zod": "workspace:*",
-    "@verule/sdk": "workspace:*"
+    "@verule/adapter-zod": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

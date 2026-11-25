@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
+import type { CheckReport, FactResult } from "@boringparts/verule";
 import {
   copyAcceptanceHostMaterial,
   withAcceptanceHost,
@@ -18,7 +19,6 @@ import {
   type ValidatorOutputFieldsFactValue,
   type ValidatorSubjectKind,
 } from "@verule/adapter-zod";
-import type { CheckReport, FactResult } from "@verule/sdk";
 import { runTscTypecheck } from "@verule/test-hosts";
 
 const adapterPackageNames = [
@@ -26,8 +26,7 @@ const adapterPackageNames = [
   "@verule/adapter-zod",
 ] as const;
 const directPackageNames = [
-  "@verule/sdk",
-  "@verule/cli",
+  "@boringparts/verule",
   ...adapterPackageNames,
   "@verule/rules-reference",
 ] as const;

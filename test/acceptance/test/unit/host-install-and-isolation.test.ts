@@ -89,40 +89,27 @@ function createFakeVeruleTarballs(
   );
   const engine: PackedArtifact = { ...engineBase, binarySha256 };
 
-  const sdk = pack(
-    "stage-sdk",
-    "verule-sdk-0.0.0.tgz",
+  const verule = pack(
+    "stage-verule",
+    "boringparts-verule-0.1.0.tgz",
     {
-      name: "@verule/sdk",
-      version: "0.0.0",
+      name: "@boringparts/verule",
+      version: "0.1.0",
       type: "module",
       exports: { ".": "./dist/index.js" },
+      bin: { verule: "./dist/cli.js" },
       dependencies: { "@verule/engine": "0.0.0" },
     },
     {
       "dist/index.js":
         "import { execFile } from 'node:child_process';\nimport { promisify } from 'node:util';\nimport { engineExecutablePath } from '@verule/engine/binary';\nconst run = promisify(execFile);\nexport async function getEngineVersion() { const { stdout } = await run(engineExecutablePath, ['--version']); return stdout.trimEnd(); }\n",
-    },
-  );
-
-  const cli = pack(
-    "stage-cli",
-    "verule-cli-0.0.0.tgz",
-    {
-      name: "@verule/cli",
-      version: "0.0.0",
-      type: "module",
-      bin: { verule: "./dist/cli.js" },
-      dependencies: { "@verule/sdk": "0.0.0" },
-    },
-    {
       "dist/cli.js":
-        "#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport { getEngineVersion } from '@verule/sdk';\nif (process.env.VERULE_SHARED_PROBE) { writeFileSync(process.env.VERULE_SHARED_PROBE, 'shared-ok'); process.stdout.write(readFileSync(process.env.VERULE_SHARED_PROBE, 'utf8') + '\\n'); }\nif (process.argv.includes('--version')) { console.log('verule 0.0.0'); } else { console.log(`verule 0.0.0 (engine ${await getEngineVersion()})`); }\n",
+        "#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport { getEngineVersion } from '@boringparts/verule';\nif (process.env.VERULE_SHARED_PROBE) { writeFileSync(process.env.VERULE_SHARED_PROBE, 'shared-ok'); process.stdout.write(readFileSync(process.env.VERULE_SHARED_PROBE, 'utf8') + '\\n'); }\nif (process.argv.includes('--version')) { console.log('verule 0.1.0'); } else { console.log(`verule 0.1.0 (engine ${await getEngineVersion()})`); }\n",
     },
     ["dist/cli.js"],
   );
 
-  return { artifacts: [engine, sdk, cli], binarySha256 };
+  return { artifacts: [engine, verule], binarySha256 };
 }
 
 void test("installs direct dependencies in a fake host, allows workspace symlinks, blocks dev-repo reads, and runs bare verule", async () => {
@@ -182,10 +169,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     hostManifest.devDependencies !== null
       ? hostManifest.devDependencies
       : {};
-  assert.deepEqual(Object.keys(devDeps).toSorted(), [
-    "@verule/cli",
-    "@verule/sdk",
-  ]);
+  assert.deepEqual(Object.keys(devDeps).toSorted(), ["@boringparts/verule"]);
   assert.equal("@verule/engine" in devDeps, false);
 
   const audit = await verifyHostArtifactResolution({
@@ -194,7 +178,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     blockedPaths: [devRepoDir],
     allowedStorePaths: [storeDir],
   });
-  assert.equal(audit.cliVersion, "0.0.0");
+  assert.equal(audit.cliVersion, "0.1.0");
   assert.equal(audit.engineBinarySha256, binarySha256);
   assert.ok(audit.workspaceSymlinkCount >= 1);
 
@@ -206,7 +190,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     pnpmStoreDir: storeDir,
   });
   assert.equal(bareRun.status, 0, bareRun.stderr);
-  assert.equal(bareRun.stdout, "verule 0.0.0 (engine 0.0.0-test)\n");
+  assert.equal(bareRun.stdout, "verule 0.1.0 (engine 0.0.0-test)\n");
   assert.equal(bareRun.isolation?.controlProbeBlocked, true);
 
   const versionRun = await runBareVeruleInHost({
@@ -217,7 +201,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
     pnpmStoreDir: storeDir,
   });
   assert.equal(versionRun.status, 0, versionRun.stderr);
-  assert.equal(versionRun.stdout, "verule 0.0.0\n");
+  assert.equal(versionRun.stdout, "verule 0.1.0\n");
 
   symlinkSync(devRepoDir, join(hostDir, "node_modules", "leak-link"));
   await assert.rejects(
@@ -330,9 +314,9 @@ process.exit(result.status ?? 1);
     args: [],
   });
   assert.equal(firstRun.status, 0, firstRun.stderr);
-  assert.equal(firstRun.stdout, "verule 0.0.0 (engine 0.0.0-test-a)\n");
+  assert.equal(firstRun.stdout, "verule 0.1.0 (engine 0.0.0-test-a)\n");
   assert.equal(secondRun.status, 0, secondRun.stderr);
-  assert.equal(secondRun.stdout, "verule 0.0.0 (engine 0.0.0-test-b)\n");
+  assert.equal(secondRun.stdout, "verule 0.1.0 (engine 0.0.0-test-b)\n");
 
   const cacheHomes = readFileSync(cacheRecordPath, "utf8").trim().split("\n");
   assert.equal(cacheHomes.length, 2);
@@ -398,7 +382,7 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
     },
   );
   assert.equal(exitCode, 0, stderr);
-  assert.equal(stdout, "shared-ok\nverule 0.0.0\n");
+  assert.equal(stdout, "shared-ok\nverule 0.1.0\n");
   assert.equal(readFileSync(join(sharedDir, "probe.txt"), "utf8"), "shared-ok");
 
   const sharedWriteCheck = await runBareVeruleInHost({

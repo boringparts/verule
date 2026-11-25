@@ -30,7 +30,7 @@ catalog:
   "@verule/adapter-fixture-complement": "workspace:*"
   "@verule/adapter-zod": "workspace:*"
   "@verule/rules-reference": "workspace:*"
-  "@verule/sdk": "workspace:*"
+  "@boringparts/verule": "workspace:*"
   drizzle-zod: 0.8.3
   drizzle-orm: 0.45.3
   "@ykdz/cli-contract": 0.5.0

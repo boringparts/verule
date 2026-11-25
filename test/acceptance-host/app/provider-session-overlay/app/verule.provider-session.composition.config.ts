@@ -1,4 +1,4 @@
-import { defineConfig } from "@verule/sdk";
+import { defineConfig } from "@boringparts/verule";
 
 import {
   derivedConsumerCacheRule,

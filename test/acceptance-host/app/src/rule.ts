@@ -1,4 +1,4 @@
-import { defineRule } from "@verule/sdk";
+import { defineRule } from "@boringparts/verule";
 
 export const neutralProductReviewRule = defineRule({
   id: "neutral-product-review",

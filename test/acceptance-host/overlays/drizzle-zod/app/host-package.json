@@ -11,7 +11,7 @@
     "@verule/adapter-drizzle": "catalog:",
     "@verule/adapter-zod": "catalog:",
     "@verule/rules-reference": "catalog:",
-    "@verule/sdk": "catalog:",
+    "@boringparts/verule": "catalog:",
     "drizzle-orm": "catalog:",
     "zod": "catalog:"
   },

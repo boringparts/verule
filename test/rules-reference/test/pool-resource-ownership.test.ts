@@ -3,12 +3,12 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { defineConfig, openSession, runCheck } from "@boringparts/verule";
 import {
   definePoolResourceOwnershipModel,
   poolResourceOwnershipModel,
   poolResourceOwnershipRule,
 } from "@verule/rules-reference";
-import { defineConfig, openSession, runCheck } from "@verule/sdk";
 import {
   copyDirectory,
   type PreparedTempHost,
