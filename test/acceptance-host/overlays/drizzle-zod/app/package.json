@@ -16,9 +16,8 @@
   },
   "dependencies": {
     "@boringparts/verule": "catalog:",
+    "@tssae/adapters": "catalog:",
     "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
-    "@verule/adapter-drizzle": "catalog:",
-    "@verule/adapter-zod": "catalog:",
     "@verule/rules-reference": "catalog:",
     "drizzle-orm": "catalog:",
     "zod": "catalog:"

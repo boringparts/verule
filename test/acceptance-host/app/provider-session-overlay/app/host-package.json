@@ -18,9 +18,9 @@
   },
   "dependencies": {
     "@verule/acceptance-host-data": "workspace:*",
-    "@verule/adapter-drizzle": "catalog:",
-    "@verule/adapter-fixture": "catalog:",
-    "@verule/adapter-fixture-complement": "catalog:",
+    "@tssae/adapters": "catalog:",
+    "@acme/adapter-fixture": "catalog:",
+    "@acme/adapter-fixture-complement": "catalog:",
     "@boringparts/verule": "catalog:"
   },
   "devDependencies": {

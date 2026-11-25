@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, renameSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig, openSession, runCheck } from "@boringparts/verule";
-import { drizzleAdapter } from "@verule/adapter-drizzle";
-import { zodAdapter } from "@verule/adapter-zod";
+import { drizzleAdapter } from "@tssae/adapters/drizzle";
+import { zodAdapter } from "@tssae/adapters/zod";
 import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";
 import {
   installPackedWorkspacePackages,
@@ -16,6 +17,11 @@ import {
 } from "@verule/test-hosts";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const pkgRequire = createRequire(join(packageRoot, "package.json"));
+const tssaeRoot = dirname(pkgRequire.resolve("tssae/package.json"));
+const tssaeAdaptersRoot = dirname(
+  pkgRequire.resolve("@tssae/adapters/package.json"),
+);
 const drizzleOrmRoot = join(packageRoot, "node_modules", "drizzle-orm");
 const drizzleZodRoot = join(packageRoot, "node_modules", "drizzle-zod");
 const zodRoot = join(packageRoot, "node_modules", "zod");
@@ -375,19 +381,20 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     );
   });
 
-  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @verule/adapter-drizzle, @verule/adapter-zod, and @boringparts/verule .d.ts", async () => {
+  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @tssae/adapters, tssae, and @boringparts/verule .d.ts", async () => {
     await withTempHost(
       { prefix: "verule-rules-ref-typecheck-" },
       async (host) => {
         await installPackedWorkspacePackages(
           host.rootDir,
-          [
-            "@boringparts/verule",
-            "@verule/adapter-zod",
-            "@verule/adapter-drizzle",
-            "@verule/rules-reference",
-          ],
+          ["@boringparts/verule", "@verule/rules-reference"],
           { cwd: packageRoot },
+        );
+        linkNodeModulesPackage(host.rootDir, "tssae", tssaeRoot);
+        linkNodeModulesPackage(
+          host.rootDir,
+          "@tssae/adapters",
+          tssaeAdaptersRoot,
         );
 
         host.writeText(

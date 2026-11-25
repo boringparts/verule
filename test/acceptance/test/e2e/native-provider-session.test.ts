@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import type {
@@ -14,17 +14,24 @@ import type {
   VeruleExecutionError,
 } from "@boringparts/verule";
 import {
+  buildFixtureAdapterArtifacts,
+  type BuiltFixtureAdapters,
   copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
 
-const packageNames = [
-  "@verule/adapter-fixture",
-  "@verule/adapter-fixture-complement",
-  "@verule/adapter-drizzle",
-] as const;
+const packageNames = ["@tssae/adapters"] as const;
+let builtFixtures: BuiltFixtureAdapters;
+
+before(async () => {
+  builtFixtures = await buildFixtureAdapterArtifacts();
+});
+
+after(() => {
+  builtFixtures?.dispose();
+});
 const nativeConfig =
   "packages/app/provider-session-overlay/app/verule.provider-session.native.config.ts";
 const compositionConfig =
@@ -160,6 +167,7 @@ void test("loads independent native providers together and updates facts across 
     {
       overlay: "provider-session",
       additionalPackages: [...packageNames],
+      extraArtifacts: builtFixtures.artifacts,
     },
     async (host) => {
       const noAdapters = await runCliObserveDetail(
@@ -181,18 +189,18 @@ void test("loads independent native providers together and updates facts across 
       assert.deepEqual(nativeExtractionProviders(unqueriedReport), []);
       assert.deepEqual(nativeAdapterObservations(unqueriedReport), [
         {
-          packageName: "@verule/adapter-drizzle",
-          providerId: "drizzle",
-          status: "loaded",
-        },
-        {
-          packageName: "@verule/adapter-fixture",
+          packageName: "@acme/adapter-fixture",
           providerId: "third-party-fixture",
           status: "loaded",
         },
         {
-          packageName: "@verule/adapter-fixture-complement",
+          packageName: "@acme/adapter-fixture-complement",
           providerId: "third-party-fixture-complement",
+          status: "loaded",
+        },
+        {
+          packageName: "@tssae/adapters/drizzle",
+          providerId: "drizzle",
           status: "loaded",
         },
       ]);
@@ -240,18 +248,18 @@ void test("loads independent native providers together and updates facts across 
       ]);
       assert.deepEqual(nativeAdapterObservations(report), [
         {
-          packageName: "@verule/adapter-drizzle",
-          providerId: "drizzle",
-          status: "loaded",
-        },
-        {
-          packageName: "@verule/adapter-fixture",
+          packageName: "@acme/adapter-fixture",
           providerId: "third-party-fixture",
           status: "loaded",
         },
         {
-          packageName: "@verule/adapter-fixture-complement",
+          packageName: "@acme/adapter-fixture-complement",
           providerId: "third-party-fixture-complement",
+          status: "loaded",
+        },
+        {
+          packageName: "@tssae/adapters/drizzle",
+          providerId: "drizzle",
           status: "loaded",
         },
       ]);
@@ -398,18 +406,18 @@ void test("loads independent native providers together and updates facts across 
         assertReportsAlign(editedInput, coldEditedInput, "shared-input-edited");
         assert.deepEqual(nativeAdapterObservations(editedInput), [
           {
-            packageName: "@verule/adapter-drizzle",
-            providerId: "drizzle",
-            status: "reused",
-          },
-          {
-            packageName: "@verule/adapter-fixture",
+            packageName: "@acme/adapter-fixture",
             providerId: "third-party-fixture",
             status: "reused",
           },
           {
-            packageName: "@verule/adapter-fixture-complement",
+            packageName: "@acme/adapter-fixture-complement",
             providerId: "third-party-fixture-complement",
+            status: "reused",
+          },
+          {
+            packageName: "@tssae/adapters/drizzle",
+            providerId: "drizzle",
             status: "reused",
           },
         ]);
@@ -655,7 +663,7 @@ void test("loads independent native providers together and updates facts across 
       assert.ok(
         realpathSync(
           createRequire(join(host.hostDir, "package.json")).resolve(
-            "@verule/adapter-fixture-complement/verule-adapter",
+            "@acme/adapter-fixture-complement/tssae-native",
           ),
         ).startsWith(host.hostDir),
       );
@@ -668,6 +676,7 @@ void test("composes third-party native facts across objects, traces A and B in t
     {
       overlay: "provider-session",
       additionalPackages: [...packageNames],
+      extraArtifacts: builtFixtures.artifacts,
     },
     async (host) => {
       const initial = await host.check({
@@ -965,6 +974,7 @@ void test("distinguishes skipped providers, unresolved local gaps (while indepen
     {
       overlay: "provider-session",
       additionalPackages: [...packageNames],
+      extraArtifacts: builtFixtures.artifacts,
     },
     async (host) => {
       copyAcceptanceHostMaterial(

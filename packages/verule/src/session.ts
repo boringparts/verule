@@ -1,80 +1,44 @@
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+
+import {
+  defineAdapter as tssaeDefineAdapter,
+  defineModel as tssaeDefineModel,
+  extractBasisEvidence,
+  openProject,
+  syntaxLocationOf,
+  type AdditionalInputEntry,
+  type AdditionalInputRegistrar,
+  type AdditionalInputSource,
+  type DiagnosticLocation,
+  type LibraryAdapter,
+  type Model,
+  type ProjectContext,
+  type ProjectSession,
+  type QueryObserver,
+  type RecomputationScope,
+} from "tssae";
 
 import {
   createAdditionalInputRegistry,
   createScopedAdditionalInputRegistrar,
   validateAdditionalInputPaths,
-  type AdditionalInputEntry,
-  type AdditionalInputRegistrar,
-  type AdditionalInputSource,
 } from "./additional-inputs.ts";
 import {
-  assertValidProgramRef,
-  toBranchCoverageItem,
-  toFunctionBranchesResult,
-  type BranchCoverageItem,
-  type BranchCoverageOptions,
-  type EngineBranchCoverageItem,
-  type EngineFunctionBranchesItem,
-  type FunctionBranchesResult,
-} from "./branch-coverage.ts";
-import {
-  createCallEffectsCache,
-  createCallEffectsQueries,
-  validateCleanupAndLifecycleModels,
-} from "./call-effects.ts";
-import {
-  createCallsValuesCache,
-  createCallsValuesQueries,
-} from "./calls-values.ts";
-import { EngineClient, type RpcRequestOptions } from "./engine-client.ts";
-import {
-  extractBasisEvidence,
-  registerProvenance,
-  summarizeSyntaxSnippet,
-} from "./evidence.ts";
-import {
-  FactCache,
-  executeFactQuery,
-  validateAdapters,
-  type AdapterContext,
-  type EngineFactExtractionOptions,
-  type EngineNativeSubQueryTrace,
-  type FactContribution,
-  type FactExplainTrace,
-  type FactQueryOptions,
-  type FactType,
-  type LibraryAdapter,
-} from "./facts.ts";
-import {
   INLINE_IGNORE_RULE_ID,
+  parseInlineIgnoreDirectives,
   resolveInlineIgnores,
-  type EngineDirectiveItem,
-  type EngineDirectivesScanResult,
 } from "./inline-ignore.ts";
 import {
-  createInstanceIdentityCache,
-  createInstanceIdentityQueries,
-  validateInstanceBehaviors,
-} from "./instance-identity.ts";
-import { resolveNativeAdapterPackages } from "./native-adapters.ts";
-import {
   ObservationCollector,
-  locationMatchesTarget,
   normalizeObserveConfig,
   normalizeTargetSpec,
   type EngineCallIoMetrics,
 } from "./observation.ts";
 import {
-  createPackageImplCache,
-  createPackageImplQueries,
-} from "./package-impl.ts";
-import { createProjectionQueries, validateProgramRefs } from "./projection.ts";
-import {
   buildDiagnostics,
-  buildFileOrigins,
   buildGaps,
   resolveProjectEntries,
   type CollectedDiagnostic,
@@ -82,28 +46,18 @@ import {
 import {
   REPORT_SCHEMA_VERSION,
   VeruleExecutionError,
-  makeProgramRef,
+  toVeruleError,
   type AnalysisSession,
   type CheckReport,
   type CheckpointOutcome,
   type CheckpointTarget,
   type DiagnosticInput,
-  type DiagnosticLocation,
-  type Evidence,
   type ExplainOptions,
   type ExplainReport,
-  type FindSyntaxOptions,
   type Gap,
-  type MemoryStats,
-  type Model,
   type ModelIdentitySummary,
-  type NativeAdapterObservation,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
-  type ProgramObjectKind,
-  type ProgramRef,
-  type ProjectSummary,
-  type RecomputationScope,
   type ReportIdentity,
   type Rule,
   type RuleContext,
@@ -111,30 +65,8 @@ import {
   type RunCheckOptions,
   type SessionCheckOptions,
   type SessionUpdateOptions,
-  type SourceFileOrigin,
-  type SyntaxKind,
-  type SyntaxNodeResult,
-  type SyntaxRef,
-  type TypeAtResult,
   type VeruleConfig,
 } from "./types.ts";
-
-type EngineOpenResult = {
-  readonly snapshotId: number;
-  readonly snapshotDigest: string;
-  readonly projects: readonly ProjectSummary[];
-  readonly workspaceSourceFiles: readonly string[];
-  readonly nativeAdapters: readonly NativeAdapterObservation[];
-  readonly engineRssBytes?: number;
-};
-
-type EngineUpdateResult = EngineOpenResult & {
-  readonly recomputedProjects: readonly string[];
-  readonly reusedProjects: readonly string[];
-  readonly recomputedFiles: readonly string[];
-  readonly reusedFiles: readonly string[];
-  readonly removedFiles: readonly string[];
-};
 
 type SessionWorkspaceFileState = {
   files: readonly string[];
@@ -146,48 +78,37 @@ const sessionWorkspaceFileStates = new WeakMap<
   SessionWorkspaceFileState
 >();
 
+/** Returns all workspace source file paths tracked by the active session for file watching. */
 export function getSessionWorkspaceFiles(
   session: AnalysisSession,
 ): readonly string[] {
   return sessionWorkspaceFileStates.get(session)?.files ?? [];
 }
 
-type EngineSyntaxItem = {
-  readonly ref: string;
-  readonly kind: SyntaxKind;
-  readonly text: string;
-  readonly location: DiagnosticLocation;
-  readonly expression?: string;
-  readonly arguments?: readonly string[];
-  readonly name?: string;
-  readonly initializer?: string;
-  readonly body?: string;
-  readonly parameters?: readonly string[];
-};
+function canonicalizeDir(dirPath: string): string {
+  if (!existsSync(dirPath)) return dirPath;
+  try {
+    return realpathSync.native(dirPath);
+  } catch {
+    return dirPath;
+  }
+}
 
-type EngineTypeItem = {
-  readonly target: string;
-  readonly typeRef: string;
-  readonly typeText: string;
-  readonly isUnion: boolean;
-  readonly isIntersection: boolean;
-  readonly isLiteral: boolean;
-  readonly literalValue?: string | number | boolean;
-  readonly unionMembers?: readonly string[];
-  readonly gaps?: readonly Gap[];
-};
+async function invokeProjectQuery<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw toVeruleError(err);
+  }
+}
 
-type EngineBatchResult = {
-  readonly results: readonly {
-    readonly items: readonly unknown[];
-    readonly additionalInputs?: readonly string[];
-    readonly adapterInputs?: readonly {
-      readonly adapterId: string;
-      readonly path: string;
-    }[];
-    readonly subQueries?: readonly EngineNativeSubQueryTrace[];
-  }[];
-};
+function invokeProjectSync<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    throw toVeruleError(err);
+  }
+}
 
 function validateRules(rules: readonly Rule[]): readonly Rule[] {
   const seen = new Set<string>();
@@ -221,74 +142,70 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
   return [...rules];
 }
 
-function registerModelProvenance(model: Model): Model {
-  const message =
-    typeof model.description === "string" && model.description.trim() !== ""
-      ? model.description
-      : `Project model "${model.id}"`;
-  return registerProvenance(model, [
-    {
-      kind: "model",
-      modelId: model.id,
-      message,
-    },
-  ]);
+/** Validates a project model definition and attaches provenance metadata. */
+export function defineModel(model: Model): Model {
+  return invokeProjectSync(() => tssaeDefineModel(model));
 }
 
 function validateModels(models: readonly Model[]): readonly Model[] {
   const seen = new Set<string>();
+  const validated: Model[] = [];
   for (const model of models) {
-    if (typeof model.id !== "string" || model.id.trim() === "") {
+    const normalized = defineModel(model);
+    if (seen.has(normalized.id)) {
       throw new VeruleExecutionError(
         "INVALID_CONFIG",
-        "Each model must have a non-empty string id.",
+        `Duplicate model id: "${normalized.id}".`,
       );
     }
-    if (model.version !== undefined && typeof model.version !== "string") {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Model "${model.id}" version must be a string when provided.`,
-      );
-    }
-    validateInstanceBehaviors(model.id, model.instanceBehaviors);
-    validateCleanupAndLifecycleModels(
-      model.id,
-      model.cleanupOperations,
-      model.lifecycleEvents,
-    );
-    if (seen.has(model.id)) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Duplicate model id: "${model.id}".`,
-      );
-    }
-    seen.add(model.id);
-    registerModelProvenance(model);
+    seen.add(normalized.id);
+    validated.push(normalized);
   }
-  return [...models];
+  return validated;
 }
 
-/** Validates a project model definition. */
-export function defineModel(model: Model): Model {
-  if (typeof model.id !== "string" || model.id.trim() === "") {
-    throw new VeruleExecutionError(
-      "INVALID_CONFIG",
-      "Model id must be a non-empty string.",
-    );
+function validateAdapters(
+  adapters: readonly LibraryAdapter[],
+): readonly LibraryAdapter[] {
+  const seen = new Set<string>();
+  const validated: LibraryAdapter[] = [];
+  for (const adapter of adapters) {
+    const normalized = invokeProjectSync(() => tssaeDefineAdapter(adapter));
+    if (seen.has(normalized.id)) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Duplicate adapter id: "${normalized.id}".`,
+      );
+    }
+    seen.add(normalized.id);
+    validated.push(normalized);
   }
-  if (model.version !== undefined && typeof model.version !== "string") {
-    throw new VeruleExecutionError(
-      "INVALID_CONFIG",
-      `Model "${model.id}" version must be a string when provided.`,
-    );
+  return validated;
+}
+
+function validateAdapterPackageNames(
+  packageNames: readonly string[],
+): readonly string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const rawName of packageNames) {
+    if (typeof rawName !== "string" || rawName.trim() === "") {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        "Adapter package names must be non-empty strings.",
+      );
+    }
+    const packageName = rawName.trim();
+    if (seen.has(packageName)) {
+      throw new VeruleExecutionError(
+        "INVALID_CONFIG",
+        `Duplicate adapter package name: "${packageName}".`,
+      );
+    }
+    seen.add(packageName);
+    normalized.push(packageName);
   }
-  validateInstanceBehaviors(model.id, model.instanceBehaviors);
-  validateCleanupAndLifecycleModels(
-    model.id,
-    model.cleanupOperations,
-    model.lifecycleEvents,
-  );
-  return registerModelProvenance(model);
+  return normalized;
 }
 
 function selectRules(
@@ -378,49 +295,6 @@ export function defineConfig(
     adapterPackages,
     additionalInputs,
   };
-}
-
-function validateAdapterPackageNames(
-  packageNames: readonly string[],
-): readonly string[] {
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const rawName of packageNames) {
-    if (typeof rawName !== "string" || rawName.trim() === "") {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        "Adapter package names must be non-empty strings.",
-      );
-    }
-    const packageName = rawName.trim();
-    if (seen.has(packageName)) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Duplicate adapter package name: "${packageName}".`,
-      );
-    }
-    seen.add(packageName);
-    normalized.push(packageName);
-  }
-  return normalized;
-}
-
-function combineConfiguredAdapters(
-  configuredAdapters: readonly LibraryAdapter[],
-  packageAdapters: readonly LibraryAdapter[],
-  packageNames: readonly string[],
-): readonly LibraryAdapter[] {
-  try {
-    return validateAdapters([...configuredAdapters, ...packageAdapters]);
-  } catch (error) {
-    if (packageNames.length === 0) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new VeruleExecutionError(
-      "INVALID_CONFIG",
-      `Configured adapter package(s) ${packageNames.map((name) => `"${name}"`).join(", ")} could not be registered: ${detail}`,
-      { cause: error },
-    );
-  }
 }
 
 function stableSerialize(value: unknown): string {
@@ -521,141 +395,8 @@ function computeReportIdentity(
   };
 }
 
-function toSyntaxNodeResult(
-  item: EngineSyntaxItem,
-  sessionToken: symbol,
-  projectId: string,
-  snapshotId: number,
-  syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
-): SyntaxNodeResult {
-  const ref = makeProgramRef(
-    "syntax",
-    sessionToken,
-    projectId,
-    snapshotId,
-    item.ref,
-  );
-  syntaxLocations.set(ref, item.location);
-
-  return registerProvenance(
-    {
-      ref,
-      kind: item.kind,
-      text: item.text,
-      location: item.location,
-      ...(item.expression !== undefined
-        ? {
-            expression: makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              item.expression,
-            ),
-          }
-        : {}),
-      ...(item.arguments !== undefined
-        ? {
-            arguments: item.arguments.map((argId) =>
-              makeProgramRef(
-                "syntax",
-                sessionToken,
-                projectId,
-                snapshotId,
-                argId,
-              ),
-            ),
-          }
-        : {}),
-      ...(item.name !== undefined
-        ? {
-            name: makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              item.name,
-            ),
-          }
-        : {}),
-      ...(item.initializer !== undefined
-        ? {
-            initializer: makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              item.initializer,
-            ),
-          }
-        : {}),
-      ...(item.body !== undefined
-        ? {
-            body: makeProgramRef(
-              "syntax",
-              sessionToken,
-              projectId,
-              snapshotId,
-              item.body,
-            ),
-          }
-        : {}),
-      ...(item.parameters !== undefined
-        ? {
-            parameters: item.parameters.map((paramId) =>
-              makeProgramRef(
-                "syntax",
-                sessionToken,
-                projectId,
-                snapshotId,
-                paramId,
-              ),
-            ),
-          }
-        : {}),
-    },
-    [
-      {
-        kind: "source",
-        message: `${item.kind}: ${summarizeSyntaxSnippet(item.text)}`,
-        at: item.location,
-      },
-    ],
-  );
-}
-
-function toTypeAtResult(
-  item: EngineTypeItem,
-  target: SyntaxRef,
-  sessionToken: symbol,
-  projectId: string,
-  snapshotId: number,
-): TypeAtResult {
-  return {
-    target,
-    ref: makeProgramRef(
-      "type",
-      sessionToken,
-      projectId,
-      snapshotId,
-      item.typeRef,
-    ),
-    typeText: item.typeText,
-    isUnion: item.isUnion,
-    isIntersection: item.isIntersection,
-    isLiteral: item.isLiteral,
-    ...(item.literalValue !== undefined
-      ? { literalValue: item.literalValue }
-      : {}),
-    ...(item.unionMembers !== undefined
-      ? { unionMembers: item.unionMembers }
-      : {}),
-  };
-}
-
 function resolveCheckpointLocation(
   target: CheckpointTarget,
-  syntaxLocations: WeakMap<SyntaxRef, DiagnosticLocation>,
 ): DiagnosticLocation | undefined {
   if ("location" in target) {
     return target.location;
@@ -663,7 +404,7 @@ function resolveCheckpointLocation(
   if ("file" in target && "line" in target && "start" in target) {
     return target;
   }
-  return syntaxLocations.get(target);
+  return syntaxLocationOf(target);
 }
 
 function resolveNextConfig(
@@ -722,118 +463,6 @@ function resolveNextConfig(
   };
 }
 
-function collectInvalidatedBy(
-  prevConfig: NormalizedVeruleConfig,
-  nextConfig: NormalizedVeruleConfig,
-  options?: SessionUpdateOptions,
-  changedAdditionalFiles: readonly string[] = [],
-): readonly string[] {
-  const reasons: string[] = [];
-  const changedSet = new Set<string>(options?.changed ?? []);
-  for (const file of options?.changed ?? []) reasons.push(`changed:${file}`);
-  for (const file of options?.created ?? []) reasons.push(`created:${file}`);
-  for (const file of options?.deleted ?? []) reasons.push(`deleted:${file}`);
-  for (const file of changedAdditionalFiles) {
-    if (!changedSet.has(file)) {
-      reasons.push(`additional-input:${file}`);
-    }
-  }
-
-  const prevEntries = resolveProjectEntries(prevConfig);
-  const nextEntries = resolveProjectEntries(nextConfig);
-  const prevIdentity = computeReportIdentity(
-    "",
-    prevEntries,
-    prevConfig.rules,
-    prevConfig.models,
-    prevConfig.additionalInputs,
-    prevConfig.adapters,
-    prevConfig.adapterPackages,
-  );
-  const nextIdentity = computeReportIdentity(
-    "",
-    nextEntries,
-    nextConfig.rules,
-    nextConfig.models,
-    nextConfig.additionalInputs,
-    nextConfig.adapters,
-    nextConfig.adapterPackages,
-  );
-  if (stableSerialize(prevEntries) !== stableSerialize(nextEntries)) {
-    reasons.push("entries");
-  }
-  if (
-    stableSerialize(prevIdentity.rules) !== stableSerialize(nextIdentity.rules)
-  ) {
-    reasons.push("rules");
-  }
-  if (
-    stableSerialize(prevIdentity.models) !==
-    stableSerialize(nextIdentity.models)
-  ) {
-    reasons.push("models");
-  }
-  if (
-    stableSerialize(prevConfig.additionalInputs) !==
-    stableSerialize(nextConfig.additionalInputs)
-  ) {
-    reasons.push("additionalInputs");
-  }
-  if (
-    stableSerialize(
-      prevConfig.adapters
-        .map(summarizeAdapter)
-        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-    ) !==
-    stableSerialize(
-      nextConfig.adapters
-        .map(summarizeAdapter)
-        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-    )
-  ) {
-    reasons.push("adapters");
-  }
-  if (
-    stableSerialize(prevConfig.adapterPackages) !==
-    stableSerialize(nextConfig.adapterPackages)
-  ) {
-    reasons.push("adapterPackages");
-  }
-  if (options?.config !== undefined && reasons.length === 0) {
-    reasons.push("config");
-  }
-  return reasons;
-}
-
-function readMemoryStats(engineRssBytes?: number): MemoryStats {
-  return {
-    hostRssBytes: process.memoryUsage().rss,
-    ...(engineRssBytes !== undefined ? { engineRssBytes } : {}),
-  };
-}
-
-function buildRpcOptions(
-  collector: ObservationCollector,
-): RpcRequestOptions | undefined {
-  if (!collector.isObserveEnabled()) {
-    return undefined;
-  }
-  return {
-    observe: {
-      mode: collector.mode,
-      ...(collector.limit?.maxItems !== undefined
-        ? { maxItems: collector.limit.maxItems }
-        : {}),
-      ...(collector.limit?.maxBytes !== undefined
-        ? { maxBytes: collector.limit.maxBytes }
-        : {}),
-    },
-    onMetrics: (io) => {
-      collector.recordRpcCall(io);
-    },
-  };
-}
-
 function isSessionCheckOptions(
   value: readonly Rule[] | SessionCheckOptions | undefined,
 ): value is SessionCheckOptions {
@@ -841,7 +470,7 @@ function isSessionCheckOptions(
 }
 
 /**
- * Opens an analysis session backed by a single engine subprocess and project snapshot.
+ * Opens an analysis session backed by a single TSSAE `ProjectSession`.
  *
  * Call `session.close()` when finished to release the snapshot and terminate the engine process.
  */
@@ -852,113 +481,50 @@ export async function openSession(
     ? defineConfig(options.config)
     : defineConfig({});
   const absCwd = resolve(options.cwd);
+  const canonicalCwd = canonicalizeDir(absCwd);
   let adapterResolutionRoot = resolve(options.adapterResolutionRoot ?? absCwd);
-  let packageResolution = await resolveNativeAdapterPackages(
-    normalizedConfig.adapterPackages,
-    adapterResolutionRoot,
-  );
-  let activeAdapters = combineConfiguredAdapters(
-    normalizedConfig.adapters,
-    packageResolution.adapters,
-    normalizedConfig.adapterPackages,
-  );
-  const initialEntries = resolveProjectEntries(normalizedConfig);
   const sessionObserve = normalizeObserveConfig(
     options.observe,
     options.observeLimit,
   );
 
-  const client = new EngineClient();
   let openIoMetrics: EngineCallIoMetrics | undefined;
   const openStart = performance.now();
-  let openResult: EngineOpenResult;
-  let openDurationMs: number;
-  let initialFileOrigins: readonly SourceFileOrigin[];
-  try {
-    const openRpcOptions: RpcRequestOptions | undefined =
-      sessionObserve.mode !== "off"
+  const tssaeSession: ProjectSession = await invokeProjectQuery(() =>
+    openProject({
+      cwd: absCwd,
+      ...(normalizedConfig.tsconfig !== undefined
+        ? { tsconfig: normalizedConfig.tsconfig }
+        : {}),
+      ...(normalizedConfig.projects !== undefined
+        ? { projects: normalizedConfig.projects }
+        : {}),
+      models: normalizedConfig.models,
+      adapters: [
+        ...normalizedConfig.adapters,
+        ...normalizedConfig.adapterPackages,
+      ],
+      additionalInputs: normalizedConfig.additionalInputs,
+      adapterResolutionRoot,
+      ...(sessionObserve.mode !== "off"
         ? {
-            observe: {
-              mode: sessionObserve.mode,
-              ...(sessionObserve.limit?.maxItems !== undefined
-                ? { maxItems: sessionObserve.limit.maxItems }
-                : {}),
-              ...(sessionObserve.limit?.maxBytes !== undefined
-                ? { maxBytes: sessionObserve.limit.maxBytes }
-                : {}),
-            },
-            onMetrics: (io) => {
+            observe: sessionObserve,
+            onRpcMetrics: (io: EngineCallIoMetrics) => {
               openIoMetrics = io;
             },
           }
-        : undefined;
-    openResult = await client.request<EngineOpenResult>(
-      "snapshot.open",
-      {
-        cwd: absCwd,
-        entries: initialEntries,
-        nativeAdapters: packageResolution.nativeAdapters,
-      },
-      openRpcOptions,
-    );
-    openDurationMs = performance.now() - openStart;
-    initialFileOrigins = buildFileOrigins(openResult.projects);
-  } catch (err) {
-    await client.close();
-    throw err;
-  }
+        : {}),
+    }),
+  );
+  const openDurationMs = performance.now() - openStart;
 
-  const sessionToken = Symbol("verule-session");
-  let currentSnapshotId = openResult.snapshotId;
-  let currentSnapshotDigest = openResult.snapshotDigest;
-  let currentProjects = openResult.projects;
   const workspaceFileState: SessionWorkspaceFileState = {
-    files: openResult.workspaceSourceFiles,
+    files: tssaeSession.workspaceSourceFiles,
   };
-  let currentNativeAdapters = openResult.nativeAdapters;
-  let currentFileOrigins = initialFileOrigins;
-  let lastEngineRssBytes = openResult.engineRssBytes;
   let closed = false;
   let pendingOpenIoMetrics = openIoMetrics;
   let pendingOpenDurationMs = openDurationMs;
   let pendingConfigLoadMs = options.configLoadMs ?? 0;
-
-  const syntaxCache = new Map<string, Promise<readonly SyntaxNodeResult[]>>();
-  const typeCache = new Map<
-    string,
-    Promise<{ readonly result: TypeAtResult; readonly gaps: readonly Gap[] }>
-  >();
-  const branchListCache = new Map<string, Promise<FunctionBranchesResult>>();
-  const callsValuesCache = createCallsValuesCache();
-  const callEffectsCache = createCallEffectsCache();
-  const instanceCache = createInstanceIdentityCache();
-  const packageImplCache = createPackageImplCache();
-  const factCache = new FactCache();
-  const syntaxLocations = new WeakMap<SyntaxRef, DiagnosticLocation>();
-  let cachedDirectives:
-    | {
-        readonly snapshotId: number;
-        readonly promise: Promise<readonly EngineDirectiveItem[]>;
-      }
-    | undefined;
-
-  function scanDirectives(
-    snapshotId: number,
-    collector: ObservationCollector,
-  ): Promise<readonly EngineDirectiveItem[]> {
-    if (cachedDirectives?.snapshotId === snapshotId) {
-      return cachedDirectives.promise;
-    }
-    const promise = client
-      .request<EngineDirectivesScanResult>(
-        "directives.scan",
-        { snapshotId },
-        buildRpcOptions(collector),
-      )
-      .then((res) => res.directives);
-    cachedDirectives = { snapshotId, promise };
-    return promise;
-  }
 
   const explicitRegistrations: {
     readonly filePath: string;
@@ -968,6 +534,20 @@ export async function openSession(
     readonly filePath: string;
     readonly source: AdditionalInputSource;
   }[] = [];
+
+  function syncNonConfigEntries(
+    registry: ReturnType<typeof createAdditionalInputRegistry>,
+    entries: readonly AdditionalInputEntry[],
+  ): void {
+    for (const entry of entries) {
+      const targetPath = resolve(canonicalCwd, entry.file);
+      for (const source of entry.sources) {
+        if (source.kind !== "config") {
+          registry.registerAdditionalInput(targetPath, source);
+        }
+      }
+    }
+  }
 
   function buildSessionRegistry(
     configInputs: readonly string[],
@@ -979,6 +559,7 @@ export async function openSession(
       readonly filePath: string;
       readonly source: AdditionalInputSource;
     }[],
+    tssaeEntries: readonly AdditionalInputEntry[],
   ) {
     const registry = createAdditionalInputRegistry({ cwd: absCwd });
     for (const filePath of configInputs) {
@@ -990,6 +571,7 @@ export async function openSession(
     for (const item of dynamic) {
       registry.registerAdditionalInput(item.filePath, item.source);
     }
+    syncNonConfigEntries(registry, tssaeEntries);
     return registry;
   }
 
@@ -997,6 +579,7 @@ export async function openSession(
     normalizedConfig.additionalInputs,
     explicitRegistrations,
     lastRuleRegistrations,
+    tssaeSession.additionalInputs,
   );
 
   function assertOpen(): void {
@@ -1010,15 +593,12 @@ export async function openSession(
 
   function createRuleContext(
     ruleId: string,
-    project: ProjectSummary,
-    models: readonly Model[],
+    projectCtx: ProjectContext,
+    activeSnapshotId: number,
     collected: CollectedDiagnostic[],
-    collectedGaps: Gap[],
     collector: ObservationCollector,
-    recordRuleEngineMs: (ms: number) => void,
     additionalInputRegistrar: AdditionalInputRegistrar,
   ): RuleContext {
-    const activeSnapshotId = currentSnapshotId;
     const scopedAdditionalInputs = createScopedAdditionalInputRegistrar(
       additionalInputRegistrar,
       { kind: "rule", id: ruleId },
@@ -1026,956 +606,59 @@ export async function openSession(
 
     const assertActiveSnapshot = (): void => {
       assertOpen();
-      if (activeSnapshotId !== currentSnapshotId) {
+      if (activeSnapshotId !== tssaeSession.snapshotId) {
         throw new VeruleExecutionError(
           "STALE_SNAPSHOT",
-          `Snapshot ${String(activeSnapshotId)} has been superseded by snapshot ${String(currentSnapshotId)}.`,
+          `Snapshot ${String(activeSnapshotId)} has been superseded by snapshot ${String(tssaeSession.snapshotId)}.`,
         );
       }
-    };
-
-    const recordGaps = (gaps: readonly Gap[]): void => {
-      for (const gap of gaps) {
-        collectedGaps.push(gap);
-      }
-      collector.recordRuleGaps(ruleId, gaps);
-    };
-
-    const projectionQueries = createProjectionQueries({
-      client,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (op, candidateCount, durationMs) => {
-              collector.addEngineQueryMs(durationMs);
-              recordRuleEngineMs(durationMs);
-              collector.recordQuery({
-                ruleId,
-                op,
-                projectId: project.projectId,
-                provider: "engine",
-                cacheStatus: "computed",
-                candidateCount,
-                durationMs,
-                summary: `${op} -> ${candidateCount} item(s)`,
-              });
-            },
-          }
-        : {}),
-    });
-
-    const callsValuesQueries = createCallsValuesQueries({
-      client,
-      cache: callsValuesCache,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      cwd: absCwd,
-      sourceFiles: project.sourceFiles,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-              collector.recordQuery({
-                ruleId,
-                op,
-                projectId: project.projectId,
-                provider: "engine",
-                cacheStatus,
-                candidateCount,
-                durationMs,
-                summary: `${op} -> ${candidateCount} item(s)`,
-              });
-            },
-          }
-        : {}),
-    });
-
-    const instanceQueries = createInstanceIdentityQueries({
-      client,
-      cache: instanceCache,
-      models,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      cwd: absCwd,
-      sourceFiles: project.sourceFiles,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-              collector.recordQuery({
-                ruleId,
-                op,
-                projectId: project.projectId,
-                provider: "engine",
-                cacheStatus,
-                candidateCount,
-                durationMs,
-                summary: `${op} -> ${candidateCount} item(s)`,
-              });
-            },
-          }
-        : {}),
-    });
-
-    const callEffectsQueries = createCallEffectsQueries({
-      client,
-      cache: callEffectsCache,
-      models,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      cwd: absCwd,
-      sourceFiles: project.sourceFiles,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      resolveSyntaxLocation: (ref) => syntaxLocations.get(ref as SyntaxRef),
-      syntaxLocations,
-      ...(collector.isExplainEnabled()
-        ? {
-            onCleanupCovered: ({ targetLocations, paths }) => {
-              collector.recordCleanupPaths({
-                ruleId,
-                targetLocations,
-                paths,
-              });
-            },
-          }
-        : {}),
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-              collector.recordQuery({
-                ruleId,
-                op,
-                projectId: project.projectId,
-                provider: "engine",
-                cacheStatus,
-                candidateCount,
-                durationMs,
-                summary: `${op} -> ${candidateCount} item(s)`,
-              });
-            },
-          }
-        : {}),
-    });
-
-    const adapterCallEffectsQueries = createCallEffectsQueries({
-      client,
-      cache: callEffectsCache,
-      models,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      cwd: absCwd,
-      sourceFiles: project.sourceFiles,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (
-              _op,
-              cacheStatus,
-              _candidateCount,
-              durationMs,
-            ) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-            },
-          }
-        : {}),
-    });
-
-    const adapterCallsValuesQueries = createCallsValuesQueries({
-      client,
-      cache: callsValuesCache,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      cwd: absCwd,
-      sourceFiles: project.sourceFiles,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (
-              _op,
-              cacheStatus,
-              _candidateCount,
-              durationMs,
-            ) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-            },
-          }
-        : {}),
-    });
-
-    const packageImplQueries = createPackageImplQueries({
-      client,
-      cache: packageImplCache,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (op, cacheStatus, candidateCount, durationMs) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-              collector.recordQuery({
-                ruleId,
-                op,
-                projectId: project.projectId,
-                provider: "engine",
-                cacheStatus,
-                candidateCount,
-                durationMs,
-                summary: `${op} -> ${candidateCount} item(s)`,
-              });
-            },
-          }
-        : {}),
-    });
-
-    const adapterPackageImplQueries = createPackageImplQueries({
-      client,
-      cache: packageImplCache,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (
-              _op,
-              cacheStatus,
-              _candidateCount,
-              durationMs,
-            ) => {
-              if (cacheStatus === "computed") {
-                collector.addEngineQueryMs(durationMs);
-                recordRuleEngineMs(durationMs);
-              }
-            },
-          }
-        : {}),
-    });
-
-    const runFindSyntax = async (
-      query: FindSyntaxOptions,
-      recordRuleQuery: boolean,
-    ): Promise<readonly SyntaxNodeResult[]> => {
-      assertActiveSnapshot();
-      const cacheKey = JSON.stringify([
-        activeSnapshotId,
-        project.projectId,
-        query.kinds ? query.kinds.toSorted() : null,
-        query.files ? query.files.toSorted() : null,
-        query.range ?? null,
-        query.textIncludes ? query.textIncludes.toSorted() : null,
-        query.calleeNames ? query.calleeNames.toSorted() : null,
-      ]);
-      const cached = syntaxCache.get(cacheKey);
-      const queryStart = collector.isActive() ? performance.now() : 0;
-
-      let items: readonly SyntaxNodeResult[];
-      let cacheStatus: "computed" | "reused";
-      if (cached) {
-        cacheStatus = "reused";
-        items = await cached;
-      } else {
-        cacheStatus = "computed";
-        const promise = client
-          .request<EngineBatchResult>(
-            "query.batch",
-            {
-              snapshotId: activeSnapshotId,
-              projectId: project.projectId,
-              steps: [
-                {
-                  op: "findSyntax",
-                  ...(query.kinds !== undefined ? { kinds: query.kinds } : {}),
-                  ...(query.files !== undefined ? { files: query.files } : {}),
-                  ...(query.range !== undefined ? { range: query.range } : {}),
-                  ...(query.textIncludes !== undefined
-                    ? { textIncludes: query.textIncludes }
-                    : {}),
-                  ...(query.calleeNames !== undefined
-                    ? { calleeNames: query.calleeNames }
-                    : {}),
-                },
-              ],
-            },
-            buildRpcOptions(collector),
-          )
-          .then((batch) => {
-            const rawItems = (batch.results[0]?.items ??
-              []) as readonly EngineSyntaxItem[];
-            return rawItems.map((item) =>
-              toSyntaxNodeResult(
-                item,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
-                syntaxLocations,
-              ),
-            );
-          });
-
-        syntaxCache.set(cacheKey, promise);
-        items = await promise;
-      }
-
-      if (collector.isActive()) {
-        const durationMs = performance.now() - queryStart;
-        if (cacheStatus === "computed") {
-          collector.addEngineQueryMs(durationMs);
-          recordRuleEngineMs(durationMs);
-        }
-        if (recordRuleQuery) {
-          const matchedLocations = collector.explainTarget
-            ? items
-                .filter((item) =>
-                  locationMatchesTarget(
-                    item.location,
-                    collector.explainTarget!,
-                  ),
-                )
-                .map((item) => item.location)
-            : undefined;
-          const kindsLabel = query.kinds ? query.kinds.join(", ") : "range";
-          collector.recordQuery({
-            ruleId,
-            op: "findSyntax",
-            projectId: project.projectId,
-            provider: "engine",
-            cacheStatus,
-            candidateCount: items.length,
-            durationMs,
-            summary: `findSyntax(${kindsLabel}) -> ${items.length} candidate(s)`,
-            ...(matchedLocations !== undefined ? { matchedLocations } : {}),
-            ...(collector.mode === "detail" || collector.isExplainEnabled()
-              ? {
-                  detail: {
-                    ...(query.kinds !== undefined
-                      ? { kinds: query.kinds }
-                      : {}),
-                    ...(query.files !== undefined
-                      ? { files: query.files }
-                      : {}),
-                    ...(query.range !== undefined
-                      ? { range: query.range }
-                      : {}),
-                    ...(query.textIncludes !== undefined
-                      ? { textIncludes: query.textIncludes }
-                      : {}),
-                    ...(query.calleeNames !== undefined
-                      ? { calleeNames: query.calleeNames }
-                      : {}),
-                  },
-                }
-              : {}),
-          });
-        }
-      }
-
-      return items;
-    };
-
-    const runTypeAt = async (
-      targets: readonly SyntaxRef[],
-      recordRuleQuery: boolean,
-    ): Promise<readonly TypeAtResult[]> => {
-      assertActiveSnapshot();
-      if (targets.length === 0) return [];
-      validateProgramRefs(
-        targets,
-        sessionToken,
-        activeSnapshotId,
-        project.projectId,
-      );
-
-      const missingTargets: SyntaxRef[] = [];
-      for (const target of targets) {
-        const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-        if (!typeCache.has(key)) {
-          missingTargets.push(target);
-        }
-      }
-
-      const queryStart = collector.isActive() ? performance.now() : 0;
-      const cacheStatus: "computed" | "reused" =
-        missingTargets.length > 0 ? "computed" : "reused";
-
-      if (missingTargets.length > 0) {
-        const batchPromise = client.request<EngineBatchResult>(
-          "query.batch",
-          {
-            snapshotId: activeSnapshotId,
-            projectId: project.projectId,
-            steps: [
-              {
-                op: "typeAtLocation",
-                targets: missingTargets.map((target) => target.handleId),
-              },
-            ],
-          },
-          buildRpcOptions(collector),
-        );
-
-        for (const [index, target] of missingTargets.entries()) {
-          const key = `${activeSnapshotId}:${project.projectId}:${target.handleId}`;
-          const itemPromise = batchPromise.then((batch) => {
-            const items = (batch.results[0]?.items ??
-              []) as readonly EngineTypeItem[];
-            const raw = items[index];
-            if (!raw) {
-              throw new VeruleExecutionError(
-                "ENGINE_ERROR",
-                `Engine omitted type result for target "${target.handleId}".`,
-              );
-            }
-            return {
-              result: toTypeAtResult(
-                raw,
-                target,
-                sessionToken,
-                project.projectId,
-                activeSnapshotId,
-              ),
-              gaps: raw.gaps ?? [],
-            };
-          });
-          typeCache.set(key, itemPromise);
-        }
-      }
-
-      const cachedEntries = await Promise.all(
-        targets.map((target) =>
-          typeCache.get(
-            `${activeSnapshotId}:${project.projectId}:${target.handleId}`,
-          )!,
-        ),
-      );
-      for (const entry of cachedEntries) {
-        if (entry.gaps.length > 0) {
-          recordGaps(entry.gaps);
-        }
-      }
-      const results = cachedEntries.map((entry) => entry.result);
-
-      if (collector.isActive()) {
-        const durationMs = performance.now() - queryStart;
-        if (cacheStatus === "computed") {
-          collector.addEngineQueryMs(durationMs);
-          recordRuleEngineMs(durationMs);
-        }
-        if (recordRuleQuery) {
-          const matchedLocations: DiagnosticLocation[] = [];
-          const matchedTypeTexts: string[] = [];
-          if (collector.explainTarget) {
-            for (const item of results) {
-              const loc = syntaxLocations.get(item.target);
-              if (
-                loc &&
-                (locationMatchesTarget(loc, collector.explainTarget) ||
-                  collector.hasMatchingCandidateOverlapping(ruleId, loc))
-              ) {
-                matchedLocations.push(loc);
-                matchedTypeTexts.push(item.typeText);
-              }
-            }
-          }
-          collector.recordQuery({
-            ruleId,
-            op: "typeAtLocation",
-            projectId: project.projectId,
-            provider: "engine",
-            cacheStatus,
-            candidateCount: results.length,
-            durationMs,
-            summary: `typeAtLocation(${targets.length} target(s))`,
-            ...(collector.explainTarget !== undefined
-              ? { matchedLocations }
-              : {}),
-            ...(matchedTypeTexts.length > 0
-              ? { detail: { matchedTypes: matchedTypeTexts } }
-              : {}),
-          });
-        }
-      }
-
-      return results;
-    };
-
-    const runListBranches = async (
-      functions: readonly SyntaxRef[],
-      recordRuleQuery: boolean,
-    ): Promise<readonly FunctionBranchesResult[]> => {
-      assertActiveSnapshot();
-      if (functions.length === 0) return [];
-
-      for (const fnRef of functions) {
-        assertValidProgramRef(
-          fnRef,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
-        );
-      }
-
-      const queryStart = collector.isActive() ? performance.now() : 0;
-      const missingFunctions: SyntaxRef[] = [];
-      for (const fnRef of functions) {
-        const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
-        if (!branchListCache.has(key)) {
-          missingFunctions.push(fnRef);
-        }
-      }
-      const cacheStatus: "computed" | "reused" =
-        missingFunctions.length > 0 ? "computed" : "reused";
-
-      if (missingFunctions.length > 0) {
-        const batchPromise = client.request<EngineBatchResult>(
-          "query.batch",
-          {
-            snapshotId: activeSnapshotId,
-            projectId: project.projectId,
-            steps: [
-              {
-                op: "listBranches",
-                targets: missingFunctions.map((fnRef) => fnRef.handleId),
-              },
-            ],
-          },
-          buildRpcOptions(collector),
-        );
-
-        for (const [index, fnRef] of missingFunctions.entries()) {
-          const key = `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`;
-          const itemPromise = batchPromise.then((batch) => {
-            const items = (batch.results[0]?.items ??
-              []) as readonly EngineFunctionBranchesItem[];
-            const raw = items[index];
-            if (!raw) {
-              throw new VeruleExecutionError(
-                "ENGINE_ERROR",
-                `Engine omitted branch list for function "${fnRef.handleId}".`,
-              );
-            }
-            const mapped = toFunctionBranchesResult(
-              raw,
-              fnRef,
-              sessionToken,
-              project.projectId,
-              activeSnapshotId,
-            );
-            for (const branch of mapped.branches) {
-              syntaxLocations.set(branch.condition, branch.location);
-            }
-            return mapped;
-          });
-          branchListCache.set(key, itemPromise);
-        }
-      }
-
-      const results = await Promise.all(
-        functions.map((fnRef) =>
-          branchListCache.get(
-            `${activeSnapshotId}:${project.projectId}:${fnRef.handleId}`,
-          )!,
-        ),
-      );
-
-      if (collector.isActive()) {
-        const durationMs = performance.now() - queryStart;
-        if (cacheStatus === "computed") {
-          collector.addEngineQueryMs(durationMs);
-          recordRuleEngineMs(durationMs);
-        }
-        if (recordRuleQuery) {
-          collector.recordQuery({
-            ruleId,
-            op: "listBranches",
-            projectId: project.projectId,
-            provider: "engine",
-            cacheStatus,
-            candidateCount: results.reduce(
-              (total, item) => total + item.branches.length,
-              0,
-            ),
-            durationMs,
-            summary: `listBranches(${functions.length} function(s))`,
-          });
-        }
-      }
-
-      return results;
-    };
-
-    const runBranchCoverage = async (
-      query: BranchCoverageOptions,
-      recordRuleQuery: boolean,
-    ): Promise<readonly BranchCoverageItem[]> => {
-      assertActiveSnapshot();
-      if (query.function !== undefined && query.scope !== undefined) {
-        throw new VeruleExecutionError(
-          "INVALID_CONFIG",
-          'branchCoverage accepts either "function" or "scope", not both.',
-        );
-      }
-      if (query.function !== undefined) {
-        assertValidProgramRef(
-          query.function,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
-        );
-      }
-      if (query.scope !== undefined) {
-        assertValidProgramRef(
-          query.scope,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
-        );
-      }
-      for (const branchRef of query.branches) {
-        assertValidProgramRef(
-          branchRef,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
-        );
-      }
-      for (const targetRef of query.targets) {
-        assertValidProgramRef(
-          targetRef,
-          sessionToken,
-          activeSnapshotId,
-          project.projectId,
-        );
-      }
-      if (query.targets.length === 0) return [];
-
-      const queryStart = collector.isActive() ? performance.now() : 0;
-      const batch = await client.request<EngineBatchResult>(
-        "query.batch",
-        {
-          snapshotId: activeSnapshotId,
-          projectId: project.projectId,
-          steps: [
-            {
-              op: "branchCoverage",
-              ...(query.function !== undefined
-                ? { function: query.function.handleId }
-                : {}),
-              ...(query.scope !== undefined
-                ? { scope: query.scope.handleId }
-                : {}),
-              branches: query.branches.map((branch) => branch.handleId),
-              targets: query.targets.map((target) => target.handleId),
-            },
-          ],
-        },
-        buildRpcOptions(collector),
-      );
-
-      const rawItems = (batch.results[0]?.items ??
-        []) as readonly EngineBranchCoverageItem[];
-      const results: BranchCoverageItem[] = [];
-      for (const [index, targetRef] of query.targets.entries()) {
-        const raw = rawItems[index];
-        if (!raw) {
-          throw new VeruleExecutionError(
-            "ENGINE_ERROR",
-            `Engine omitted branchCoverage result for target "${targetRef.handleId}".`,
-          );
-        }
-        const mapped = toBranchCoverageItem(raw, targetRef);
-        if (recordRuleQuery) {
-          recordGaps(mapped.gaps);
-        } else {
-          collectedGaps.push(...mapped.gaps);
-        }
-        results.push(mapped);
-      }
-
-      if (collector.isActive()) {
-        const durationMs = performance.now() - queryStart;
-        collector.addEngineQueryMs(durationMs);
-        recordRuleEngineMs(durationMs);
-        if (recordRuleQuery) {
-          collector.recordQuery({
-            ruleId,
-            op: "branchCoverage",
-            projectId: project.projectId,
-            provider: "engine",
-            cacheStatus: "computed",
-            candidateCount: results.length,
-            durationMs,
-            summary: `branchCoverage(${query.branches.length} branch(es), ${query.targets.length} target(s))`,
-          });
-        }
-      }
-
-      return results;
-    };
-
-    const adapterProjectionQueries = createProjectionQueries({
-      client,
-      sessionToken,
-      snapshotId: activeSnapshotId,
-      projectId: project.projectId,
-      assertOpen: assertActiveSnapshot,
-      recordGaps,
-      getRpcOptions: () => buildRpcOptions(collector),
-      ...(collector.isActive()
-        ? {
-            onQueryCompleted: (_op, _candidateCount, durationMs) => {
-              collector.addEngineQueryMs(durationMs);
-              recordRuleEngineMs(durationMs);
-            },
-          }
-        : {}),
-    });
-
-    const createAdapterContext = (
-      adapterId: string,
-      onAdditionalInput: (filePath: string, sourceAdapterId?: string) => void,
-      facts: RuleContext["facts"],
-      onEngineSubQuery: (trace: EngineNativeSubQueryTrace) => void,
-    ): AdapterContext => {
-      const scopedAdapterInputs = createScopedAdditionalInputRegistrar(
-        additionalInputRegistrar,
-        { kind: "adapter", id: adapterId },
-      );
-      return {
-        project,
-        models,
-        getModel: (id: string) => models.find((model) => model.id === id),
-        ...adapterProjectionQueries,
-        ...adapterCallsValuesQueries,
-        ...adapterPackageImplQueries,
-        ...adapterCallEffectsQueries,
-        facts,
-        findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, false),
-        typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, false),
-        listBranches: (functions: readonly SyntaxRef[]) =>
-          runListBranches(functions, false),
-        branchCoverage: (query: BranchCoverageOptions) =>
-          runBranchCoverage(query, false),
-        extractEngineFacts: async <
-          SubjectKind extends ProgramObjectKind,
-          Condition = unknown,
-          Value = unknown,
-        >(
-          extractOptions: EngineFactExtractionOptions<SubjectKind, Condition>,
-        ): Promise<readonly FactContribution<SubjectKind, Value>[]> => {
-          assertActiveSnapshot();
-          if (extractOptions.targets !== undefined) {
-            if (extractOptions.targets.length === 0) {
-              return [];
-            }
-            validateProgramRefs(
-              extractOptions.targets,
-              sessionToken,
-              activeSnapshotId,
-              project.projectId,
-            );
-          }
-
-          const explainMode =
-            extractOptions.explain ?? collector.isExplainEnabled();
-          const queryStart = collector.isActive() ? performance.now() : 0;
-          const batch = await client.request<EngineBatchResult>(
-            "query.batch",
-            {
-              snapshotId: activeSnapshotId,
-              projectId: project.projectId,
-              steps: [
-                {
-                  op: "extractFacts",
-                  factTypeId: extractOptions.factTypeId,
-                  providerId: extractOptions.providerId,
-                  ...(extractOptions.reportProviderId !== undefined
-                    ? { reportProviderId: extractOptions.reportProviderId }
-                    : {}),
-                  ...(extractOptions.targets !== undefined
-                    ? {
-                        targets: extractOptions.targets.map(
-                          (target) => target.handleId,
-                        ),
-                      }
-                    : {}),
-                  ...(extractOptions.condition !== undefined
-                    ? { condition: extractOptions.condition }
-                    : {}),
-                  ...(explainMode ? { explain: true } : {}),
-                },
-              ],
-            },
-            buildRpcOptions(collector),
-          );
-
-          if (collector.isActive()) {
-            const durationMs = performance.now() - queryStart;
-            collector.addEngineQueryMs(durationMs);
-            recordRuleEngineMs(durationMs);
-          }
-
-          const rawItems = (batch.results[0]?.items ?? []) as readonly {
-            readonly subject: string;
-            readonly subjectLocation?: DiagnosticLocation;
-            readonly value: Value;
-            readonly evidence?: readonly Evidence[];
-            readonly gaps?: readonly Gap[];
-            readonly explainTrace?: FactExplainTrace;
-          }[];
-          const additionalInputs = batch.results[0]?.additionalInputs ?? [];
-          const adapterInputs = batch.results[0]?.adapterInputs ?? [];
-          const attributedPaths = new Set<string>();
-          for (const entry of adapterInputs) {
-            const attributedId =
-              entry.adapterId === extractOptions.providerId
-                ? (extractOptions.reportProviderId ?? entry.adapterId)
-                : entry.adapterId;
-            attributedPaths.add(entry.path);
-            onAdditionalInput(entry.path, attributedId);
-            additionalInputRegistrar.registerAdditionalInput(entry.path, {
-              kind: "adapter",
-              id: attributedId,
-            });
-          }
-          for (const filePath of additionalInputs) {
-            if (!attributedPaths.has(filePath)) {
-              onAdditionalInput(filePath);
-              scopedAdapterInputs.registerAdditionalInput(filePath);
-            }
-          }
-          for (const subQuery of batch.results[0]?.subQueries ?? []) {
-            onEngineSubQuery(subQuery);
-          }
-
-          return rawItems.map((item) => {
-            const ref = makeProgramRef(
-              "syntax",
-              sessionToken,
-              project.projectId,
-              activeSnapshotId,
-              item.subject,
-            );
-            if (item.subjectLocation !== undefined) {
-              syntaxLocations.set(ref, item.subjectLocation);
-            }
-            return {
-              subject: ref as unknown as ProgramRef<SubjectKind>,
-              value: item.value,
-              ...(item.evidence !== undefined
-                ? { evidence: item.evidence }
-                : {}),
-              ...(item.gaps !== undefined ? { gaps: item.gaps } : {}),
-              ...(item.explainTrace !== undefined
-                ? { explainTrace: item.explainTrace }
-                : {}),
-            };
-          });
-        },
-        registerAdditionalInput: (filePath: string) => {
-          assertActiveSnapshot();
-          onAdditionalInput(filePath);
-          return scopedAdapterInputs.registerAdditionalInput(filePath);
-        },
-        readAdditionalInput: (filePath: string) => {
-          assertActiveSnapshot();
-          onAdditionalInput(filePath);
-          return scopedAdapterInputs.readAdditionalInput(filePath);
-        },
-      };
-    };
-
-    const replayAdapterAdditionalInput = (
-      adapterId: string,
-      filePath: string,
-    ): void => {
-      assertActiveSnapshot();
-      additionalInputRegistrar.registerAdditionalInput(filePath, {
-        kind: "adapter",
-        id: adapterId,
-      });
     };
 
     return {
-      project,
-      models,
-      getModel: (id: string) => models.find((model) => model.id === id),
-      ...projectionQueries,
-      ...callsValuesQueries,
-      ...callEffectsQueries,
-      ...instanceQueries,
-      ...packageImplQueries,
-      findSyntax: (query: FindSyntaxOptions) => runFindSyntax(query, true),
-      typeAt: (targets: readonly SyntaxRef[]) => runTypeAt(targets, true),
-      facts: <SubjectKind extends ProgramObjectKind, Condition, Value>(
-        factType: FactType<SubjectKind, Condition, Value>,
-        factOptions?: FactQueryOptions<SubjectKind, Condition>,
-      ) =>
-        executeFactQuery({
-          factType,
-          options: factOptions,
-          adapters: activeAdapters,
-          factCache,
-          sessionToken,
-          snapshotId: activeSnapshotId,
-          projectId: project.projectId,
-          ruleId,
-          assertActiveSnapshot,
-          createAdapterContext,
-          replayAdapterAdditionalInput,
-          recordGaps,
-          collector,
-          syntaxLocations,
-        }),
-      listBranches: (functions: readonly SyntaxRef[]) =>
-        runListBranches(functions, true),
-      branchCoverage: (query: BranchCoverageOptions) =>
-        runBranchCoverage(query, true),
+      project: projectCtx.project,
+      models: projectCtx.models,
+      getModel: (id) => projectCtx.getModel(id),
+      findSyntax: (query) =>
+        invokeProjectQuery(() => projectCtx.findSyntax(query)),
+      typeAt: (targets) => invokeProjectQuery(() => projectCtx.typeAt(targets)),
+      listBranches: (functions) =>
+        invokeProjectQuery(() => projectCtx.listBranches(functions)),
+      branchCoverage: (query) =>
+        invokeProjectQuery(() => projectCtx.branchCoverage(query)),
+      resolveDeclarations: (targets, opts) =>
+        invokeProjectQuery(() => projectCtx.resolveDeclarations(targets, opts)),
+      resolveCalls: (targets, opts) =>
+        invokeProjectQuery(() => projectCtx.resolveCalls(targets, opts)),
+      projectCalls: (calls, opts) =>
+        invokeProjectQuery(() => projectCtx.projectCalls(calls, opts)),
+      projectSignatures: (signatures, opts) =>
+        invokeProjectQuery(() =>
+          projectCtx.projectSignatures(signatures, opts),
+        ),
+      projectTypes: (types, opts) =>
+        invokeProjectQuery(() => projectCtx.projectTypes(types, opts)),
+      isAssignableTo: (pairs) =>
+        invokeProjectQuery(() => projectCtx.isAssignableTo(pairs)),
+      syntaxOf: (targets, opts) =>
+        invokeProjectQuery(() => projectCtx.syntaxOf(targets, opts)),
+      callersOf: (declarations, opts) =>
+        invokeProjectQuery(() => projectCtx.callersOf(declarations, opts)),
+      calleesOf: (calls) =>
+        invokeProjectQuery(() => projectCtx.calleesOf(calls)),
+      resolveImplementations: (targets) =>
+        invokeProjectQuery(() => projectCtx.resolveImplementations(targets)),
+      valuePropagation: (opts) =>
+        invokeProjectQuery(() => projectCtx.valuePropagation(opts)),
+      resolveInstances: (targets, opts) =>
+        invokeProjectQuery(() => projectCtx.resolveInstances(targets, opts)),
+      projectInstances: (instances, opts) =>
+        invokeProjectQuery(() => projectCtx.projectInstances(instances, opts)),
+      callEffects: (opts) =>
+        invokeProjectQuery(() => projectCtx.callEffects(opts)),
+      instanceCleanup: (opts) =>
+        invokeProjectQuery(() => projectCtx.instanceCleanup(opts)),
+      facts: (factType, opts) =>
+        invokeProjectQuery(() => projectCtx.facts(factType, opts)),
       registerAdditionalInput: (filePath: string) => {
         assertActiveSnapshot();
         return scopedAdditionalInputs.registerAdditionalInput(filePath);
@@ -1988,7 +671,7 @@ export async function openSession(
         assertActiveSnapshot();
         collected.push({
           ruleId,
-          projectId: project.projectId,
+          projectId: projectCtx.project.projectId,
           at: input.at,
           message: input.message,
           ...(input.findingKey !== undefined
@@ -2008,11 +691,10 @@ export async function openSession(
         }
         collector.recordCheckpoint({
           ruleId,
-          projectId: project.projectId,
+          projectId: projectCtx.project.projectId,
           name,
           outcome,
-          resolveLocation: () =>
-            resolveCheckpointLocation(target, syntaxLocations),
+          resolveLocation: () => resolveCheckpointLocation(target),
           ...(detail !== undefined ? { detailFn: detail } : {}),
         });
       },
@@ -2053,16 +735,32 @@ export async function openSession(
     const openMs = pendingOpenDurationMs;
     pendingOpenDurationMs = 0;
 
+    const configuredAdaptersById = new Map<
+      string,
+      { readonly id: string; readonly factTypeIds: readonly string[] }
+    >();
+    for (const adapter of normalizedConfig.adapters) {
+      configuredAdaptersById.set(adapter.id, {
+        id: adapter.id,
+        factTypeIds: adapter.provides.map((provider) => provider.factType.id),
+      });
+    }
+    for (const native of tssaeSession.nativeAdapters) {
+      if (!configuredAdaptersById.has(native.providerId)) {
+        configuredAdaptersById.set(native.providerId, {
+          id: native.providerId,
+          factTypeIds: [],
+        });
+      }
+    }
+
     const collector = new ObservationCollector({
       mode: effectiveObserve.mode,
       ...(effectiveObserve.limit !== undefined
         ? { limit: effectiveObserve.limit }
         : {}),
-      nativeAdapters: currentNativeAdapters,
-      configuredAdapters: activeAdapters.map((adapter) => ({
-        id: adapter.id,
-        factTypeIds: adapter.provides.map((provider) => provider.factType.id),
-      })),
+      nativeAdapters: tssaeSession.nativeAdapters,
+      configuredAdapters: [...configuredAdaptersById.values()],
       ...(explainTarget !== undefined ? { explainTarget } : {}),
       configAndOpenMs: configLoadMs + openMs,
     });
@@ -2077,6 +775,7 @@ export async function openSession(
     const runRegistry = buildSessionRegistry(
       normalizedConfig.additionalInputs,
       explicitRegistrations,
+      [],
       [],
     );
     const runRuleRegistrations: {
@@ -2099,20 +798,90 @@ export async function openSession(
       getTrackedAbsolutePaths: () => runRegistry.getTrackedAbsolutePaths(),
     };
 
-    for (const project of currentProjects) {
+    const currentSnapshotId = tssaeSession.snapshotId;
+    for (const project of tssaeSession.projects) {
       for (const rule of rules) {
         let ruleEngineMs = 0;
         const ruleStart = collector.isObserveEnabled() ? performance.now() : 0;
+        const observer: QueryObserver = {
+          onGaps: (gaps) => {
+            collectedGaps.push(...gaps);
+            collector.recordRuleGaps(rule.id, gaps);
+          },
+          ...(collector.isObserveEnabled()
+            ? {
+                observe: effectiveObserve,
+                onRpcMetrics: (io) => collector.recordRpcCall(io),
+              }
+            : {}),
+          ...(explainTarget !== undefined ? { explainTarget } : {}),
+          ...(collector.isActive()
+            ? {
+                onQueryCompleted: (event) => {
+                  if (event.cacheStatus === "computed") {
+                    collector.addEngineQueryMs(event.durationMs);
+                    ruleEngineMs += event.durationMs;
+                  }
+                  collector.recordQuery({
+                    ruleId: rule.id,
+                    op: event.op,
+                    projectId: event.projectId,
+                    provider: event.provider,
+                    ...(event.providers !== undefined
+                      ? { providers: event.providers }
+                      : {}),
+                    cacheStatus: event.cacheStatus,
+                    candidateCount: event.candidateCount,
+                    durationMs: event.durationMs,
+                    summary: event.summary,
+                    ...(event.matchedLocations !== undefined
+                      ? { matchedLocations: event.matchedLocations }
+                      : {}),
+                    ...(event.detail !== undefined
+                      ? { detail: event.detail }
+                      : {}),
+                  });
+                },
+              }
+            : {}),
+          ...(collector.isExplainEnabled()
+            ? {
+                onFactExplain: (event) => {
+                  collector.recordFactExplain({
+                    ruleId: rule.id,
+                    ...(event.subjectLocation !== undefined
+                      ? { subjectLocation: event.subjectLocation }
+                      : {}),
+                    gaps: event.gaps,
+                    localGaps: event.localGaps,
+                  });
+                },
+                onProviderEvaluation: (evaluation) => {
+                  collector.recordProviderEvaluation({
+                    ruleId: rule.id,
+                    evaluation,
+                  });
+                },
+                onCleanupCovered: (event) => {
+                  collector.recordCleanupPaths({
+                    ruleId: rule.id,
+                    targetLocations: event.targetLocations,
+                    paths: event.paths,
+                  });
+                },
+              }
+            : {}),
+        };
+
+        const projectCtx = invokeProjectSync(() =>
+          tssaeSession.project(project, { observer }),
+        );
         const ctx = createRuleContext(
           rule.id,
-          project,
-          normalizedConfig.models,
+          projectCtx,
+          currentSnapshotId,
           collected,
-          collectedGaps,
           collector,
-          (ms) => {
-            ruleEngineMs += ms;
-          },
           runRegistrar,
         );
         try {
@@ -2120,6 +889,16 @@ export async function openSession(
         } catch (err) {
           if (err instanceof VeruleExecutionError) {
             throw err;
+          }
+          const mapped = toVeruleError(err, "RULE_EXECUTION_ERROR");
+          if (mapped.code !== "RULE_EXECUTION_ERROR" || err !== mapped.cause) {
+            // Preserve TssaeError codes/details while wrapping generic JS rule throws with rule context.
+            if (
+              err instanceof Error &&
+              (err.name === "TssaeError" || "code" in err)
+            ) {
+              throw mapped;
+            }
           }
           const detail = err instanceof Error ? err.message : String(err);
           throw new VeruleExecutionError(
@@ -2138,14 +917,21 @@ export async function openSession(
       }
     }
 
-    const scannedDirectives = await scanDirectives(
-      currentSnapshotId,
-      collector,
+    const scannedComments = await invokeProjectQuery(() =>
+      tssaeSession.scanComments(
+        collector.isObserveEnabled()
+          ? {
+              observe: effectiveObserve,
+              onRpcMetrics: (io) => collector.recordRpcCall(io),
+            }
+          : undefined,
+      ),
     );
+    const scannedDirectives = parseInlineIgnoreDirectives(scannedComments);
     const settlement = resolveInlineIgnores({
       directives: scannedDirectives,
       collected,
-      projects: currentProjects,
+      projects: tssaeSession.projects,
       configuredRuleIds: new Set(baseRules.map((rule) => rule.id)),
       executedRuleIds: new Set(rules.map((rule) => rule.id)),
       isPartialRuleSelection:
@@ -2154,6 +940,7 @@ export async function openSession(
 
     const diagnostics = buildDiagnostics(settlement.diagnostics);
     const gaps = buildGaps(collectedGaps);
+    syncNonConfigEntries(runRegistry, tssaeSession.additionalInputs);
     const additionalInputs = runRegistry.listAdditionalInputs();
     if (!runOptions?.ruleIds && !runOptions?.rulesOverride) {
       lastRuleRegistrations = runRuleRegistrations;
@@ -2161,14 +948,18 @@ export async function openSession(
         normalizedConfig.additionalInputs,
         explicitRegistrations,
         lastRuleRegistrations,
+        tssaeSession.additionalInputs,
       );
+    } else {
+      syncNonConfigEntries(sessionRegistry, tssaeSession.additionalInputs);
     }
+
     const observation = collector.buildObservationReport();
     const explanations = explainTarget
       ? rules.map((rule) =>
           collector.buildExplainResult({
             ruleId: rule.id,
-            projects: currentProjects,
+            projects: tssaeSession.projects,
             diagnostics,
             suppressions: settlement.suppressions,
           }),
@@ -2178,18 +969,18 @@ export async function openSession(
     return {
       reportVersion: REPORT_SCHEMA_VERSION,
       status: diagnostics.length > 0 ? "findings" : "clean",
-      projects: currentProjects,
-      fileOrigins: currentFileOrigins,
+      projects: tssaeSession.projects,
+      fileOrigins: tssaeSession.fileOrigins,
       additionalInputs,
       diagnostics,
       gaps,
       identity: computeReportIdentity(
-        currentSnapshotDigest,
+        tssaeSession.snapshotDigest,
         resolveProjectEntries(normalizedConfig),
         rules,
         normalizedConfig.models,
         normalizedConfig.additionalInputs,
-        activeAdapters,
+        normalizedConfig.adapters,
         normalizedConfig.adapterPackages,
       ),
       ...(settlement.entries.length > 0
@@ -2207,27 +998,30 @@ export async function openSession(
 
   const analysisSession: AnalysisSession = {
     get snapshotId() {
-      return currentSnapshotId;
+      return tssaeSession.snapshotId;
     },
     get projects() {
-      return currentProjects;
+      return tssaeSession.projects;
     },
     get fileOrigins() {
-      return currentFileOrigins;
+      return tssaeSession.fileOrigins;
     },
     get additionalInputs(): readonly AdditionalInputEntry[] {
       return sessionRegistry.listAdditionalInputs();
     },
     get memory() {
-      return readMemoryStats(lastEngineRssBytes);
+      return tssaeSession.memory;
     },
     registerAdditionalInput: (
       filePath: string,
       source: AdditionalInputSource,
     ) => {
       assertOpen();
+      const entry = invokeProjectSync(() =>
+        tssaeSession.registerAdditionalInput(filePath, source),
+      );
       explicitRegistrations.push({ filePath, source });
-      return sessionRegistry.registerAdditionalInput(filePath, source);
+      return sessionRegistry.registerAdditionalInput(filePath, source) ?? entry;
     },
     check: (optionsOrRules?: readonly Rule[] | SessionCheckOptions) => {
       if (isSessionCheckOptions(optionsOrRules)) {
@@ -2246,93 +1040,93 @@ export async function openSession(
       const nextAdapterResolutionRoot = resolve(
         updateOptions?.adapterResolutionRoot ?? adapterResolutionRoot,
       );
-      const adapterPackagesChanged =
-        nextAdapterResolutionRoot !== adapterResolutionRoot ||
-        stableSerialize(nextConfig.adapterPackages) !==
-          stableSerialize(normalizedConfig.adapterPackages);
-      const nextPackageResolution = adapterPackagesChanged
-        ? await resolveNativeAdapterPackages(
-            nextConfig.adapterPackages,
-            nextAdapterResolutionRoot,
-          )
-        : packageResolution;
-      const nextActiveAdapters = combineConfiguredAdapters(
+      const nextEntries = resolveProjectEntries(nextConfig);
+      const prevIdentity = computeReportIdentity(
+        "",
+        resolveProjectEntries(normalizedConfig),
+        normalizedConfig.rules,
+        normalizedConfig.models,
+        normalizedConfig.additionalInputs,
+        normalizedConfig.adapters,
+        normalizedConfig.adapterPackages,
+      );
+      const nextIdentity = computeReportIdentity(
+        "",
+        nextEntries,
+        nextConfig.rules,
+        nextConfig.models,
+        nextConfig.additionalInputs,
         nextConfig.adapters,
-        nextPackageResolution.adapters,
         nextConfig.adapterPackages,
       );
-      const nativeAdapterSpecsChanged =
-        stableSerialize(nextPackageResolution.nativeAdapters) !==
-        stableSerialize(packageResolution.nativeAdapters);
-      const nextEntries = resolveProjectEntries(nextConfig);
-      const previousSnapshotId = currentSnapshotId;
 
-      const updated = await client.request<EngineUpdateResult>(
-        "snapshot.update",
-        {
-          snapshotId: previousSnapshotId,
-          entries: nextEntries,
-          changed: updateOptions?.changed ?? [],
-          created: updateOptions?.created ?? [],
-          deleted: updateOptions?.deleted ?? [],
-          ...(nativeAdapterSpecsChanged
-            ? { nativeAdapters: nextPackageResolution.nativeAdapters }
+      const tssaeUpdate = await invokeProjectQuery(() =>
+        tssaeSession.update({
+          ...(updateOptions?.changed !== undefined
+            ? { changed: updateOptions.changed }
             : {}),
-        },
+          ...(updateOptions?.created !== undefined
+            ? { created: updateOptions.created }
+            : {}),
+          ...(updateOptions?.deleted !== undefined
+            ? { deleted: updateOptions.deleted }
+            : {}),
+          adapterResolutionRoot: nextAdapterResolutionRoot,
+          entries: nextEntries,
+          models: nextConfig.models,
+          adapters: [...nextConfig.adapters, ...nextConfig.adapterPackages],
+          additionalInputs: nextConfig.additionalInputs,
+        }),
       );
 
-      const invalidatedBy = collectInvalidatedBy(
-        normalizedConfig,
-        nextConfig,
-        updateOptions,
-        changedAdditionalFiles,
-      );
-      const updatedFileOrigins = buildFileOrigins(updated.projects);
+      const invalidatedReasons = [...tssaeUpdate.recomputation.invalidatedBy];
+      const existingReasons = new Set(invalidatedReasons);
+      const changedSet = new Set(updateOptions?.changed ?? []);
+      for (const file of changedAdditionalFiles) {
+        const marker = `additional-input:${file}`;
+        if (!changedSet.has(file) && !existingReasons.has(marker)) {
+          invalidatedReasons.push(marker);
+          existingReasons.add(marker);
+        }
+      }
+      if (
+        stableSerialize(prevIdentity.rules) !==
+          stableSerialize(nextIdentity.rules) &&
+        !existingReasons.has("rules")
+      ) {
+        invalidatedReasons.push("rules");
+        existingReasons.add("rules");
+      }
+      if (
+        updateOptions?.config !== undefined &&
+        invalidatedReasons.length === 0
+      ) {
+        invalidatedReasons.push("config");
+      }
 
       normalizedConfig = nextConfig;
       adapterResolutionRoot = nextAdapterResolutionRoot;
-      packageResolution = nextPackageResolution;
-      activeAdapters = nextActiveAdapters;
-      currentSnapshotId = updated.snapshotId;
-      currentSnapshotDigest = updated.snapshotDigest;
-      currentProjects = updated.projects;
-      workspaceFileState.files = updated.workspaceSourceFiles;
-      currentNativeAdapters = updated.nativeAdapters;
-      currentFileOrigins = updatedFileOrigins;
-      lastEngineRssBytes = updated.engineRssBytes;
-      syntaxCache.clear();
-      typeCache.clear();
-      branchListCache.clear();
-      callsValuesCache.clear();
-      callEffectsCache.clear();
-      instanceCache.clear();
-      packageImplCache.clear();
-      factCache.clear();
-      cachedDirectives = undefined;
+      workspaceFileState.files = tssaeUpdate.workspaceSourceFiles;
       sessionRegistry = buildSessionRegistry(
         nextConfig.additionalInputs,
         explicitRegistrations,
         lastRuleRegistrations,
+        tssaeSession.additionalInputs,
       );
-      const updatedAdditionalInputs = sessionRegistry.listAdditionalInputs();
 
       const recomputation: RecomputationScope = {
-        recomputedProjects: updated.recomputedProjects,
-        reusedProjects: updated.reusedProjects,
-        recomputedFiles: updated.recomputedFiles,
-        reusedFiles: updated.reusedFiles,
-        removedFiles: updated.removedFiles,
-        invalidatedBy,
+        ...tssaeUpdate.recomputation,
+        invalidatedBy: invalidatedReasons,
       };
 
       return {
-        previousSnapshotId,
-        snapshotId: updated.snapshotId,
-        projects: updated.projects,
-        fileOrigins: updatedFileOrigins,
-        additionalInputs: updatedAdditionalInputs,
+        previousSnapshotId: tssaeUpdate.previousSnapshotId,
+        snapshotId: tssaeUpdate.snapshotId,
+        projects: tssaeUpdate.projects,
+        fileOrigins: tssaeUpdate.fileOrigins,
+        additionalInputs: sessionRegistry.listAdditionalInputs(),
         recomputation,
-        memory: readMemoryStats(updated.engineRssBytes),
+        memory: tssaeUpdate.memory,
       };
     },
     explain: async (explainOptions: ExplainOptions): Promise<ExplainReport> => {
@@ -2366,24 +1160,7 @@ export async function openSession(
     close: async () => {
       if (closed) return;
       closed = true;
-      syntaxCache.clear();
-      typeCache.clear();
-      branchListCache.clear();
-      callsValuesCache.clear();
-      callEffectsCache.clear();
-      instanceCache.clear();
-      packageImplCache.clear();
-      factCache.clear();
-      cachedDirectives = undefined;
-      try {
-        await client.request("snapshot.release", {
-          snapshotId: currentSnapshotId,
-        });
-      } catch {
-        // Best-effort release before terminating the child process.
-      } finally {
-        await client.close();
-      }
+      await tssaeSession.close();
     },
   };
   sessionWorkspaceFileStates.set(analysisSession, workspaceFileState);

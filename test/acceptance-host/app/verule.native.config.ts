@@ -48,5 +48,5 @@ const nativeFactRule = defineRule({
 export default defineConfig({
   tsconfig: "tsconfig.json",
   rules: [neutralProductReviewRule, nativeFactRule],
-  adapters: ["@verule/adapter-fixture"],
+  adapters: ["@acme/adapter-fixture"],
 });

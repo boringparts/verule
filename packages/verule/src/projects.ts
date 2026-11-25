@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { normalizeEvidence, normalizeLocation } from "./evidence.ts";
 import {
-  VeruleExecutionError,
-  type Diagnostic,
+  normalizeEvidence,
+  normalizeLocation,
   type DiagnosticLocation,
   type Evidence,
   type Gap,
   type ProjectSummary,
   type SourceFileOrigin,
   type SourceFileProjectOrigin,
+} from "tssae";
+
+import {
+  VeruleExecutionError,
+  type Diagnostic,
   type VeruleConfig,
 } from "./types.ts";
 

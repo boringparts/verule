@@ -19,14 +19,14 @@ function createDummyBundle(): PackedArtifactBundle {
     packDir: "/tmp/dummy-pack",
     artifacts: [
       {
-        name: "@verule/engine",
-        version: "0.0.0",
-        filename: "/tmp/dummy-pack/engine.tgz",
+        name: "tssae",
+        version: "0.1.0",
+        filename: "/tmp/dummy-pack/tssae.tgz",
         size: 123,
         sha256: "a".repeat(64),
         sha1: "b".repeat(40),
         integrity: "sha512-dummy",
-        manifest: { name: "@verule/engine", version: "0.0.0" },
+        manifest: { name: "tssae", version: "0.1.0" },
         binarySha256: "c".repeat(64),
       },
     ],

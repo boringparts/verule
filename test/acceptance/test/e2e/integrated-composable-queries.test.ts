@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { dirname } from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 
 import type { CheckReport } from "@boringparts/verule";
 import {
+  buildFixtureAdapterArtifacts,
+  type BuiltFixtureAdapters,
   copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
@@ -18,11 +20,16 @@ const projectionsRelPath = "packages/data/src/drizzle-projections.ts";
 const dataIndexRelPath = "packages/data/src/index.ts";
 const rowProjectionRelPath = "packages/app/src/row-projection.ts";
 
-const providerSessionPackages = [
-  "@verule/adapter-fixture",
-  "@verule/adapter-fixture-complement",
-  "@verule/adapter-drizzle",
-] as const;
+const providerSessionPackages = ["@tssae/adapters"] as const;
+let builtFixtures: BuiltFixtureAdapters;
+
+before(async () => {
+  builtFixtures = await buildFixtureAdapterArtifacts();
+});
+
+after(() => {
+  builtFixtures?.dispose();
+});
 const compositionConfigPath =
   "packages/app/provider-session-overlay/app/verule.provider-session.composition.config.ts";
 const compositionSourceRelPath =
@@ -79,23 +86,18 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: [
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-        "@verule/adapter-fixture",
-        "@verule/rules-reference",
-      ],
+      additionalPackages: ["@tssae/adapters", "@verule/rules-reference"],
+      extraArtifacts: [builtFixtures.fixtureArtifact],
       directPackages: [
         "@boringparts/verule",
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-        "@verule/adapter-fixture",
+        "@tssae/adapters",
+        "@acme/adapter-fixture",
         "@verule/rules-reference",
       ],
       verifyNativeAdapters: [
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-        "@verule/adapter-fixture",
+        "@tssae/adapters/drizzle",
+        "@tssae/adapters/zod",
+        "@acme/adapter-fixture",
       ],
     },
     async (host) => {
@@ -318,7 +320,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       assert.equal(overriddenExp.localGaps.length, 1);
       const resolvedLocal = overriddenExp.localGaps[0]!;
       assert.equal(resolvedLocal.status, "resolved_by_override");
-      assert.equal(resolvedLocal.factTypeId, "verule.validator.schema-fields");
+      assert.equal(resolvedLocal.factTypeId, "tssae.validator.schema-fields");
       assert.equal(resolvedLocal.providerId, "drizzle");
       assert.equal(resolvedLocal.field, "age");
       assert.equal(resolvedLocal.gap.kind, "unresolved-schema-field");
@@ -351,7 +353,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       );
       assert.match(
         caseBExplainText.stdout,
-        /localGap \[resolved_by_override\] verule\.validator\.schema-fields \(drizzle\) field=age/u,
+        /localGap \[resolved_by_override\] tssae\.validator\.schema-fields \(drizzle\) field=age/u,
       );
       assert.match(caseBExplainText.stdout, /resolved_by zod \(\.extend\(\):/u);
       assert.match(
@@ -758,15 +760,10 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: [
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-        "@verule/rules-reference",
-      ],
+      additionalPackages: ["@tssae/adapters", "@verule/rules-reference"],
       directPackages: [
         "@boringparts/verule",
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
+        "@tssae/adapters",
         "@verule/rules-reference",
       ],
     },
@@ -912,6 +909,7 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
     {
       overlay: "provider-session",
       additionalPackages: [...providerSessionPackages],
+      extraArtifacts: builtFixtures.artifacts,
     },
     async (host) => {
       const originalSource = host.readText(compositionSourceRelPath);

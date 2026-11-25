@@ -1,5 +1,5 @@
 import { defineConfig, defineRule } from "@boringparts/verule";
-import { ValidatorOutputFieldsFact } from "@verule/adapter-zod";
+import { ValidatorOutputFieldsFact } from "@tssae/adapters/zod";
 
 const validatorOutputProbeRule = defineRule({
   id: "validator-output-fields-probe",
@@ -28,9 +28,9 @@ const validatorOutputProbeRule = defineRule({
 export default defineConfig({
   tsconfig: "packages/app/tsconfig.json",
   adapters: [
-    "@verule/adapter-drizzle",
-    "@verule/adapter-zod",
-    "@verule/adapter-fixture",
+    "@tssae/adapters/drizzle",
+    "@tssae/adapters/zod",
+    "@acme/adapter-fixture",
   ],
   rules: [validatorOutputProbeRule],
 });

@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
   installPackedWorkspacePackages,
+  linkNodeModulesPackage,
   withTempHost,
 } from "@verule/test-hosts";
 
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const sdkRequire = createRequire(join(sdkRoot, "package.json"));
+const tssaeRoot = dirname(sdkRequire.resolve("tssae/package.json"));
 const tscBin = join(sdkRoot, "node_modules", ".bin", "tsc");
 const validConsumerFixturePath = fileURLToPath(
   new URL("./fixtures/type-contract/valid-consumer.ts", import.meta.url),
@@ -20,6 +24,7 @@ async function prepareExternalConsumer(root: string): Promise<void> {
   await installPackedWorkspacePackages(root, ["@boringparts/verule"], {
     cwd: sdkRoot,
   });
+  linkNodeModulesPackage(root, "tssae", tssaeRoot);
 
   writeFileSync(
     join(root, "tsconfig.json"),

@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@verule/acceptance-host-drizzle-data": "workspace:*",
-    "@verule/adapter-drizzle": "catalog:",
+    "@tssae/adapters": "catalog:",
     "@boringparts/verule": "catalog:"
   },
   "devDependencies": {

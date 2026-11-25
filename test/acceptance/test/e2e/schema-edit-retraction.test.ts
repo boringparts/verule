@@ -10,11 +10,7 @@ void test("edits schema in an isolated host, waits for watch report, and verifie
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: [
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-        "@verule/rules-reference",
-      ],
+      additionalPackages: ["@tssae/adapters", "@verule/rules-reference"],
     },
     async (host) => {
       host.replaceText(

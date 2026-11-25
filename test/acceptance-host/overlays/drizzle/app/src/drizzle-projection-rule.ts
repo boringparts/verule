@@ -2,7 +2,7 @@ import { defineRule, type FactResult } from "@boringparts/verule";
 import {
   QueryRowProjectionFact,
   type QueryRowProjectionFactValue,
-} from "@verule/adapter-drizzle";
+} from "@tssae/adapters/drizzle";
 
 export type DrizzleProjectionResult = FactResult<
   "syntax" | "call" | "declaration",

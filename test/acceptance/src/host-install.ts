@@ -82,8 +82,8 @@ function runAsyncCommand(
 }
 
 /**
- * Installs direct Verule packages from one local artifact batch into an
- * existing workspace or repository.
+ * Installs direct Verule packages (and transitive unscoped `tssae`) from one
+ * local artifact batch into an existing workspace or repository.
  */
 export async function installArtifactPackages(
   options: InstallArtifactPackagesOptions,
@@ -113,14 +113,19 @@ export async function installArtifactPackages(
       isolatedCacheHome = mkdtempSync(join(tmpdir(), "verule-pnpm-cache-"));
     }
 
-    const scopeLines = registry.scopes.map(
-      (scope) => `${scope}:registry=${registry.url}/`,
-    );
+    const npmrcLines: string[] = [];
+    if (registry.unscopedPackages.length > 0) {
+      // Route unscoped packages such as `tssae` through loopback (proxying external deps).
+      npmrcLines.push(`registry=${registry.url}/`);
+    }
+    for (const scope of registry.scopes) {
+      npmrcLines.push(`${scope}:registry=${registry.url}/`);
+    }
     const separator =
       previousNpmrc.length === 0 || previousNpmrc.endsWith("\n") ? "" : "\n";
     writeFileSync(
       npmrcPath,
-      `${previousNpmrc}${separator}${scopeLines.join("\n")}\n`,
+      `${previousNpmrc}${separator}${npmrcLines.join("\n")}\n`,
     );
 
     const commandArgs =

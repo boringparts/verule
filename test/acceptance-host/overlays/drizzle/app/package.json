@@ -16,8 +16,8 @@
   },
   "dependencies": {
     "@boringparts/verule": "catalog:",
-    "@verule/acceptance-host-drizzle-data": "workspace:*",
-    "@verule/adapter-drizzle": "catalog:"
+    "@tssae/adapters": "catalog:",
+    "@verule/acceptance-host-drizzle-data": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

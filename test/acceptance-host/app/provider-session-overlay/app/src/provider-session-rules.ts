@@ -58,7 +58,7 @@ const drizzleProjectionFact = defineFactType<
   { readonly library: "drizzle" },
   DrizzleProjectionValue
 >({
-  id: "verule.query.row-projection",
+  id: "tssae.query.row-projection",
   subjectKind: ["syntax", "call", "declaration"],
 });
 

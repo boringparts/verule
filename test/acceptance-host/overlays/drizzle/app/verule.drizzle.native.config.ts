@@ -5,6 +5,6 @@ import { drizzleTableColumnsRule } from "./src/drizzle-table-columns-rule.ts";
 
 export default defineConfig({
   tsconfig: "tsconfig.json",
-  adapters: ["@verule/adapter-drizzle"],
+  adapters: ["@tssae/adapters/drizzle"],
   rules: [drizzleProjectionRule, drizzleTableColumnsRule],
 });

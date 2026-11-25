@@ -36,8 +36,8 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false && node --conditions=source scripts/typecheck-cli-hosts.ts"
   },
   "dependencies": {
-    "@verule/engine": "workspace:*",
     "@ykdz/cli-contract": "catalog:",
+    "tssae": "0.1.0",
     "zod": "catalog:"
   },
   "devDependencies": {
@@ -46,7 +46,6 @@
     "@verule/tooling-config": "workspace:*",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
-    "tsrs": "catalog:",
     "typescript-7": "catalog:"
   },
   "engines": {

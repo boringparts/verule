@@ -2,7 +2,7 @@ import { defineConfig, defineRule } from "@boringparts/verule";
 import {
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
-} from "@verule/adapter-zod";
+} from "@tssae/adapters/zod";
 
 const zodFactProbe = defineRule({
   id: "zod-native-facts",
@@ -43,6 +43,6 @@ const zodFactProbe = defineRule({
 
 export default defineConfig({
   tsconfig: "tsconfig.json",
-  adapters: ["@verule/adapter-zod"],
+  adapters: ["@tssae/adapters/zod"],
   rules: [zodFactProbe],
 });

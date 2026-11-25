@@ -32,7 +32,6 @@
     "drizzle-zod": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
-    "tsrs": "catalog:",
     "typescript-7": "catalog:",
     "zod": "catalog:"
   },

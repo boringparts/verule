@@ -103,19 +103,22 @@ void test("serves packuments with release age metadata and tarballs over loopbac
   }
 });
 
-void test("resolves transitive @verule dependency from loopback registry in a fake pnpm host with minimumReleaseAge", async () => {
+void test("resolves transitive tssae dependency from loopback registry in a fake pnpm host with minimumReleaseAge", async () => {
   using fixture = mkdtempDisposableSync(join(tmpdir(), "verule-reg-pnpm-"));
-  const engineArtifact = createTestTarball(
-    join(fixture.path, "stage-engine"),
-    join(fixture.path, "verule-engine-0.0.0.tgz"),
+  const tssaeArtifact = createTestTarball(
+    join(fixture.path, "stage-tssae"),
+    join(fixture.path, "tssae-0.1.0.tgz"),
     {
-      name: "@verule/engine",
-      version: "0.0.0",
+      name: "tssae",
+      version: "0.1.0",
       type: "module",
-      exports: { "./binary": "./dist/binary.js" },
+      exports: {
+        ".": "./dist/index.js",
+        "./package.json": "./package.json",
+      },
     },
     {
-      "dist/binary.js": "export const engineExecutablePath = 'fake-engine';\n",
+      "dist/index.js": "export const engineExecutablePath = 'fake-engine';\n",
     },
   );
   const veruleArtifact = createTestTarball(
@@ -126,11 +129,11 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
       version: "0.1.0",
       type: "module",
       exports: { ".": "./dist/index.js" },
-      dependencies: { "@verule/engine": "0.0.0" },
+      dependencies: { tssae: "0.1.0" },
     },
     {
       "dist/index.js":
-        "import { engineExecutablePath } from '@verule/engine/binary';\nexport function getEngine() { return engineExecutablePath; }\n",
+        "import { engineExecutablePath } from 'tssae';\nexport function getEngine() { return engineExecutablePath; }\n",
     },
   );
 
@@ -150,14 +153,14 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
   mkdirSync(cacheHome, { recursive: true });
   mkdirSync(storeDir, { recursive: true });
 
-  const registry = await startArtifactRegistry([
-    engineArtifact,
-    veruleArtifact,
-  ]);
+  const registry = await startArtifactRegistry(
+    [tssaeArtifact, veruleArtifact],
+    { upstreamRegistryUrl: null },
+  );
   try {
     writeFileSync(
       join(hostDir, ".npmrc"),
-      `@boringparts:registry=${registry.url}/\n@verule:registry=${registry.url}/\n`,
+      `registry=${registry.url}/\n@boringparts:registry=${registry.url}/\n`,
     );
     await execFileAsync(
       "pnpm",
@@ -192,9 +195,9 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
   const hostRequire = createRequire(join(hostDir, "package.json"));
   const sdkResolved = hostRequire.resolve("@boringparts/verule");
   const sdkRequire = createRequire(sdkResolved);
-  const engineResolved = sdkRequire.resolve("@verule/engine/binary");
+  const tssaeResolved = sdkRequire.resolve("tssae");
   const hostReal = realpathSync(hostDir);
   assert.ok(realpathSync(sdkResolved).startsWith(hostReal + sep));
-  assert.ok(realpathSync(engineResolved).startsWith(hostReal + sep));
-  assert.ok(existsSync(engineResolved));
+  assert.ok(realpathSync(tssaeResolved).startsWith(hostReal + sep));
+  assert.ok(existsSync(tssaeResolved));
 });

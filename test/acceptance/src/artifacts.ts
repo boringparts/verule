@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 const maxTarBufferBytes = 64 * 1024 * 1024;
 
 export const CORE_VERULE_PACKAGES: readonly string[] = [
-  "@verule/engine",
+  "tssae",
   "@boringparts/verule",
 ];
 
@@ -57,22 +57,23 @@ type PrepackedEntry = {
 
 function parsePackOutput(stdout: string): PnpmPackJson {
   const parsed: unknown = JSON.parse(stdout);
+  const item = Array.isArray(parsed) ? parsed[0] : parsed;
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("name" in parsed) ||
-    !("version" in parsed) ||
-    !("filename" in parsed) ||
-    typeof parsed.name !== "string" ||
-    typeof parsed.version !== "string" ||
-    typeof parsed.filename !== "string"
+    typeof item !== "object" ||
+    item === null ||
+    !("name" in item) ||
+    !("version" in item) ||
+    !("filename" in item) ||
+    typeof item.name !== "string" ||
+    typeof item.version !== "string" ||
+    typeof item.filename !== "string"
   ) {
-    throw new Error(`Unexpected pnpm pack --json output: ${stdout}`);
+    throw new Error(`Unexpected pack --json output: ${stdout}`);
   }
   return {
-    name: parsed.name,
-    version: parsed.version,
-    filename: parsed.filename,
+    name: item.name,
+    version: item.version,
+    filename: item.filename,
   };
 }
 
@@ -128,9 +129,9 @@ async function inspectTarballArtifact(
   }
 
   let binarySha256: string | undefined;
-  if (name === "@verule/engine") {
+  if (name === "tssae") {
     const executableName =
-      process.platform === "win32" ? "verule-engine.exe" : "verule-engine";
+      process.platform === "win32" ? "tssae-engine.exe" : "tssae-engine";
     const binaryBytes = await readTarEntry(
       tarballPath,
       `package/dist/bin/${executableName}`,
@@ -223,11 +224,36 @@ async function discoverPrepackedTarballs(
   return entries;
 }
 
+async function discoverWorkspacePackages(
+  cwd: string,
+): Promise<ReadonlySet<string>> {
+  const { stdout } = await execFileAsync(
+    "pnpm",
+    ["m", "ls", "--json", "--depth=-1"],
+    { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
+  );
+  const parsed: unknown = JSON.parse(stdout);
+  const names = new Set<string>();
+  if (Array.isArray(parsed)) {
+    for (const entry of parsed) {
+      if (
+        typeof entry === "object" &&
+        entry !== null &&
+        "name" in entry &&
+        typeof entry.name === "string"
+      ) {
+        names.add(entry.name);
+      }
+    }
+  }
+  return names;
+}
+
 /**
  * Resolves pre-packed candidate `.tgz` tarballs from `fromPackDir` /
- * `VERULE_ACCEPTANCE_PACK_DIR` when provided, or packs `@verule/engine`,
- * `@boringparts/verule`, and optional extension packages into local `.tgz`
- * files with computed digests.
+ * `VERULE_ACCEPTANCE_PACK_DIR` (and `TSSAE_ACCEPTANCE_PACK_DIR` for upstream
+ * TSSAE packages), or packs workspace packages with `pnpm pack` and upstream
+ * packages from `TSSAE_ACCEPTANCE_PACK_DIR` or npm.
  */
 export async function packWorkspaceArtifacts(
   options: PackWorkspaceArtifactsOptions = {},
@@ -238,6 +264,12 @@ export async function packWorkspaceArtifacts(
       ...(options.additionalPackages ?? []),
     ]),
   ];
+
+  const envTssaePackDir = process.env.TSSAE_ACCEPTANCE_PACK_DIR?.trim();
+  const tssaePrepacked =
+    envTssaePackDir !== undefined && envTssaePackDir.length > 0
+      ? await discoverPrepackedTarballs(resolve(envTssaePackDir))
+      : undefined;
 
   const envPackDir = process.env.VERULE_ACCEPTANCE_PACK_DIR?.trim();
   const explicitFromPackDir =
@@ -256,7 +288,7 @@ export async function packWorkspaceArtifacts(
     const discovered = await discoverPrepackedTarballs(resolvedPackDir);
     const artifacts: PackedArtifact[] = [];
     for (const pkg of packages) {
-      const entry = discovered.get(pkg);
+      const entry = discovered.get(pkg) ?? tssaePrepacked?.get(pkg);
       if (entry === undefined) {
         throw new Error(
           `Pre-packed tarball for ${pkg} not found in ${resolvedPackDir}`,
@@ -290,23 +322,53 @@ export async function packWorkspaceArtifacts(
 
   const artifacts: PackedArtifact[] = [];
   try {
+    const workspacePackages = await discoverWorkspacePackages(cwd);
     for (const pkg of packages) {
+      if (workspacePackages.has(pkg)) {
+        const { stdout } = await execFileAsync(
+          "pnpm",
+          ["--filter", pkg, "pack", "--pack-destination", packDir, "--json"],
+          { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
+        );
+        const packed = parsePackOutput(stdout);
+        const artifact = await inspectTarballArtifact(packed.filename);
+        if (
+          artifact.name !== packed.name ||
+          artifact.version !== packed.version
+        ) {
+          throw new Error(
+            `Packed tarball ${packed.filename} metadata (${artifact.name}@${artifact.version}) mismatches pnpm pack output (${packed.name}@${packed.version})`,
+          );
+        }
+        artifacts.push(artifact);
+        continue;
+      }
+
+      const prepacked = tssaePrepacked?.get(pkg);
+      if (prepacked !== undefined) {
+        if (!existsSync(prepacked.tarballPath)) {
+          throw new Error(
+            `Pre-packed tarball for ${pkg} missing on disk: ${prepacked.tarballPath}`,
+          );
+        }
+        artifacts.push(
+          await inspectTarballArtifact(
+            prepacked.tarballPath,
+            prepacked.expectedIntegrity,
+          ),
+        );
+        continue;
+      }
+
       const { stdout } = await execFileAsync(
-        "pnpm",
-        ["--filter", pkg, "pack", "--pack-destination", packDir, "--json"],
+        "npm",
+        ["pack", `${pkg}@0.1.0`, "--pack-destination", packDir, "--json"],
         { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
       );
       const packed = parsePackOutput(stdout);
-      const artifact = await inspectTarballArtifact(packed.filename);
-      if (
-        artifact.name !== packed.name ||
-        artifact.version !== packed.version
-      ) {
-        throw new Error(
-          `Packed tarball ${packed.filename} metadata (${artifact.name}@${artifact.version}) mismatches pnpm pack output (${packed.name}@${packed.version})`,
-        );
-      }
-      artifacts.push(artifact);
+      artifacts.push(
+        await inspectTarballArtifact(join(packDir, packed.filename)),
+      );
     }
   } catch (error) {
     if (ownsPackDir) {

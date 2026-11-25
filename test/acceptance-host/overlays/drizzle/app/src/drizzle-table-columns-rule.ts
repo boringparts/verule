@@ -3,7 +3,7 @@ import {
   DrizzleTableColumnsFact,
   type DrizzleTableColumnsFactValue,
   type DrizzleTableSubjectKind,
-} from "@verule/adapter-drizzle";
+} from "@tssae/adapters/drizzle";
 
 export type DrizzleTableResult = FactResult<
   DrizzleTableSubjectKind,
