@@ -65,7 +65,8 @@
         "http_proxy",
         "https_proxy",
         "no_proxy",
-        "XDG_CACHE_HOME"
+        "XDG_CACHE_HOME",
+        "VERULE_ACCEPTANCE_PACK_DIR"
       ],
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],

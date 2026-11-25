@@ -11,7 +11,7 @@ import {
   withCliTempHost,
 } from "../helpers/cli-hosts.ts";
 
-void describe("@verule/cli-hosts", () => {
+void describe("cli-hosts fixtures and helpers", () => {
   void it("links workspace @boringparts/verule by default, supports custom sdkPackageDir and linkSdk=false, and cleans up on dispose", async () => {
     assert.throws(() => resolveCliHostDir("missing/host"), /does not exist/u);
 
