@@ -6,7 +6,7 @@ import {
 } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 
 export type IsolationMode = "bwrap" | "node-permission";
 
@@ -133,7 +133,18 @@ export function resolveDefaultBlockedPaths(
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     if (topLevel.length > 0 && existsSync(topLevel)) {
-      candidates.add(realpathSync(topLevel));
+      const repoRealpath = realpathSync(topLevel);
+      candidates.add(repoRealpath);
+      const reposParent = dirname(repoRealpath);
+      if (basename(reposParent) === "repos") {
+        const workspaceRoot = dirname(reposParent);
+        if (
+          existsSync(join(workspaceRoot, "repos", "verule")) ||
+          existsSync(join(workspaceRoot, "repos", "tssae"))
+        ) {
+          candidates.add(workspaceRoot);
+        }
+      }
     }
   } catch {
     // Ignore when invoked outside a git repository.
