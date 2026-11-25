@@ -31,7 +31,7 @@ import {
   type ObservationReport,
 } from "./types.ts";
 
-export { locationMatchesTarget, locationsOverlap, type EngineCallIoMetrics };
+export { type EngineCallIoMetrics };
 
 export type NormalizedObserveConfig = {
   readonly mode: ObserveMode;

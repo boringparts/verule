@@ -17,9 +17,7 @@ packages:
   - test/*
   - test/acceptance-host/data
   - test/acceptance-host/app
-  - test/acceptance-host/overlays/drizzle/app
   - test/acceptance-host/overlays/drizzle-zod/app
-  - test/acceptance-host/overlays/zod/app
   - test/acceptance-host/overlays/*/data
 catalog:
   "@changesets/cli": 3.0.3

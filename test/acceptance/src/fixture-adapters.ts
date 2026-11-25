@@ -5,8 +5,8 @@ import { join } from "node:path";
 import type { PackedArtifact } from "./artifacts.ts";
 import {
   buildExternalRustAdapter,
-  packAdapterApiCrate,
   packExternalAdapterPackage,
+  tryPackAdapterApiCrate,
 } from "./external-rust-adapter.ts";
 
 export type BuiltFixtureAdapters = {
@@ -17,6 +17,68 @@ export type BuiltFixtureAdapters = {
   readonly artifacts: readonly PackedArtifact[];
   dispose(): void;
 };
+
+const sharedFixtureRustHelpers = `fn collect_fields_by_mode(fields: &BTreeMap<String, String>, mode: &str) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|(_, value)| value.as_str() == mode)
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+fn resolve_object_literal(node: NodeRef<'_>) -> Result<Option<NodeRef<'_>>, AdapterError> {
+    let current = node.unwrap_expression()?.unwrap_or(node);
+    match current.kind()? {
+        NodeKind::ObjectLiteralExpression => Ok(Some(current)),
+        NodeKind::Identifier => {
+            let Some(decl) = current.declaration_node()? else {
+                return Ok(None);
+            };
+            let Some(init) = decl.safe_initializer()? else {
+                return Ok(None);
+            };
+            let init = init.unwrap_expression()?.unwrap_or(init);
+            Ok((init.kind()? == NodeKind::ObjectLiteralExpression).then_some(init))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn read_property_name(prop: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
+    let Some(name_node) = prop.name()? else {
+        return Ok(None);
+    };
+    match name_node.kind()? {
+        NodeKind::Identifier => Ok(name_node.text()?),
+        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral => {
+            read_string_literal(name_node)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn read_string_literal(node: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
+    let node = node.unwrap_expression()?.unwrap_or(node);
+    if !matches!(
+        node.kind()?,
+        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral
+    ) {
+        return Ok(None);
+    }
+    let Some(raw) = node.text()? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\\'') && trimmed.ends_with('\\''))
+            || (trimmed.starts_with('\`') && trimmed.ends_with('\`')))
+    {
+        Ok(Some(trimmed[1..trimmed.len() - 1].to_string()))
+    } else {
+        Ok(None)
+    }
+}`;
 
 const fixtureRustSource = `use std::{
     collections::{BTreeMap, BTreeSet},
@@ -392,67 +454,7 @@ fn collect_source_spec_fields(
     Ok(())
 }
 
-fn collect_fields_by_mode(fields: &BTreeMap<String, String>, mode: &str) -> Vec<String> {
-    fields
-        .iter()
-        .filter(|(_, value)| value.as_str() == mode)
-        .map(|(key, _)| key.clone())
-        .collect()
-}
-
-fn resolve_object_literal(node: NodeRef<'_>) -> Result<Option<NodeRef<'_>>, AdapterError> {
-    let current = node.unwrap_expression()?.unwrap_or(node);
-    match current.kind()? {
-        NodeKind::ObjectLiteralExpression => Ok(Some(current)),
-        NodeKind::Identifier => {
-            let Some(decl) = current.declaration_node()? else {
-                return Ok(None);
-            };
-            let Some(init) = decl.safe_initializer()? else {
-                return Ok(None);
-            };
-            let init = init.unwrap_expression()?.unwrap_or(init);
-            Ok((init.kind()? == NodeKind::ObjectLiteralExpression).then_some(init))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn read_property_name(prop: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
-    let Some(name_node) = prop.name()? else {
-        return Ok(None);
-    };
-    match name_node.kind()? {
-        NodeKind::Identifier => Ok(name_node.text()?),
-        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral => {
-            read_string_literal(name_node)
-        }
-        _ => Ok(None),
-    }
-}
-
-fn read_string_literal(node: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
-    let node = node.unwrap_expression()?.unwrap_or(node);
-    if !matches!(
-        node.kind()?,
-        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral
-    ) {
-        return Ok(None);
-    }
-    let Some(raw) = node.text()? else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\\'') && trimmed.ends_with('\\''))
-            || (trimmed.starts_with('\`') && trimmed.ends_with('\`')))
-    {
-        Ok(Some(trimmed[1..trimmed.len() - 1].to_string()))
-    } else {
-        Ok(None)
-    }
-}
+${sharedFixtureRustHelpers}
 
 tssae_adapter_api::export_adapter!(ThirdPartyFixtureAdapter);
 `;
@@ -1041,67 +1043,7 @@ fn apply_override_property(
     Ok(())
 }
 
-fn collect_fields_by_mode(fields: &BTreeMap<String, String>, mode: &str) -> Vec<String> {
-    fields
-        .iter()
-        .filter(|(_, value)| value.as_str() == mode)
-        .map(|(key, _)| key.clone())
-        .collect()
-}
-
-fn resolve_object_literal(node: NodeRef<'_>) -> Result<Option<NodeRef<'_>>, AdapterError> {
-    let current = node.unwrap_expression()?.unwrap_or(node);
-    match current.kind()? {
-        NodeKind::ObjectLiteralExpression => Ok(Some(current)),
-        NodeKind::Identifier => {
-            let Some(decl) = current.declaration_node()? else {
-                return Ok(None);
-            };
-            let Some(init) = decl.safe_initializer()? else {
-                return Ok(None);
-            };
-            let init = init.unwrap_expression()?.unwrap_or(init);
-            Ok((init.kind()? == NodeKind::ObjectLiteralExpression).then_some(init))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn read_property_name(prop: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
-    let Some(name_node) = prop.name()? else {
-        return Ok(None);
-    };
-    match name_node.kind()? {
-        NodeKind::Identifier => Ok(name_node.text()?),
-        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral => {
-            read_string_literal(name_node)
-        }
-        _ => Ok(None),
-    }
-}
-
-fn read_string_literal(node: NodeRef<'_>) -> Result<Option<String>, AdapterError> {
-    let node = node.unwrap_expression()?.unwrap_or(node);
-    if !matches!(
-        node.kind()?,
-        NodeKind::StringLiteral | NodeKind::NoSubstitutionTemplateLiteral
-    ) {
-        return Ok(None);
-    }
-    let Some(raw) = node.text()? else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\\'') && trimmed.ends_with('\\''))
-            || (trimmed.starts_with('\`') && trimmed.ends_with('\`')))
-    {
-        Ok(Some(trimmed[1..trimmed.len() - 1].to_string()))
-    } else {
-        Ok(None)
-    }
-}
+${sharedFixtureRustHelpers}
 
 tssae_adapter_api::export_adapter!(ComplementFixtureAdapter);
 `;
@@ -1181,14 +1123,16 @@ export async function buildFixtureAdapterArtifacts(
   };
 
   try {
-    const crate = await packAdapterApiCrate({
+    const crate = await tryPackAdapterApiCrate({
       ...(cratePath === undefined ? {} : { cratePath }),
       tempRoot,
     });
-    disposables.push(crate);
+    if (crate !== undefined) {
+      disposables.push(crate);
+    }
 
     const fixtureRust = await buildExternalRustAdapter({
-      extractedCrateDir: crate.extractedDir,
+      ...(crate === undefined ? {} : { extractedCrateDir: crate.extractedDir }),
       adapterId: "third-party-fixture",
       factTypeId: "fixture.call-source",
       crateName: "tssae_test_adapter",
@@ -1228,7 +1172,7 @@ export default adapter;
     disposables.push(fixturePkg);
 
     const complementRust = await buildExternalRustAdapter({
-      extractedCrateDir: crate.extractedDir,
+      ...(crate === undefined ? {} : { extractedCrateDir: crate.extractedDir }),
       adapterId: "third-party-fixture-complement",
       factTypeId: "fixture.call-source",
       crateName: "tssae_test_adapter_complement",

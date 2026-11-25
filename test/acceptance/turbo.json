@@ -52,7 +52,7 @@
       "tags": ["quality:light"]
     },
     "test:e2e": {
-      "dependsOn": ["build"],
+      "dependsOn": ["//#toolchain:prepare", "build"],
       "passThroughEnv": [
         "HTTP_PROXY",
         "HTTPS_PROXY",

@@ -1,8 +1,9 @@
-import type {
-  DiagnosticLocation,
-  Evidence,
-  ProjectSummary,
-  ScannedComment,
+import {
+  normalizeLocation,
+  type DiagnosticLocation,
+  type Evidence,
+  type ProjectSummary,
+  type ScannedComment,
 } from "tssae";
 
 import type { CollectedDiagnostic } from "./projects.ts";
@@ -12,7 +13,7 @@ export const INLINE_IGNORE_RULE_ID = "verule/inline-ignore" as const;
 
 const DIRECTIVE_PREFIX = "verule-ignore-next-code-line";
 
-export type EngineDirectiveItem =
+export type ParsedDirectiveItem =
   | {
       readonly kind: "valid";
       readonly ruleId: string;
@@ -61,7 +62,7 @@ function splitReasonSeparator(
 /** Parses one `verule-ignore-next-code-line` directive from a TSSAE standalone comment. */
 export function parseDirectiveFromComment(
   comment: ScannedComment,
-): EngineDirectiveItem | undefined {
+): ParsedDirectiveItem | undefined {
   const trimmed = comment.text.trim();
   if (!trimmed.startsWith(DIRECTIVE_PREFIX)) {
     return undefined;
@@ -130,8 +131,8 @@ export function parseDirectiveFromComment(
 /** Filters and parses all Verule inline ignore directives from scanned snapshot comments. */
 export function parseInlineIgnoreDirectives(
   comments: readonly ScannedComment[],
-): readonly EngineDirectiveItem[] {
-  const directives: EngineDirectiveItem[] = [];
+): readonly ParsedDirectiveItem[] {
+  const directives: ParsedDirectiveItem[] = [];
   for (const comment of comments) {
     const parsed = parseDirectiveFromComment(comment);
     if (parsed !== undefined) {
@@ -158,11 +159,6 @@ function normalizeFilePath(file: string): string {
   return file.replaceAll("\\", "/");
 }
 
-function normalizeLocation(loc: DiagnosticLocation): DiagnosticLocation {
-  const file = normalizeFilePath(loc.file);
-  return file === loc.file ? loc : { ...loc, file };
-}
-
 function primaryRangeKey(loc: DiagnosticLocation): string {
   return `${normalizeFilePath(loc.file)}\0${loc.start}\0${loc.end}`;
 }
@@ -186,7 +182,7 @@ function compareLocations(
  * `(ruleId, file, start, end)` primary location uniquely matches the target code line.
  */
 export function resolveInlineIgnores(params: {
-  readonly directives: readonly EngineDirectiveItem[];
+  readonly directives: readonly ParsedDirectiveItem[];
   readonly collected: readonly CollectedDiagnostic[];
   readonly projects: readonly ProjectSummary[];
   readonly configuredRuleIds: ReadonlySet<string>;

@@ -2,6 +2,9 @@ export {
   buildExternalRustAdapter,
   packAdapterApiCrate,
   packExternalAdapterPackage,
+  renderExternalRustCargoToml,
+  resolveCargoBuildArgs,
+  tryPackAdapterApiCrate,
   type BuildExternalRustAdapterOptions,
   type BuiltExternalRustAdapter,
   type ExternalRustAdapterVariant,
@@ -17,6 +20,7 @@ export {
 export {
   CORE_VERULE_PACKAGES,
   packWorkspaceArtifacts,
+  resolveInstalledPackageVersion,
   type PackedArtifact,
   type PackedArtifactBundle,
   type PackWorkspaceArtifactsOptions,
