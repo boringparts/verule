@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -15,7 +16,7 @@ const execFileAsync = promisify(execFile);
 const maxTarBufferBytes = 64 * 1024 * 1024;
 
 export const CORE_VERULE_PACKAGES: readonly string[] = [
-  "@verule/engine",
+  "tssae",
   "@boringparts/verule",
 ];
 
@@ -55,24 +56,25 @@ type PrepackedEntry = {
   readonly expectedIntegrity?: string;
 };
 
-function parsePackOutput(stdout: string): PnpmPackJson {
+export function parsePackOutput(stdout: string): PnpmPackJson {
   const parsed: unknown = JSON.parse(stdout);
+  const item = Array.isArray(parsed) ? parsed[0] : parsed;
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("name" in parsed) ||
-    !("version" in parsed) ||
-    !("filename" in parsed) ||
-    typeof parsed.name !== "string" ||
-    typeof parsed.version !== "string" ||
-    typeof parsed.filename !== "string"
+    typeof item !== "object" ||
+    item === null ||
+    !("name" in item) ||
+    !("version" in item) ||
+    !("filename" in item) ||
+    typeof item.name !== "string" ||
+    typeof item.version !== "string" ||
+    typeof item.filename !== "string"
   ) {
-    throw new Error(`Unexpected pnpm pack --json output: ${stdout}`);
+    throw new Error(`Unexpected pack --json output: ${stdout}`);
   }
   return {
-    name: parsed.name,
-    version: parsed.version,
-    filename: parsed.filename,
+    name: item.name,
+    version: item.version,
+    filename: item.filename,
   };
 }
 
@@ -88,7 +90,7 @@ async function readTarEntry(
   return stdout;
 }
 
-async function inspectTarballArtifact(
+export async function inspectTarballArtifact(
   tarballPath: string,
   expectedIntegrity?: string,
 ): Promise<PackedArtifact> {
@@ -128,9 +130,9 @@ async function inspectTarballArtifact(
   }
 
   let binarySha256: string | undefined;
-  if (name === "@verule/engine") {
+  if (name === "tssae") {
     const executableName =
-      process.platform === "win32" ? "verule-engine.exe" : "verule-engine";
+      process.platform === "win32" ? "tssae-engine.exe" : "tssae-engine";
     const binaryBytes = await readTarEntry(
       tarballPath,
       `package/dist/bin/${executableName}`,
@@ -224,10 +226,83 @@ async function discoverPrepackedTarballs(
 }
 
 /**
+ * Resolves the actually installed `version` of `packageName` from `cwd` or the
+ * acceptance package's own dependency graph so upstream tarballs are never
+ * pinned to a stale hardcoded version.
+ */
+export function resolveInstalledPackageVersion(
+  packageName: string,
+  cwd: string = process.cwd(),
+): string {
+  const candidateManifests = [
+    join(resolve(cwd), "package.json"),
+    join(resolve(cwd), "packages", "verule", "package.json"),
+  ];
+  const resolvers = [
+    ...candidateManifests
+      .filter((manifestPath) => existsSync(manifestPath))
+      .map((manifestPath) => createRequire(manifestPath)),
+    createRequire(import.meta.url),
+  ];
+  for (const resolver of resolvers) {
+    try {
+      const pkgJsonPath = resolver.resolve(`${packageName}/package.json`);
+      const parsed: unknown = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "version" in parsed &&
+        typeof parsed.version === "string" &&
+        parsed.version.length > 0
+      ) {
+        return parsed.version;
+      }
+    } catch {
+      // Try next resolution root.
+    }
+  }
+  throw new Error(
+    `Could not resolve installed version for package "${packageName}" from ${cwd}.`,
+  );
+}
+
+type WorkspacePackageMeta = {
+  readonly private: boolean;
+};
+
+async function discoverWorkspacePackages(
+  cwd: string,
+): Promise<ReadonlyMap<string, WorkspacePackageMeta>> {
+  const { stdout } = await execFileAsync(
+    "pnpm",
+    ["m", "ls", "--json", "--depth=-1"],
+    { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
+  );
+  const parsed: unknown = JSON.parse(stdout);
+  const packages = new Map<string, WorkspacePackageMeta>();
+  if (Array.isArray(parsed)) {
+    for (const entry of parsed) {
+      if (
+        typeof entry === "object" &&
+        entry !== null &&
+        "name" in entry &&
+        typeof entry.name === "string"
+      ) {
+        packages.set(entry.name, {
+          private: "private" in entry && entry.private === true,
+        });
+      }
+    }
+  }
+  return packages;
+}
+
+/**
  * Resolves pre-packed candidate `.tgz` tarballs from `fromPackDir` /
- * `VERULE_ACCEPTANCE_PACK_DIR` when provided, or packs `@verule/engine`,
- * `@boringparts/verule`, and optional extension packages into local `.tgz`
- * files with computed digests.
+ * `VERULE_ACCEPTANCE_PACK_DIR` (and `TSSAE_ACCEPTANCE_PACK_DIR` for upstream
+ * TSSAE packages), or packs workspace packages with `pnpm pack` and upstream
+ * packages from `TSSAE_ACCEPTANCE_PACK_DIR` or npm into a separate fallback
+ * directory without mutating `VERULE_ACCEPTANCE_PACK_DIR`.
  */
 export async function packWorkspaceArtifacts(
   options: PackWorkspaceArtifactsOptions = {},
@@ -239,6 +314,12 @@ export async function packWorkspaceArtifacts(
     ]),
   ];
 
+  const envTssaePackDir = process.env.TSSAE_ACCEPTANCE_PACK_DIR?.trim();
+  const tssaePrepacked =
+    envTssaePackDir !== undefined && envTssaePackDir.length > 0
+      ? await discoverPrepackedTarballs(resolve(envTssaePackDir))
+      : undefined;
+
   const envPackDir = process.env.VERULE_ACCEPTANCE_PACK_DIR?.trim();
   const explicitFromPackDir =
     options.fromPackDir ??
@@ -246,81 +327,128 @@ export async function packWorkspaceArtifacts(
       ? envPackDir
       : undefined);
 
+  let resolvedFromPackDir: string | undefined;
+  let discovered: ReadonlyMap<string, PrepackedEntry> | undefined;
   if (explicitFromPackDir !== undefined) {
-    const resolvedPackDir = resolve(explicitFromPackDir);
-    if (!existsSync(resolvedPackDir)) {
+    resolvedFromPackDir = resolve(explicitFromPackDir);
+    if (!existsSync(resolvedFromPackDir)) {
       throw new Error(
-        `Pre-packed artifact directory does not exist: ${resolvedPackDir}`,
+        `Pre-packed artifact directory does not exist: ${resolvedFromPackDir}`,
       );
     }
-    const discovered = await discoverPrepackedTarballs(resolvedPackDir);
-    const artifacts: PackedArtifact[] = [];
-    for (const pkg of packages) {
-      const entry = discovered.get(pkg);
-      if (entry === undefined) {
-        throw new Error(
-          `Pre-packed tarball for ${pkg} not found in ${resolvedPackDir}`,
-        );
-      }
-      if (!existsSync(entry.tarballPath)) {
-        throw new Error(
-          `Pre-packed tarball for ${pkg} missing on disk: ${entry.tarballPath}`,
-        );
-      }
-      artifacts.push(
-        await inspectTarballArtifact(
-          entry.tarballPath,
-          entry.expectedIntegrity,
-        ),
-      );
-    }
-    return {
-      packDir: resolvedPackDir,
-      artifacts,
-      dispose(): void {
-        // Externally supplied candidate tarballs must be retained.
-      },
-    };
+    discovered = await discoverPrepackedTarballs(resolvedFromPackDir);
   }
 
-  const ownsPackDir = options.packDir === undefined;
-  const packDir =
-    options.packDir ?? mkdtempSync(join(tmpdir(), "verule-artifacts-"));
   const cwd = options.cwd ?? process.cwd();
+  const ownsFallbackPackDir = options.packDir === undefined;
+  let fallbackPackDir: string | undefined =
+    resolvedFromPackDir === undefined
+      ? (options.packDir ?? mkdtempSync(join(tmpdir(), "verule-artifacts-")))
+      : options.packDir;
+  const ensureFallbackPackDir = (): string => {
+    fallbackPackDir ??= mkdtempSync(
+      join(tmpdir(), "verule-artifacts-fallback-"),
+    );
+    return fallbackPackDir;
+  };
 
   const artifacts: PackedArtifact[] = [];
+  let workspacePackages: ReadonlyMap<string, WorkspacePackageMeta> | undefined;
   try {
     for (const pkg of packages) {
+      const prepackedFromVerule = discovered?.get(pkg);
+      if (prepackedFromVerule !== undefined) {
+        if (!existsSync(prepackedFromVerule.tarballPath)) {
+          throw new Error(
+            `Pre-packed tarball for ${pkg} missing on disk: ${prepackedFromVerule.tarballPath}`,
+          );
+        }
+        artifacts.push(
+          await inspectTarballArtifact(
+            prepackedFromVerule.tarballPath,
+            prepackedFromVerule.expectedIntegrity,
+          ),
+        );
+        continue;
+      }
+
+      workspacePackages ??= await discoverWorkspacePackages(cwd);
+      const workspaceMeta = workspacePackages.get(pkg);
+      if (workspaceMeta !== undefined) {
+        if (resolvedFromPackDir !== undefined && !workspaceMeta.private) {
+          throw new Error(
+            `Pre-packed tarball for publishable workspace package ${pkg} not found in ${resolvedFromPackDir}`,
+          );
+        }
+        const destDir = ensureFallbackPackDir();
+        const { stdout } = await execFileAsync(
+          "pnpm",
+          ["--filter", pkg, "pack", "--pack-destination", destDir, "--json"],
+          { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
+        );
+        const packed = parsePackOutput(stdout);
+        const artifact = await inspectTarballArtifact(packed.filename);
+        if (
+          artifact.name !== packed.name ||
+          artifact.version !== packed.version
+        ) {
+          throw new Error(
+            `Packed tarball ${packed.filename} metadata (${artifact.name}@${artifact.version}) mismatches pnpm pack output (${packed.name}@${packed.version})`,
+          );
+        }
+        artifacts.push(artifact);
+        continue;
+      }
+
+      const prepackedUpstream = tssaePrepacked?.get(pkg);
+      if (prepackedUpstream !== undefined) {
+        if (!existsSync(prepackedUpstream.tarballPath)) {
+          throw new Error(
+            `Pre-packed tarball for ${pkg} missing on disk: ${prepackedUpstream.tarballPath}`,
+          );
+        }
+        artifacts.push(
+          await inspectTarballArtifact(
+            prepackedUpstream.tarballPath,
+            prepackedUpstream.expectedIntegrity,
+          ),
+        );
+        continue;
+      }
+
+      const resolvedVersion = resolveInstalledPackageVersion(pkg, cwd);
+      const destDir = ensureFallbackPackDir();
       const { stdout } = await execFileAsync(
-        "pnpm",
-        ["--filter", pkg, "pack", "--pack-destination", packDir, "--json"],
+        "npm",
+        [
+          "pack",
+          `${pkg}@${resolvedVersion}`,
+          "--pack-destination",
+          destDir,
+          "--json",
+        ],
         { cwd, encoding: "utf8", maxBuffer: maxTarBufferBytes },
       );
       const packed = parsePackOutput(stdout);
-      const artifact = await inspectTarballArtifact(packed.filename);
-      if (
-        artifact.name !== packed.name ||
-        artifact.version !== packed.version
-      ) {
-        throw new Error(
-          `Packed tarball ${packed.filename} metadata (${artifact.name}@${artifact.version}) mismatches pnpm pack output (${packed.name}@${packed.version})`,
-        );
-      }
-      artifacts.push(artifact);
+      artifacts.push(
+        await inspectTarballArtifact(join(destDir, packed.filename)),
+      );
     }
   } catch (error) {
-    if (ownsPackDir) {
-      rmSync(packDir, { recursive: true, force: true });
+    if (ownsFallbackPackDir && fallbackPackDir !== undefined) {
+      rmSync(fallbackPackDir, { recursive: true, force: true });
     }
     throw error;
   }
 
+  const bundlePackDir = resolvedFromPackDir ?? ensureFallbackPackDir();
   return {
-    packDir,
+    packDir: bundlePackDir,
     artifacts,
     dispose(): void {
-      if (ownsPackDir) {
-        rmSync(packDir, { recursive: true, force: true });
+      // Only remove our own temporary fallback directory; never delete VERULE_ACCEPTANCE_PACK_DIR.
+      if (ownsFallbackPackDir && fallbackPackDir !== undefined) {
+        rmSync(fallbackPackDir, { recursive: true, force: true });
       }
     },
   };

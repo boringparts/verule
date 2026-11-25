@@ -3,22 +3,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type AcceptanceHostOverlay =
-  | "drizzle"
   | "drizzle-zod"
   | "provider-session"
-  | "queue"
-  | "zod";
+  | "queue";
 
 export type AcceptanceHostMaterialSource =
   | "app"
   | "data"
-  | "drizzle-app"
-  | "drizzle-data"
   | "drizzle-zod-app"
   | "drizzle-zod-data"
-  | "provider-session-data"
-  | "zod-app"
-  | "zod-data";
+  | "provider-session-data";
 
 const baseAppPackage = "@verule/acceptance-host-app";
 const baseDataPackage = "@verule/acceptance-host-data";
@@ -27,30 +21,18 @@ const overlayPackages: Record<
   Exclude<AcceptanceHostOverlay, "provider-session" | "queue">,
   { readonly app: string; readonly data: string }
 > = {
-  drizzle: {
-    app: "@verule/acceptance-host-drizzle-app",
-    data: "@verule/acceptance-host-drizzle-data",
-  },
   "drizzle-zod": {
     app: "@verule/acceptance-host-drizzle-zod-app",
     data: "@verule/acceptance-host-drizzle-zod-data",
-  },
-  zod: {
-    app: "@verule/acceptance-host-zod-app",
-    data: "@verule/acceptance-host-zod-data",
   },
 };
 
 const materialPackages: Record<AcceptanceHostMaterialSource, string> = {
   app: baseAppPackage,
   data: baseDataPackage,
-  "drizzle-app": overlayPackages.drizzle.app,
-  "drizzle-data": overlayPackages.drizzle.data,
   "drizzle-zod-app": overlayPackages["drizzle-zod"].app,
   "drizzle-zod-data": overlayPackages["drizzle-zod"].data,
   "provider-session-data": "@verule/acceptance-host-provider-session-data",
-  "zod-app": overlayPackages.zod.app,
-  "zod-data": overlayPackages.zod.data,
 };
 
 function resolveHostMaterial(

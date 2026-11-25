@@ -9,7 +9,6 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import type { PackedArtifact } from "./artifacts.ts";
 import { DEFAULT_DIRECT_VERULE_PACKAGES } from "./host-install.ts";
@@ -20,7 +19,10 @@ export type HostResolutionAudit = {
   readonly cliPackagePath: string;
   readonly cliVersion: string;
   readonly sdkResolvedPath: string;
-  readonly engineModulePath: string;
+  readonly tssaePackagePath: string;
+  readonly tssaeVersion: string;
+  readonly tssaeResolvedPath: string;
+  readonly hasSourceConditionInExports: boolean;
   readonly engineBinaryPath: string;
   readonly engineBinarySha256: string;
   readonly resolvedDirectPackages: Readonly<Record<string, string>>;
@@ -146,14 +148,14 @@ function auditNodeModulesSymlinks(options: {
 }
 
 /**
- * Verifies that `@boringparts/verule`, the transitive `@verule/engine`
- * binary, and any optional direct packages resolve inside the host checkout's
- * `node_modules` tree with matching artifact digests and zero symlinks back to
- * the development repository.
+ * Verifies that `@boringparts/verule`, the transitive `tssae` package and
+ * `tssae-engine` binary, and any optional direct packages resolve inside the
+ * host checkout's `node_modules` tree with matching artifact digests and zero
+ * symlinks back to the development repository.
  */
-export async function verifyHostArtifactResolution(
+export function verifyHostArtifactResolution(
   options: VerifyHostResolutionOptions,
-): Promise<HostResolutionAudit> {
+): HostResolutionAudit {
   const checkoutRealpath = realpathSync(options.checkoutDir);
   const blockedPaths = (options.blockedPaths ?? resolveDefaultBlockedPaths())
     .filter((path) => existsSync(path))
@@ -229,49 +231,81 @@ export async function verifyHostArtifactResolution(
   }
 
   const sdkRequire = createRequire(sdkResolvedPath);
-  const engineModulePath = realpathSync(
-    sdkRequire.resolve("@verule/engine/binary"),
+  const tssaePackagePath = realpathSync(
+    sdkRequire.resolve("tssae/package.json"),
   );
-  if (!isInsideDirectory(engineModulePath, checkoutRealpath)) {
+  if (!isInsideDirectory(tssaePackagePath, checkoutRealpath)) {
     throw new Error(
-      `Resolved @verule/engine/binary outside host checkout: ${engineModulePath}`,
+      `Resolved tssae/package.json outside host checkout: ${tssaePackagePath}`,
+    );
+  }
+  const tssaeManifestRaw: unknown = JSON.parse(
+    readFileSync(tssaePackagePath, "utf8"),
+  );
+  if (typeof tssaeManifestRaw !== "object" || tssaeManifestRaw === null) {
+    throw new Error(`Invalid package.json at ${tssaePackagePath}`);
+  }
+  const tssaeManifest = tssaeManifestRaw as Record<string, unknown>;
+  const tssaeVersion =
+    typeof tssaeManifest.version === "string" ? tssaeManifest.version : "";
+  if (tssaeVersion.length === 0) {
+    throw new Error(`Missing version in ${tssaePackagePath}`);
+  }
+  const packedTssae = options.artifacts.find(
+    (artifact) => artifact.name === "tssae",
+  );
+  if (packedTssae !== undefined && tssaeVersion !== packedTssae.version) {
+    throw new Error(
+      `Resolved tssae version ${tssaeVersion} does not match packed artifact version ${packedTssae.version}`,
+    );
+  }
+  const rootExports = (
+    tssaeManifest.exports as Record<string, unknown> | undefined
+  )?.["."] as Record<string, unknown> | undefined;
+  const hasSourceConditionInExports =
+    rootExports !== undefined && "source" in rootExports;
+  if (hasSourceConditionInExports) {
+    throw new Error(
+      `Installed tssae package.json unexpectedly retained "source" export condition: ${JSON.stringify(rootExports)}`,
     );
   }
 
-  const engineModule: unknown = await import(
-    pathToFileURL(engineModulePath).href
-  );
-  const rawEngineBinaryPath =
-    typeof engineModule === "object" &&
-    engineModule !== null &&
-    "engineExecutablePath" in engineModule &&
-    typeof engineModule.engineExecutablePath === "string"
-      ? engineModule.engineExecutablePath
-      : undefined;
-  if (rawEngineBinaryPath === undefined) {
+  const tssaeResolvedPath = realpathSync(sdkRequire.resolve("tssae"));
+  if (!isInsideDirectory(tssaeResolvedPath, checkoutRealpath)) {
     throw new Error(
-      `Missing engineExecutablePath export in ${engineModulePath}`,
+      `Resolved tssae outside host checkout: ${tssaeResolvedPath}`,
     );
   }
-  const engineBinaryPath = realpathSync(rawEngineBinaryPath);
+
+  const executableName =
+    process.platform === "win32" ? "tssae-engine.exe" : "tssae-engine";
+  const candidateBinaryPath = join(
+    dirname(tssaePackagePath),
+    "dist",
+    "bin",
+    executableName,
+  );
+  if (!existsSync(candidateBinaryPath)) {
+    throw new Error(
+      `Missing packaged tssae-engine binary at ${candidateBinaryPath}`,
+    );
+  }
+  const engineBinaryPath = realpathSync(candidateBinaryPath);
   if (!isInsideDirectory(engineBinaryPath, checkoutRealpath)) {
     throw new Error(
-      `Resolved verule-engine binary outside host checkout: ${engineBinaryPath}`,
+      `Resolved tssae-engine binary outside host checkout: ${engineBinaryPath}`,
     );
   }
 
   const engineBinarySha256 = createHash("sha256")
     .update(readFileSync(engineBinaryPath))
     .digest("hex");
-  const packedEngine = options.artifacts.find(
-    (artifact) => artifact.name === "@verule/engine",
-  );
   if (
-    packedEngine?.binarySha256 !== undefined &&
-    engineBinarySha256 !== packedEngine.binarySha256
+    packedTssae?.binarySha256 !== undefined &&
+    engineBinarySha256 !== packedTssae.binarySha256
   ) {
     throw new Error(
-      `Host verule-engine SHA-256 ${engineBinarySha256} does not match packed artifact ${packedEngine.binarySha256}`,
+      `Host tssae-engine SHA-256 ${engineBinarySha256} does not match packed artifact ${packedTssae.binarySha256}`,
     );
   }
 
@@ -280,7 +314,10 @@ export async function verifyHostArtifactResolution(
     cliPackagePath,
     cliVersion,
     sdkResolvedPath,
-    engineModulePath,
+    tssaePackagePath,
+    tssaeVersion,
+    tssaeResolvedPath,
+    hasSourceConditionInExports,
     engineBinaryPath,
     engineBinarySha256,
     resolvedDirectPackages,
@@ -308,9 +345,28 @@ function currentNativePlatformKey(): string {
   return `${process.platform}-${process.arch}`;
 }
 
+function resolveArtifactExportSubpath(
+  specifier: string,
+  artifactName: string,
+  relativeExport: string,
+): string {
+  const normalizedRelative = relativeExport.replace(/^\.\//u, "");
+  if (specifier === artifactName) {
+    return `./${normalizedRelative}`;
+  }
+  if (!specifier.startsWith(`${artifactName}/`)) {
+    throw new Error(
+      `Adapter specifier ${specifier} does not belong to artifact ${artifactName}`,
+    );
+  }
+  const subpathPrefix = specifier.slice(artifactName.length + 1);
+  return `./${subpathPrefix}/${normalizedRelative}`;
+}
+
 /**
- * Verifies that an installed native adapter resolves its descriptor and native
- * library inside `checkoutDir` with an optional digest check against its `.tgz`.
+ * Verifies that an installed native adapter (root or subpath specifier) resolves
+ * its `tssae-native` descriptor and native library inside `checkoutDir` with
+ * an optional digest check against its `.tgz`.
  */
 export function verifyInstalledNativeLibrary(
   options: VerifyInstalledNativeLibraryOptions,
@@ -319,11 +375,11 @@ export function verifyInstalledNativeLibrary(
   const resolutionRoot = options.resolutionBaseDir ?? checkoutRealpath;
   const hostRequire = createRequire(join(resolutionRoot, "package.json"));
   const descriptorPath = realpathSync(
-    hostRequire.resolve(`${options.packageName}/verule-native`),
+    hostRequire.resolve(`${options.packageName}/tssae-native`),
   );
   if (!isInsideDirectory(descriptorPath, checkoutRealpath)) {
     throw new Error(
-      `Resolved ${options.packageName}/verule-native outside host checkout: ${descriptorPath}`,
+      `Resolved ${options.packageName}/tssae-native outside host checkout: ${descriptorPath}`,
     );
   }
 
@@ -375,10 +431,15 @@ export function verifyInstalledNativeLibrary(
     const artifactExports = options.artifact.manifest.exports as
       | Record<string, unknown>
       | undefined;
-    const archiveLibraryPath = artifactExports?.[`./${exportSubpath.slice(2)}`];
+    const exportKey = resolveArtifactExportSubpath(
+      options.packageName,
+      options.artifact.name,
+      exportSubpath,
+    );
+    const archiveLibraryPath = artifactExports?.[exportKey];
     if (typeof archiveLibraryPath !== "string") {
       throw new Error(
-        `Missing ./${exportSubpath.slice(2)} export in packed artifact ${options.packageName}`,
+        `Missing ${exportKey} export in packed artifact ${options.artifact.name}`,
       );
     }
     const packedBytes = execFileSync(

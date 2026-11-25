@@ -71,18 +71,23 @@ function createFakeVeruleTarballs(
   const engineScript = `#!/usr/bin/env node\nif (process.argv.includes('--version')) { console.log(${JSON.stringify(engineVersion)}); process.exit(0); }\nprocess.exit(2);\n`;
   const binarySha256 = createHash("sha256").update(engineScript).digest("hex");
   const executableName =
-    process.platform === "win32" ? "verule-engine.exe" : "verule-engine";
+    process.platform === "win32" ? "tssae-engine.exe" : "tssae-engine";
   const engineBase = pack(
-    "stage-engine",
-    "verule-engine-0.0.0.tgz",
+    "stage-tssae",
+    "tssae-0.1.0.tgz",
     {
-      name: "@verule/engine",
-      version: "0.0.0",
+      name: "tssae",
+      version: "0.1.0",
       type: "module",
-      exports: { "./binary": "./dist/binary.js" },
+      exports: {
+        ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+        "./package.json": "./package.json",
+      },
     },
     {
-      "dist/binary.js": `import { fileURLToPath } from 'node:url';\nexport const engineExecutablePath = fileURLToPath(new URL('./bin/${executableName}', import.meta.url));\n`,
+      "dist/index.js": `import { execFile } from 'node:child_process';\nimport { fileURLToPath } from 'node:url';\nimport { promisify } from 'node:util';\nconst run = promisify(execFile);\nconst engineExecutablePath = fileURLToPath(new URL('./bin/${executableName}', import.meta.url));\nexport async function getEngineVersion() { const { stdout } = await run(engineExecutablePath, ['--version']); return stdout.trimEnd(); }\n`,
+      "dist/index.d.ts":
+        "export declare function getEngineVersion(): Promise<string>;\n",
       [`dist/bin/${executableName}`]: engineScript,
     },
     [`dist/bin/${executableName}`],
@@ -98,11 +103,10 @@ function createFakeVeruleTarballs(
       type: "module",
       exports: { ".": "./dist/index.js" },
       bin: { verule: "./dist/cli.js" },
-      dependencies: { "@verule/engine": "0.0.0" },
+      dependencies: { tssae: "0.1.0" },
     },
     {
-      "dist/index.js":
-        "import { execFile } from 'node:child_process';\nimport { promisify } from 'node:util';\nimport { engineExecutablePath } from '@verule/engine/binary';\nconst run = promisify(execFile);\nexport async function getEngineVersion() { const { stdout } = await run(engineExecutablePath, ['--version']); return stdout.trimEnd(); }\n",
+      "dist/index.js": "export { getEngineVersion } from 'tssae';\n",
       "dist/cli.js":
         "#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport { getEngineVersion } from '@boringparts/verule';\nif (process.env.VERULE_SHARED_PROBE) { writeFileSync(process.env.VERULE_SHARED_PROBE, 'shared-ok'); process.stdout.write(readFileSync(process.env.VERULE_SHARED_PROBE, 'utf8') + '\\n'); }\nif (process.argv.includes('--version')) { console.log('verule 0.1.0'); } else { console.log(`verule 0.1.0 (engine ${await getEngineVersion()})`); }\n",
     },
@@ -170,9 +174,9 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
       ? hostManifest.devDependencies
       : {};
   assert.deepEqual(Object.keys(devDeps).toSorted(), ["@boringparts/verule"]);
-  assert.equal("@verule/engine" in devDeps, false);
+  assert.equal("tssae" in devDeps, false);
 
-  const audit = await verifyHostArtifactResolution({
+  const audit = verifyHostArtifactResolution({
     checkoutDir: hostDir,
     artifacts,
     blockedPaths: [devRepoDir],
@@ -204,7 +208,7 @@ void test("installs direct dependencies in a fake host, allows workspace symlink
   assert.equal(versionRun.stdout, "verule 0.1.0\n");
 
   symlinkSync(devRepoDir, join(hostDir, "node_modules", "leak-link"));
-  await assert.rejects(
+  assert.throws(
     () =>
       verifyHostArtifactResolution({
         checkoutDir: hostDir,
@@ -226,10 +230,8 @@ void test("isolates pnpm metadata for repeated same-version artifact batches", a
   const firstBatch = createFakeVeruleTarballs(firstBundleDir, "0.0.0-test-a");
   const secondBatch = createFakeVeruleTarballs(secondBundleDir, "0.0.0-test-b");
   assert.notEqual(
-    firstBatch.artifacts.find((artifact) => artifact.name === "@verule/engine")
-      ?.sha256,
-    secondBatch.artifacts.find((artifact) => artifact.name === "@verule/engine")
-      ?.sha256,
+    firstBatch.artifacts.find((artifact) => artifact.name === "tssae")?.sha256,
+    secondBatch.artifacts.find((artifact) => artifact.name === "tssae")?.sha256,
   );
 
   const pnpmShimDir = join(fixture.path, "pnpm-shim");

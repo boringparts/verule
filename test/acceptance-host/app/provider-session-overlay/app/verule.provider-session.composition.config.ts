@@ -8,9 +8,9 @@ import {
 export default defineConfig({
   tsconfig: "tsconfig.json",
   adapters: [
-    "@verule/adapter-fixture",
-    "@verule/adapter-fixture-complement",
-    "@verule/adapter-drizzle",
+    "@acme/adapter-fixture",
+    "@acme/adapter-fixture-complement",
+    "@tssae/adapters/drizzle",
   ],
   rules: [derivedConsumerCompositionRule, derivedConsumerCacheRule],
 });

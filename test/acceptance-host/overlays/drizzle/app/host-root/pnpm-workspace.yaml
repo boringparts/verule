@@ -1,7 +1,0 @@
-packages:
-  - packages/data
-  - packages/app
-catalog:
-  "@verule/adapter-drizzle": "*"
-  "@boringparts/verule": "*"
-  drizzle-orm: 0.45.3

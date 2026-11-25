@@ -1,14 +1,19 @@
+import {
+  normalizeLocation,
+  type DiagnosticLocation,
+  type Evidence,
+  type ProjectSummary,
+  type ScannedComment,
+} from "tssae";
+
 import type { CollectedDiagnostic } from "./projects.ts";
-import type {
-  DiagnosticLocation,
-  Evidence,
-  InlineIgnoreEntry,
-  ProjectSummary,
-} from "./types.ts";
+import type { InlineIgnoreEntry } from "./types.ts";
 
 export const INLINE_IGNORE_RULE_ID = "verule/inline-ignore" as const;
 
-export type EngineDirectiveItem =
+const DIRECTIVE_PREFIX = "verule-ignore-next-code-line";
+
+export type ParsedDirectiveItem =
   | {
       readonly kind: "valid";
       readonly ruleId: string;
@@ -22,9 +27,120 @@ export type EngineDirectiveItem =
       readonly at: DiagnosticLocation;
     };
 
-export type EngineDirectivesScanResult = {
-  readonly directives: readonly EngineDirectiveItem[];
-};
+function isWhitespaceChar(ch: string): boolean {
+  return /\s/u.test(ch);
+}
+
+function splitReasonSeparator(
+  rest: string,
+): readonly [string, string] | undefined {
+  if (rest.startsWith("--")) {
+    const after = rest.slice(2);
+    if (after === "" || isWhitespaceChar(after[0]!)) {
+      return ["", after];
+    }
+    return undefined;
+  }
+
+  let searchFrom = 0;
+  while (true) {
+    const idx = rest.indexOf("--", searchFrom);
+    if (idx === -1) {
+      return undefined;
+    }
+    const before = rest.slice(0, idx);
+    const after = rest.slice(idx + 2);
+    const leftOk = before.length > 0 && isWhitespaceChar(before.at(-1)!);
+    const rightOk = after === "" || isWhitespaceChar(after[0]!);
+    if (leftOk && rightOk) {
+      return [before, after];
+    }
+    searchFrom = idx + 1;
+  }
+}
+
+/** Parses one `verule-ignore-next-code-line` directive from a TSSAE standalone comment. */
+export function parseDirectiveFromComment(
+  comment: ScannedComment,
+): ParsedDirectiveItem | undefined {
+  const trimmed = comment.text.trim();
+  if (!trimmed.startsWith(DIRECTIVE_PREFIX)) {
+    return undefined;
+  }
+  const afterPrefix = trimmed.slice(DIRECTIVE_PREFIX.length);
+  if (afterPrefix.length > 0 && !isWhitespaceChar(afterPrefix[0]!)) {
+    return undefined;
+  }
+
+  const rest = afterPrefix.trim();
+  if (rest === "") {
+    return {
+      kind: "malformed",
+      message:
+        'Missing rule ID and reason; expected "verule-ignore-next-code-line <ruleId> -- <reason>".',
+      at: comment.at,
+    };
+  }
+
+  const separated = splitReasonSeparator(rest);
+  if (!separated) {
+    return {
+      kind: "malformed",
+      message:
+        'Missing "-- <reason>" separator; expected "verule-ignore-next-code-line <ruleId> -- <reason>".',
+      at: comment.at,
+    };
+  }
+
+  const [rawIdPart, rawReasonPart] = separated;
+  const idTokens = rawIdPart.trim().split(/\s+/u).filter(Boolean);
+  if (idTokens.length === 0) {
+    return {
+      kind: "malformed",
+      message:
+        'Missing rule ID before "--"; expected "verule-ignore-next-code-line <ruleId> -- <reason>".',
+      at: comment.at,
+    };
+  }
+  if (idTokens.length > 1 || idTokens[0]!.includes(",")) {
+    return {
+      kind: "malformed",
+      message: 'Expected a single rule ID before "--".',
+      at: comment.at,
+    };
+  }
+
+  const reason = rawReasonPart.trim();
+  if (reason === "") {
+    return {
+      kind: "malformed",
+      message: 'Missing non-empty reason after "--".',
+      at: comment.at,
+    };
+  }
+
+  return {
+    kind: "valid",
+    ruleId: idTokens[0]!,
+    reason,
+    at: comment.at,
+    targetLine: comment.nextCodeLine,
+  };
+}
+
+/** Filters and parses all Verule inline ignore directives from scanned snapshot comments. */
+export function parseInlineIgnoreDirectives(
+  comments: readonly ScannedComment[],
+): readonly ParsedDirectiveItem[] {
+  const directives: ParsedDirectiveItem[] = [];
+  for (const comment of comments) {
+    const parsed = parseDirectiveFromComment(comment);
+    if (parsed !== undefined) {
+      directives.push(parsed);
+    }
+  }
+  return directives;
+}
 
 export type InlineIgnoreSuppression = {
   readonly ruleId: string;
@@ -41,11 +157,6 @@ export type InlineIgnoreSettlement = {
 
 function normalizeFilePath(file: string): string {
   return file.replaceAll("\\", "/");
-}
-
-function normalizeLocation(loc: DiagnosticLocation): DiagnosticLocation {
-  const file = normalizeFilePath(loc.file);
-  return file === loc.file ? loc : { ...loc, file };
 }
 
 function primaryRangeKey(loc: DiagnosticLocation): string {
@@ -71,7 +182,7 @@ function compareLocations(
  * `(ruleId, file, start, end)` primary location uniquely matches the target code line.
  */
 export function resolveInlineIgnores(params: {
-  readonly directives: readonly EngineDirectiveItem[];
+  readonly directives: readonly ParsedDirectiveItem[];
   readonly collected: readonly CollectedDiagnostic[];
   readonly projects: readonly ProjectSummary[];
   readonly configuredRuleIds: ReadonlySet<string>;

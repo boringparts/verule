@@ -31,11 +31,7 @@ void test("verifies reentrantQueueFlagRule through installed CLI and SDK across 
   await withAcceptanceHost(
     {
       overlay: "queue",
-      additionalPackages: [
-        "@verule/rules-reference",
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-      ],
+      additionalPackages: ["@verule/rules-reference", "@tssae/adapters"],
       directPackages: ["@boringparts/verule", "@verule/rules-reference"],
     },
     async (host) => {

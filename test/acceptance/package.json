@@ -28,27 +28,20 @@
   "dependencies": {
     "@verule/acceptance-host-app": "workspace:*",
     "@verule/acceptance-host-data": "workspace:*",
-    "@verule/acceptance-host-drizzle-app": "workspace:*",
-    "@verule/acceptance-host-drizzle-data": "workspace:*",
     "@verule/acceptance-host-drizzle-zod-app": "workspace:*",
     "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
     "@verule/acceptance-host-provider-session-data": "workspace:*",
-    "@verule/acceptance-host-zod-app": "workspace:*",
-    "@verule/acceptance-host-zod-data": "workspace:*",
     "@verule/test-hosts": "workspace:*"
   },
   "devDependencies": {
     "@boringparts/verule": "workspace:*",
+    "@tssae/adapters": "0.1.0",
     "@types/node": "catalog:",
-    "@verule/adapter-drizzle": "workspace:*",
-    "@verule/adapter-fixture": "workspace:*",
-    "@verule/adapter-fixture-complement": "workspace:*",
-    "@verule/adapter-zod": "workspace:*",
-    "@verule/engine": "workspace:*",
     "@verule/rules-reference": "workspace:*",
     "@verule/tooling-config": "workspace:*",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
+    "tssae": "0.1.0",
     "typescript-7": "catalog:"
   },
   "engines": {

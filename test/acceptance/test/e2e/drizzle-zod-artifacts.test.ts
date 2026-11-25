@@ -4,32 +4,29 @@ import { test } from "node:test";
 
 import type { CheckReport, FactResult } from "@boringparts/verule";
 import {
-  copyAcceptanceHostMaterial,
-  withAcceptanceHost,
-} from "@verule/acceptance";
-import {
   ValidatorSchemaFieldsFact,
   type ValidatorSchemaFieldsFactValue,
   type ValidatorSchemaSubjectKind,
-} from "@verule/adapter-drizzle";
+} from "@tssae/adapters/drizzle";
 import {
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
   type ValidatorSubjectKind,
-} from "@verule/adapter-zod";
+} from "@tssae/adapters/zod";
+import {
+  copyAcceptanceHostMaterial,
+  withAcceptanceHost,
+} from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
 
-const adapterPackageNames = [
-  "@verule/adapter-drizzle",
-  "@verule/adapter-zod",
+const adapterSpecifiers = [
+  "@tssae/adapters/drizzle",
+  "@tssae/adapters/zod",
 ] as const;
-const directPackageNames = [
-  "@boringparts/verule",
-  ...adapterPackageNames,
-  "@verule/rules-reference",
-] as const;
+const packageNames = ["@tssae/adapters", "@verule/rules-reference"] as const;
+const directPackageNames = ["@boringparts/verule", ...packageNames] as const;
 const mainConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
 const multiSourceConfigPath = "packages/app/verule.multiple-sources.config.ts";
 const projectionsRelPath = "packages/data/src/drizzle-projections.ts";
@@ -53,40 +50,44 @@ void test("loads both installed native adapters from the neutral static host and
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: [...adapterPackageNames, "@verule/rules-reference"],
+      additionalPackages: [...packageNames],
       directPackages: directPackageNames,
-      verifyNativeAdapters: [...adapterPackageNames],
+      verifyNativeAdapters: [...adapterSpecifiers],
     },
     async (host) => {
-      for (const packageName of [
-        ...adapterPackageNames,
-        "@verule/rules-reference",
-      ]) {
-        const artifact = host.artifact(packageName);
-        const exports = artifact.manifest.exports as
-          | Record<string, Record<string, string>>
-          | undefined;
-        assert.equal(exports?.["."]?.default, "./dist/index.js");
-        assert.equal(exports?.["."]?.types, "./dist/index.d.ts");
-        assert.equal(exports?.["."]?.source, undefined);
-        const dependencies = artifact.manifest.dependencies as
+      const adaptersArtifact = host.artifact("@tssae/adapters");
+      const adaptersExports = adaptersArtifact.manifest.exports as
+        | Record<string, unknown>
+        | undefined;
+      for (const subpath of ["./drizzle", "./zod"] as const) {
+        const entry = adaptersExports?.[subpath] as
           | Record<string, string>
           | undefined;
-        assert.equal(dependencies?.["@verule/engine"], undefined);
+        assert.equal(entry?.default, `./dist/${subpath.slice(2)}/index.js`);
+        assert.equal(entry?.types, `./dist/${subpath.slice(2)}/index.d.ts`);
+        assert.equal(entry?.source, undefined);
       }
+      const rulesArtifact = host.artifact("@verule/rules-reference");
+      const rulesExports = rulesArtifact.manifest.exports as
+        | Record<string, Record<string, string>>
+        | undefined;
+      assert.equal(rulesExports?.["."]?.default, "./dist/index.js");
+      assert.equal(rulesExports?.["."]?.types, "./dist/index.d.ts");
+      assert.equal(rulesExports?.["."]?.source, undefined);
 
-      const engineArtifact = host.artifact("@verule/engine");
-      assert.ok(engineArtifact.binarySha256);
-      assert.equal(host.audit.engineBinarySha256, engineArtifact.binarySha256);
-      const adapterLibraries = adapterPackageNames.map((packageName) => {
-        const lib = host.nativeLibraries[packageName];
+      const tssaeArtifact = host.artifact("tssae");
+      assert.ok(tssaeArtifact.binarySha256);
+      assert.equal(host.audit.hasSourceConditionInExports, false);
+      assert.equal(host.audit.engineBinarySha256, tssaeArtifact.binarySha256);
+      const adapterLibraries = adapterSpecifiers.map((specifier) => {
+        const lib = host.nativeLibraries[specifier];
         assert.ok(lib);
         return lib;
       });
 
       const sdk = await host.loadSdk();
       const mainConfig = await host.loadConfig(mainConfigPath);
-      assert.deepEqual(mainConfig.adapterPackages, adapterPackageNames);
+      assert.deepEqual(mainConfig.adapterPackages, adapterSpecifiers);
 
       const coldInitial = await host.check({
         config: mainConfigPath,

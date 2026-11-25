@@ -14,12 +14,12 @@ import {
   type QueryRowNestedRelationInfo,
   type QueryRowProjectionFactValue,
   type QueryRowSubjectKind,
-} from "@verule/adapter-drizzle";
+} from "@tssae/adapters/drizzle";
 import {
   ValidatorInputFieldsFact,
   type ValidatorInputFieldsFactValue,
   type ValidatorSubjectKind,
-} from "@verule/adapter-zod";
+} from "@tssae/adapters/zod";
 
 export type RowProjectionValidatorRuleOptions = {
   readonly id?: string;

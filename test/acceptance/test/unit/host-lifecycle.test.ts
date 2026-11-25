@@ -74,18 +74,22 @@ function createFakeBundle(
     .update(engineScript)
     .digest("hex");
   const executableName =
-    process.platform === "win32" ? "verule-engine.exe" : "verule-engine";
+    process.platform === "win32" ? "tssae-engine.exe" : "tssae-engine";
   const engineBase = pack(
-    "stage-engine",
-    "verule-engine-0.0.0.tgz",
+    "stage-tssae",
+    "tssae-0.1.0.tgz",
     {
-      name: "@verule/engine",
-      version: "0.0.0",
+      name: "tssae",
+      version: "0.1.0",
       type: "module",
-      exports: { "./binary": "./dist/binary.js" },
+      exports: {
+        ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+        "./package.json": "./package.json",
+      },
     },
     {
-      "dist/binary.js": `import { fileURLToPath } from 'node:url';\nexport const engineExecutablePath = fileURLToPath(new URL('./bin/${executableName}', import.meta.url));\n`,
+      "dist/index.js": `export const version = '0.1.0';\n`,
+      "dist/index.d.ts": `export declare const version: string;\n`,
       [`dist/bin/${executableName}`]: engineScript,
     },
     [`dist/bin/${executableName}`],
@@ -105,7 +109,7 @@ function createFakeBundle(
       exports: { ".": "./dist/index.js" },
       bin: { verule: "./dist/cli.js" },
       dependencies: {
-        "@verule/engine": "0.0.0",
+        tssae: "0.1.0",
         ...options.sdkDependencies,
       },
     },

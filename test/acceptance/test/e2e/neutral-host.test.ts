@@ -42,7 +42,7 @@ async function runInstalledSdk(
 void test("runs the packed CLI on the neutral cross-package host", async (t) => {
   await withAcceptanceHost({}, async (host) => {
     const veruleArtifact = host.artifact("@boringparts/verule");
-    const engineArtifact = host.artifact("@verule/engine");
+    const tssaeArtifact = host.artifact("tssae");
     assert.equal(veruleArtifact.version, "0.1.0");
     assert.notEqual(veruleArtifact.manifest.private, true);
     assert.deepEqual(veruleArtifact.manifest.bin, {
@@ -57,9 +57,11 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
     assert.deepEqual(veruleArtifact.manifest.publishConfig, {
       access: "public",
     });
-    assert.ok(engineArtifact.binarySha256);
+    assert.ok(tssaeArtifact.binarySha256);
     assert.equal(host.audit.cliVersion, veruleArtifact.version);
-    assert.equal(host.audit.engineBinarySha256, engineArtifact.binarySha256);
+    assert.equal(host.audit.tssaeVersion, tssaeArtifact.version);
+    assert.equal(host.audit.hasSourceConditionInExports, false);
+    assert.equal(host.audit.engineBinarySha256, tssaeArtifact.binarySha256);
     assert.ok(host.audit.workspaceSymlinkCount > 0);
 
     const rootManifest = JSON.parse(host.readText("package.json")) as {

@@ -12,11 +12,24 @@ export type ScopedRegistryServer = {
   readonly url: string;
   readonly port: number;
   readonly scopes: readonly string[];
+  readonly unscopedPackages: readonly string[];
   close(): Promise<void>;
+};
+
+export type ArtifactRegistryServer = ScopedRegistryServer;
+
+export type StartArtifactRegistryOptions = {
+  /**
+   * Upstream npm registry URL used to proxy external dependencies when routing
+   * unscoped packages through the loopback registry. Pass `null` to disable
+   * upstream forwarding.
+   */
+  readonly upstreamRegistryUrl?: string | null;
 };
 
 const syntheticReleaseTimestamp = "2020-01-01T00:00:00.000Z";
 const tarballRoutePrefix = "/-/tarball/";
+const defaultUpstreamRegistry = "https://registry.npmjs.org/";
 
 function extractScope(packageName: string): string | undefined {
   if (!packageName.startsWith("@")) {
@@ -39,17 +52,48 @@ function sendJson(
   res.end(body);
 }
 
+async function proxyUpstreamRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  upstreamBaseUrl: string,
+): Promise<void> {
+  const targetUrl = new URL(req.url ?? "/", upstreamBaseUrl);
+  const headers: Record<string, string> = {};
+  if (typeof req.headers.accept === "string") {
+    headers.accept = req.headers.accept;
+  }
+  const upstreamResponse = await fetch(targetUrl, {
+    method: req.method ?? "GET",
+    headers,
+  });
+  const body =
+    req.method === "HEAD"
+      ? Buffer.alloc(0)
+      : Buffer.from(await upstreamResponse.arrayBuffer());
+  const responseHeaders: Record<string, string | number> = {
+    "content-length": body.length,
+  };
+  const contentType = upstreamResponse.headers.get("content-type");
+  if (contentType !== null) {
+    responseHeaders["content-type"] = contentType;
+  }
+  res.writeHead(upstreamResponse.status, responseHeaders);
+  res.end(req.method === "HEAD" ? undefined : body);
+}
+
 /**
- * Starts an in-process loopback HTTP npm registry serving packuments and
- * `.tgz` tarballs for the given local artifacts so host package managers
- * resolve transitive workspace dependencies without touching the dev workspace.
+ * Starts an in-process loopback HTTP npm registry serving packuments and `.tgz`
+ * tarballs for both scoped and unscoped local artifacts, while optionally
+ * forwarding external dependencies to an upstream npm registry.
  */
 export async function startArtifactRegistry(
   artifacts: readonly PackedArtifact[],
+  options: StartArtifactRegistryOptions = {},
 ): Promise<ScopedRegistryServer> {
   const byName = new Map<string, PackedArtifact>();
   const byTarball = new Map<string, PackedArtifact>();
   const scopeSet = new Set<string>();
+  const unscopedSet = new Set<string>();
 
   for (const artifact of artifacts) {
     byName.set(artifact.name, artifact);
@@ -57,12 +101,24 @@ export async function startArtifactRegistry(
     const scope = extractScope(artifact.name);
     if (scope !== undefined) {
       scopeSet.add(scope);
+    } else {
+      unscopedSet.add(artifact.name);
     }
   }
 
+  const upstreamRegistryUrl =
+    options.upstreamRegistryUrl === null
+      ? undefined
+      : (options.upstreamRegistryUrl ??
+        process.env.npm_config_registry ??
+        defaultUpstreamRegistry);
+
   let port = 0;
 
-  function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+  async function handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const rawUrl = req.url ?? "/";
     const pathname = rawUrl.split("?")[0] ?? "/";
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -89,30 +145,55 @@ export async function startArtifactRegistry(
 
     const packageName = decodeURIComponent(pathname.slice(1));
     const artifact = byName.get(packageName);
-    if (artifact === undefined) {
-      sendJson(res, 404, { error: "package_not_found" });
+    if (artifact !== undefined) {
+      const tarballUrl = `http://127.0.0.1:${String(port)}${tarballRoutePrefix}${encodeURIComponent(basename(artifact.filename))}`;
+      sendJson(res, 200, {
+        name: artifact.name,
+        "dist-tags": { latest: artifact.version },
+        time: { [artifact.version]: syntheticReleaseTimestamp },
+        versions: {
+          [artifact.version]: {
+            ...artifact.manifest,
+            dist: {
+              shasum: artifact.sha1,
+              integrity: artifact.integrity,
+              tarball: tarballUrl,
+            },
+          },
+        },
+      });
       return;
     }
 
-    const tarballUrl = `http://127.0.0.1:${String(port)}${tarballRoutePrefix}${encodeURIComponent(basename(artifact.filename))}`;
-    sendJson(res, 200, {
-      name: artifact.name,
-      "dist-tags": { latest: artifact.version },
-      time: { [artifact.version]: syntheticReleaseTimestamp },
-      versions: {
-        [artifact.version]: {
-          ...artifact.manifest,
-          dist: {
-            shasum: artifact.sha1,
-            integrity: artifact.integrity,
-            tarball: tarballUrl,
-          },
-        },
-      },
-    });
+    if (upstreamRegistryUrl !== undefined) {
+      try {
+        await proxyUpstreamRequest(req, res, upstreamRegistryUrl);
+        return;
+      } catch (error) {
+        sendJson(res, 502, {
+          error: "upstream_proxy_failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+
+    sendJson(res, 404, { error: "package_not_found" });
   }
 
-  const server = createServer(handleRequest);
+  const server = createServer((req, res) => {
+    void handleRequest(req, res).catch((error: unknown) => {
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          error: "internal_registry_error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } else {
+        res.destroy();
+      }
+    });
+  });
+
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
     server.listen(0, "127.0.0.1", () => {
@@ -134,6 +215,7 @@ export async function startArtifactRegistry(
     url: `http://127.0.0.1:${String(port)}`,
     port,
     scopes: [...scopeSet],
+    unscopedPackages: [...unscopedSet],
     async close(): Promise<void> {
       server.closeAllConnections();
       await new Promise<void>((resolveClose, rejectClose) => {

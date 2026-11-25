@@ -8,27 +8,24 @@ syncInjectedDepsAfterScripts:
   - build
 minimumReleaseAge: 1440
 minimumReleaseAgeStrict: true
+minimumReleaseAgeExclude:
+  - tssae
+  - "@tssae/*"
 allowBuilds:
   esbuild: true
 overrides: {}
 packages:
   - apps/*
   - packages/*
-  - adapters/*
   - test/*
   - test/acceptance-host/data
   - test/acceptance-host/app
-  - test/acceptance-host/overlays/drizzle/app
   - test/acceptance-host/overlays/drizzle-zod/app
-  - test/acceptance-host/overlays/zod/app
   - test/acceptance-host/overlays/*/data
 catalog:
   "@changesets/cli": 3.0.3
+  "@tssae/adapters": "0.1.0"
   "@types/node": ^26.0.0
-  "@verule/adapter-drizzle": "workspace:*"
-  "@verule/adapter-fixture": "workspace:*"
-  "@verule/adapter-fixture-complement": "workspace:*"
-  "@verule/adapter-zod": "workspace:*"
   "@verule/rules-reference": "workspace:*"
   "@boringparts/verule": "workspace:*"
   drizzle-zod: 0.8.3

@@ -1,15 +1,16 @@
 import { createHash } from "node:crypto";
 
-import { normalizeEvidence, normalizeLocation } from "./evidence.ts";
 import {
-  VeruleExecutionError,
-  type Diagnostic,
+  normalizeEvidence,
+  normalizeLocation,
   type DiagnosticLocation,
   type Evidence,
   type Gap,
-  type ProjectSummary,
-  type SourceFileOrigin,
-  type SourceFileProjectOrigin,
+} from "tssae";
+
+import {
+  VeruleExecutionError,
+  type Diagnostic,
   type VeruleConfig,
 } from "./types.ts";
 
@@ -78,42 +79,6 @@ export function resolveProjectEntries(
     return [config.tsconfig];
   }
   return ["tsconfig.json"];
-}
-
-/** Summarizes which opened projects and entry chains include each inspected source file. */
-export function buildFileOrigins(
-  projects: readonly ProjectSummary[],
-): readonly SourceFileOrigin[] {
-  const byFile = new Map<string, SourceFileProjectOrigin[]>();
-
-  for (const project of projects) {
-    const origin: SourceFileProjectOrigin = {
-      projectId: project.projectId,
-      configFile: project.configFile,
-      entryConfig: project.entryConfig,
-      entryChain: [...project.entryChain],
-    };
-
-    for (const file of project.sourceFiles) {
-      const list = byFile.get(file);
-      if (list) {
-        if (!list.some((item) => item.projectId === origin.projectId)) {
-          list.push(origin);
-        }
-      } else {
-        byFile.set(file, [origin]);
-      }
-    }
-  }
-
-  return [...byFile.entries()]
-    .toSorted(([a], [b]) => compareCodepoint(a, b))
-    .map(([file, origins]) => ({
-      file,
-      projects: origins.toSorted((a, b) =>
-        compareCodepoint(a.projectId, b.projectId),
-      ),
-    }));
 }
 
 /**

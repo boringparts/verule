@@ -44,6 +44,7 @@ import {
 export type PrepareAcceptanceHostOptions = {
   readonly overlay?: AcceptanceHostOverlay;
   readonly additionalPackages?: readonly string[];
+  readonly extraArtifacts?: readonly PackedArtifact[];
   readonly directPackages?: readonly string[];
   readonly verifyNativeAdapters?: readonly string[];
   readonly bundle?: PackedArtifactBundle;
@@ -129,6 +130,23 @@ export type PreparedAcceptanceHost = {
   [Symbol.asyncDispose](): Promise<void>;
 };
 
+function resolveArtifactForSpecifier(
+  artifactByName: ReadonlyMap<string, PackedArtifact>,
+  specifier: string,
+): PackedArtifact | undefined {
+  const exact = artifactByName.get(specifier);
+  if (exact !== undefined) {
+    return exact;
+  }
+  const parts = specifier.split("/");
+  const rootName = specifier.startsWith("@")
+    ? parts.length >= 2
+      ? `${parts[0]!}/${parts[1]!}`
+      : specifier
+    : parts[0]!;
+  return artifactByName.get(rootName);
+}
+
 /**
  * Prepares an isolated out-of-repo acceptance host with packed workspace
  * artifacts installed and verified, guaranteeing LIFO resource reclamation on
@@ -168,11 +186,15 @@ export async function prepareAcceptanceHost(
       });
     }
 
+    const extraArtifacts = options.extraArtifacts ?? [];
+    const artifacts = [...bundle.artifacts, ...extraArtifacts];
+
     const directPackages = [
       ...new Set(
         options.directPackages ?? [
           ...DEFAULT_DIRECT_VERULE_PACKAGES,
           ...(options.additionalPackages ?? []),
+          ...extraArtifacts.map((artifact) => artifact.name),
         ],
       ),
     ];
@@ -180,7 +202,7 @@ export async function prepareAcceptanceHost(
     const installation = await installArtifactPackages({
       checkoutDir: hostDir,
       packageManager: options.packageManager ?? "pnpm",
-      artifacts: bundle.artifacts,
+      artifacts,
       directPackages,
       storeDir,
       ...(options.env === undefined ? {} : { env: options.env }),
@@ -191,9 +213,9 @@ export async function prepareAcceptanceHost(
       );
     }
 
-    const audit = await verifyHostArtifactResolution({
+    const audit = verifyHostArtifactResolution({
       checkoutDir: hostDir,
-      artifacts: bundle.artifacts,
+      artifacts,
       directPackages,
       ...(options.blockedPaths === undefined
         ? {}
@@ -201,7 +223,6 @@ export async function prepareAcceptanceHost(
       allowedStorePaths: [storeDir],
     });
 
-    const artifacts = bundle.artifacts;
     const artifactByName = new Map(
       artifacts.map((artifact) => [artifact.name, artifact]),
     );
@@ -215,7 +236,10 @@ export async function prepareAcceptanceHost(
 
     const nativeLibraries: Record<string, VerifiedNativeLibrary> = {};
     for (const packageName of options.verifyNativeAdapters ?? []) {
-      const adapterArtifact = artifactByName.get(packageName);
+      const adapterArtifact = resolveArtifactForSpecifier(
+        artifactByName,
+        packageName,
+      );
       nativeLibraries[packageName] = verifyInstalledNativeLibrary({
         checkoutDir: hostDir,
         packageName,
@@ -381,7 +405,10 @@ export async function prepareAcceptanceHost(
         return configModule.default;
       },
       verifyNativeAdapter(packageName, verifyOptions = {}) {
-        const adapterArtifact = artifactByName.get(packageName);
+        const adapterArtifact = resolveArtifactForSpecifier(
+          artifactByName,
+          packageName,
+        );
         return verifyInstalledNativeLibrary({
           checkoutDir: hostDir,
           packageName,

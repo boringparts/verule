@@ -2,21 +2,14 @@ import { isAbsolute, relative } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
-  VeruleExecutionError,
-  type CheckpointOutcome,
-  type Diagnostic,
+  locationMatchesTarget,
+  locationsOverlap,
   type DiagnosticLocation,
-  type EngineProviderExtractionStats,
-  type ExplainCheckpointTrace,
+  type EngineCallIoMetrics,
   type ExplainCleanupPath,
   type ExplainLocalGap,
   type ExplainProviderEvaluation,
-  type ExplainQueryStep,
-  type ExplainResult,
-  type ExplainStatus,
   type Gap,
-  type ObservationDetailEntry,
-  type ObservationReport,
   type NativeAdapterObservation,
   type ObserveLimit,
   type ObserveLimitInput,
@@ -24,42 +17,21 @@ import {
   type ObserveOptions,
   type ProjectSummary,
   type SourceTarget,
+} from "tssae";
+
+import {
+  VeruleExecutionError,
+  type CheckpointOutcome,
+  type Diagnostic,
+  type ExplainCheckpointTrace,
+  type ExplainQueryStep,
+  type ExplainResult,
+  type ExplainStatus,
+  type ObservationDetailEntry,
+  type ObservationReport,
 } from "./types.ts";
 
-export type EngineStepMetrics = {
-  readonly op: string;
-  readonly provider: string;
-  readonly cacheStatus: "computed" | "reused";
-  readonly durationMs: number;
-  readonly candidateCount: number;
-  readonly details?: readonly {
-    readonly kind: string;
-    readonly file?: string;
-    readonly line?: number;
-    readonly column?: number;
-    readonly summary: string;
-  }[];
-};
-
-export type EngineRpcMetrics = {
-  readonly durationMs: number;
-  readonly encodeMs: number;
-  readonly truncated: boolean;
-  readonly droppedCount: number;
-  readonly steps?: readonly EngineStepMetrics[];
-  readonly providerExtractions?: Readonly<
-    Record<string, EngineProviderExtractionStats>
-  >;
-};
-
-export type EngineCallIoMetrics = {
-  readonly isQueryBatch: boolean;
-  readonly bytesSent: number;
-  readonly bytesReceived: number;
-  readonly encodeMs: number;
-  readonly writeMs: number;
-  readonly engineMetrics?: EngineRpcMetrics;
-};
+export { type EngineCallIoMetrics };
 
 export type NormalizedObserveConfig = {
   readonly mode: ObserveMode;
@@ -334,44 +306,6 @@ export function normalizeObserveConfig(
     mode,
     ...(limit !== undefined ? { limit } : {}),
   };
-}
-
-/** Returns whether a diagnostic or syntax span contains the requested `SourceTarget`. */
-export function locationMatchesTarget(
-  loc: DiagnosticLocation,
-  target: SourceTarget,
-): boolean {
-  if (loc.file !== target.file) {
-    return false;
-  }
-  if (target.line === undefined) {
-    return true;
-  }
-  if (target.line < loc.line || target.line > loc.endLine) {
-    return false;
-  }
-  if (target.column === undefined) {
-    return true;
-  }
-  if (target.line === loc.line && target.column < loc.column) {
-    return false;
-  }
-  if (target.line === loc.endLine) {
-    if (loc.line === loc.endLine && loc.endColumn <= loc.column) {
-      return target.column === loc.column;
-    }
-    return target.column < loc.endColumn;
-  }
-  return true;
-}
-
-/** Returns whether two spans in the same file overlap. */
-export function locationsOverlap(
-  a: DiagnosticLocation,
-  b: DiagnosticLocation,
-): boolean {
-  if (a.file !== b.file) return false;
-  return a.start <= b.end && b.start <= a.end;
 }
 
 /** Collects observation metrics, bounded detail entries, and explain traces for a check run. */

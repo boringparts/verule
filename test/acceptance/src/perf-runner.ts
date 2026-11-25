@@ -180,8 +180,7 @@ export type RunPoolOwnershipPerfOptions = {
 const defaultOperationTimeoutMs = 120_000;
 const poolOwnershipAdditionalPackages = [
   "@verule/rules-reference",
-  "@verule/adapter-drizzle",
-  "@verule/adapter-zod",
+  "@tssae/adapters",
 ] as const;
 
 export function formatTierLabel(tier: PoolOwnershipScaleSpec): string {

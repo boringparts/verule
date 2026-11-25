@@ -521,11 +521,7 @@ export async function withPoolOwnershipHost<T>(
 ): Promise<T> {
   return withAcceptanceHost(
     {
-      additionalPackages: [
-        "@verule/rules-reference",
-        "@verule/adapter-drizzle",
-        "@verule/adapter-zod",
-      ],
+      additionalPackages: ["@verule/rules-reference", "@tssae/adapters"],
       directPackages: ["@boringparts/verule", "@verule/rules-reference"],
       ...(options.bundle === undefined ? {} : { bundle: options.bundle }),
       ...(options.tempRoot === undefined ? {} : { tempRoot: options.tempRoot }),

@@ -2,8 +2,8 @@ packages:
   - packages/data
   - packages/app
 catalog:
-  "@verule/adapter-drizzle": "*"
-  "@verule/adapter-fixture": "*"
-  "@verule/adapter-fixture-complement": "*"
+  "@tssae/adapters": "*"
+  "@acme/adapter-fixture": "*"
+  "@acme/adapter-fixture-complement": "*"
   "@boringparts/verule": "*"
   drizzle-orm: 0.45.3
