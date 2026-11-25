@@ -95,35 +95,22 @@ function createFakeBundle(
     binarySha256: options.overrideEngineSha256 ?? computedEngineSha,
   };
 
-  const sdk = pack(
-    "stage-sdk",
-    "verule-sdk-0.0.0.tgz",
+  const verule = pack(
+    "stage-verule",
+    "boringparts-verule-0.1.0.tgz",
     {
-      name: "@verule/sdk",
-      version: "0.0.0",
+      name: "@boringparts/verule",
+      version: "0.1.0",
       type: "module",
       exports: { ".": "./dist/index.js" },
+      bin: { verule: "./dist/cli.js" },
       dependencies: {
         "@verule/engine": "0.0.0",
         ...options.sdkDependencies,
       },
     },
     {
-      "dist/index.js": "export const sdkVersion = '0.0.0';\n",
-    },
-  );
-
-  const cli = pack(
-    "stage-cli",
-    "verule-cli-0.0.0.tgz",
-    {
-      name: "@verule/cli",
-      version: "0.0.0",
-      type: "module",
-      bin: { verule: "./dist/cli.js" },
-      dependencies: { "@verule/sdk": "0.0.0" },
-    },
-    {
+      "dist/index.js": "export const sdkVersion = '0.1.0';\n",
       "dist/cli.js": options.cliScript,
     },
     ["dist/cli.js"],
@@ -131,7 +118,7 @@ function createFakeBundle(
 
   return {
     packDir: bundleDir,
-    artifacts: [engine, sdk, cli],
+    artifacts: [engine, verule],
     dispose(): void {},
   };
 }

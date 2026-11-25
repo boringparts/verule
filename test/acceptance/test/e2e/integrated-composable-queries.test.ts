@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import { test } from "node:test";
 
+import type { CheckReport } from "@boringparts/verule";
 import {
   copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
-import type { CheckReport } from "@verule/sdk";
 import { runTscTypecheck } from "@verule/test-hosts";
 
 const drizzleZodConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
@@ -86,8 +86,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         "@verule/rules-reference",
       ],
       directPackages: [
-        "@verule/sdk",
-        "@verule/cli",
+        "@boringparts/verule",
         "@verule/adapter-drizzle",
         "@verule/adapter-zod",
         "@verule/adapter-fixture",
@@ -765,8 +764,7 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
         "@verule/rules-reference",
       ],
       directPackages: [
-        "@verule/sdk",
-        "@verule/cli",
+        "@boringparts/verule",
         "@verule/adapter-drizzle",
         "@verule/adapter-zod",
         "@verule/rules-reference",

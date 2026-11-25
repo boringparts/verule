@@ -2,7 +2,7 @@ import {
   defineAdapter,
   defineFactProvider,
   type LibraryAdapter,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 
 import { FixtureCallSourceFact, FixtureDerivedConsumerFact } from "./facts.ts";
 

@@ -1,0 +1,69 @@
+{
+  "extends": ["//"],
+  "tags": ["library"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": [],
+      "outputs": ["dist/**"],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "format:check": {
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "dependsOn": ["lint:fix"],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "postbuild": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["work:lifecycle"]
+    },
+    "test": {
+      "dependsOn": ["^build", "build"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "test:e2e": {
+      "dependsOn": ["^build", "build"],
+      "passThroughEnv": [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy"
+      ],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck", "build"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:light"]
+    }
+  }
+}

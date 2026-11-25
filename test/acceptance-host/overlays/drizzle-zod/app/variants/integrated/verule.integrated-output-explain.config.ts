@@ -1,5 +1,5 @@
+import { defineConfig, defineRule } from "@boringparts/verule";
 import { ValidatorOutputFieldsFact } from "@verule/adapter-zod";
-import { defineConfig, defineRule } from "@verule/sdk";
 
 const validatorOutputProbeRule = defineRule({
   id: "validator-output-fields-probe",

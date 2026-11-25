@@ -5,6 +5,14 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  defineAdapter,
+  defineConfig,
+  defineRule,
+  openSession,
+  runCheck,
+  type FactResult,
+} from "@boringparts/verule";
+import {
   ValidatorFieldFact,
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
@@ -12,14 +20,6 @@ import {
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
-import {
-  defineAdapter,
-  defineConfig,
-  defineRule,
-  openSession,
-  runCheck,
-  type FactResult,
-} from "@verule/sdk";
 import {
   installPackedWorkspacePackages,
   linkNodeModulesPackage,
@@ -476,7 +476,7 @@ void describe("@verule/adapter-zod", () => {
     });
   });
 
-  void it("compiles an external TypeScript consumer against built @verule/sdk and @verule/adapter-zod .d.ts", async () => {
+  void it("compiles an external TypeScript consumer against built @boringparts/verule and @verule/adapter-zod .d.ts", async () => {
     const externalConsumerSource = readFileSync(
       join(packageRoot, "test", "fixtures", "external-consumer.ts"),
       "utf8",
@@ -507,7 +507,7 @@ void describe("@verule/adapter-zod", () => {
         setup: async (host) => {
           await installPackedWorkspacePackages(
             host.rootDir,
-            ["@verule/sdk", "@verule/adapter-zod"],
+            ["@boringparts/verule", "@verule/adapter-zod"],
             { cwd: packageRoot },
           );
         },

@@ -5,11 +5,6 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import {
-  copyAcceptanceHostMaterial,
-  type PreparedAcceptanceHost,
-  withAcceptanceHost,
-} from "@verule/acceptance";
 import type {
   CheckReport,
   FactType,
@@ -17,7 +12,12 @@ import type {
   ObservationDetailEntry,
   SyntaxRef,
   VeruleExecutionError,
-} from "@verule/sdk";
+} from "@boringparts/verule";
+import {
+  copyAcceptanceHostMaterial,
+  type PreparedAcceptanceHost,
+  withAcceptanceHost,
+} from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
 
 const packageNames = [

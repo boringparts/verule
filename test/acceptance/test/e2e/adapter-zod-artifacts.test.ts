@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import { test } from "node:test";
 
+import type { CallRef } from "@boringparts/verule";
 import { withAcceptanceHost } from "@verule/acceptance";
 import {
   ValidatorInputFieldsFact,
@@ -9,7 +10,6 @@ import {
   type ValidatorInputFieldsFactValue,
   type ValidatorOutputFieldsFactValue,
 } from "@verule/adapter-zod";
-import type { CallRef } from "@verule/sdk";
 
 const adapterPackageName = "@verule/adapter-zod";
 const configPath = "packages/app/verule.zod.native.config.ts";

@@ -5,6 +5,7 @@ import { dirname, join, sep } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
+import type { CheckReport, FactResult } from "@boringparts/verule";
 import {
   type PreparedAcceptanceHost,
   withAcceptanceHost,
@@ -14,11 +15,6 @@ import type {
   DrizzleTableSubjectKind,
   QueryRowProjectionFactValue,
 } from "@verule/adapter-drizzle";
-import type {
-  CheckReport,
-  FactResult,
-  NormalizedVeruleConfig,
-} from "@verule/sdk";
 
 const adapterPackageName = "@verule/adapter-drizzle";
 const configRelativePath = "packages/app/verule.drizzle.native.config.ts";
@@ -40,8 +36,7 @@ async function runInstalledSdk(host: PreparedAcceptanceHost): Promise<{
 }> {
   const sdk = await host.loadSdk();
   const configPath = host.resolvePath(configRelativePath);
-  const config =
-    await host.loadConfig<NormalizedVeruleConfig>(configRelativePath);
+  const config = await host.loadConfig(configRelativePath);
   const projectionRuleModule = (await import(
     pathToFileURL(
       host.resolvePath("packages/app/src/drizzle-projection-rule.ts"),

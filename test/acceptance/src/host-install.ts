@@ -14,8 +14,7 @@ import { startArtifactRegistry } from "./registry.ts";
 import type { PackageManager } from "./types.ts";
 
 export const DEFAULT_DIRECT_VERULE_PACKAGES: readonly string[] = [
-  "@verule/sdk",
-  "@verule/cli",
+  "@boringparts/verule",
 ];
 
 export type CommandOutcome = {

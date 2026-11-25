@@ -1,4 +1,15 @@
 import {
+  defineRule,
+  resolveRetainedObjectFields,
+  type DiagnosticBasis,
+  type DiagnosticLocation,
+  type FactResult,
+  type ObjectFieldShape,
+  type Rule,
+  type SyntaxRef,
+  type ValuePropagationPath,
+} from "@boringparts/verule";
+import {
   QueryRowProjectionFact,
   type QueryRowNestedRelationInfo,
   type QueryRowProjectionFactValue,
@@ -9,17 +20,6 @@ import {
   type ValidatorInputFieldsFactValue,
   type ValidatorSubjectKind,
 } from "@verule/adapter-zod";
-import {
-  defineRule,
-  resolveRetainedObjectFields,
-  type DiagnosticBasis,
-  type DiagnosticLocation,
-  type FactResult,
-  type ObjectFieldShape,
-  type Rule,
-  type SyntaxRef,
-  type ValuePropagationPath,
-} from "@verule/sdk";
 
 export type RowProjectionValidatorRuleOptions = {
   readonly id?: string;

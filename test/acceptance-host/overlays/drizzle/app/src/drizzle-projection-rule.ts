@@ -1,8 +1,8 @@
+import { defineRule, type FactResult } from "@boringparts/verule";
 import {
   QueryRowProjectionFact,
   type QueryRowProjectionFactValue,
 } from "@verule/adapter-drizzle";
-import { defineRule, type FactResult } from "@verule/sdk";
 
 export type DrizzleProjectionResult = FactResult<
   "syntax" | "call" | "declaration",

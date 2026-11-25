@@ -1,9 +1,9 @@
+import { defineRule, type FactResult } from "@boringparts/verule";
 import {
   DrizzleTableColumnsFact,
   type DrizzleTableColumnsFactValue,
   type DrizzleTableSubjectKind,
 } from "@verule/adapter-drizzle";
-import { defineRule, type FactResult } from "@verule/sdk";
 
 export type DrizzleTableResult = FactResult<
   DrizzleTableSubjectKind,
@@ -43,13 +43,13 @@ export const drizzleTableColumnsRule = defineRule({
       }
 
       const notNullCols = fact.value.columnNames.filter(
-        (name) => fact.value.columns[name]?.nullable === false,
+        (name) => !fact.value.columns[name]?.nullable,
       );
       const defaultedCols = fact.value.columnNames.filter(
-        (name) => fact.value.columns[name]?.hasDefault === true,
+        (name) => fact.value.columns[name]?.hasDefault,
       );
       const primaryKeyCols = fact.value.columnNames.filter(
-        (name) => fact.value.columns[name]?.primaryKey === true,
+        (name) => fact.value.columns[name]?.primaryKey,
       );
 
       ctx.report({

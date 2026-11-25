@@ -22,7 +22,7 @@ import {
   type SyntaxNodeResult,
   type SyntaxRef,
   type ValuePropagationTargetResult,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 
 /** Specification of a factory-delegation scope whose executions create coexisting child items. */
 export type ChildItemScopeSpec = {

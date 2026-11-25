@@ -4,11 +4,6 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  ValidatorInputFieldsFact,
-  ValidatorOutputFieldsFact,
-  type ValidatorInputFieldsFactValue,
-} from "@verule/adapter-zod";
-import {
   VeruleExecutionError,
   defineAdapter,
   defineConfig,
@@ -16,7 +11,12 @@ import {
   defineRule,
   runCheck,
   type FactResult,
-} from "@verule/sdk";
+} from "@boringparts/verule";
+import {
+  ValidatorInputFieldsFact,
+  ValidatorOutputFieldsFact,
+  type ValidatorInputFieldsFactValue,
+} from "@verule/adapter-zod";
 import { withTempHost, type PreparedTempHost } from "@verule/test-hosts";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));

@@ -56,22 +56,22 @@ void test("serves packuments with release age metadata and tarballs over loopbac
   using fixture = mkdtempDisposableSync(join(tmpdir(), "verule-reg-unit-"));
   const artifact = createTestTarball(
     join(fixture.path, "stage"),
-    join(fixture.path, "verule-sdk-0.0.0.tgz"),
+    join(fixture.path, "boringparts-verule-0.1.0.tgz"),
     {
-      name: "@verule/sdk",
-      version: "0.0.0",
+      name: "@boringparts/verule",
+      version: "0.1.0",
       type: "module",
       exports: { ".": "./dist/index.js" },
     },
-    { "dist/index.js": "export const version = '0.0.0';\n" },
+    { "dist/index.js": "export const version = '0.1.0';\n" },
   );
 
   const registry = await startArtifactRegistry([artifact]);
   try {
     assert.match(registry.url, /^http:\/\/127\.0\.0\.1:\d+$/u);
-    assert.deepEqual(registry.scopes, ["@verule"]);
+    assert.deepEqual(registry.scopes, ["@boringparts"]);
 
-    const encodedRes = await fetch(`${registry.url}/@verule%2fsdk`);
+    const encodedRes = await fetch(`${registry.url}/@boringparts%2fverule`);
     assert.equal(encodedRes.status, 200);
     const packument = (await encodedRes.json()) as {
       name: string;
@@ -81,9 +81,9 @@ void test("serves packuments with release age metadata and tarballs over loopbac
         { dist: { integrity: string; shasum: string; tarball: string } }
       >;
     };
-    assert.equal(packument.name, "@verule/sdk");
-    assert.equal(packument.time["0.0.0"], "2020-01-01T00:00:00.000Z");
-    const dist = packument.versions["0.0.0"]?.dist;
+    assert.equal(packument.name, "@boringparts/verule");
+    assert.equal(packument.time["0.1.0"], "2020-01-01T00:00:00.000Z");
+    const dist = packument.versions["0.1.0"]?.dist;
     assert.ok(dist);
     assert.equal(dist.shasum, artifact.sha1);
     assert.equal(dist.integrity, artifact.integrity);
@@ -96,7 +96,7 @@ void test("serves packuments with release age metadata and tarballs over loopbac
       artifact.sha256,
     );
 
-    const unencodedRes = await fetch(`${registry.url}/@verule/sdk`);
+    const unencodedRes = await fetch(`${registry.url}/@boringparts/verule`);
     assert.equal(unencodedRes.status, 200);
   } finally {
     await registry.close();
@@ -118,12 +118,12 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
       "dist/binary.js": "export const engineExecutablePath = 'fake-engine';\n",
     },
   );
-  const sdkArtifact = createTestTarball(
-    join(fixture.path, "stage-sdk"),
-    join(fixture.path, "verule-sdk-0.0.0.tgz"),
+  const veruleArtifact = createTestTarball(
+    join(fixture.path, "stage-verule"),
+    join(fixture.path, "boringparts-verule-0.1.0.tgz"),
     {
-      name: "@verule/sdk",
-      version: "0.0.0",
+      name: "@boringparts/verule",
+      version: "0.1.0",
       type: "module",
       exports: { ".": "./dist/index.js" },
       dependencies: { "@verule/engine": "0.0.0" },
@@ -150,11 +150,14 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
   mkdirSync(cacheHome, { recursive: true });
   mkdirSync(storeDir, { recursive: true });
 
-  const registry = await startArtifactRegistry([engineArtifact, sdkArtifact]);
+  const registry = await startArtifactRegistry([
+    engineArtifact,
+    veruleArtifact,
+  ]);
   try {
     writeFileSync(
       join(hostDir, ".npmrc"),
-      `@verule:registry=${registry.url}/\n`,
+      `@boringparts:registry=${registry.url}/\n@verule:registry=${registry.url}/\n`,
     );
     await execFileAsync(
       "pnpm",
@@ -165,7 +168,7 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
         "--save-dev",
         "--workspace-root",
         "--ignore-scripts",
-        "@verule/sdk@0.0.0",
+        "@boringparts/verule@0.1.0",
       ],
       {
         cwd: hostDir,
@@ -182,10 +185,12 @@ void test("resolves transitive @verule dependency from loopback registry in a fa
   const hostPkg = JSON.parse(
     readFileSync(join(hostDir, "package.json"), "utf8"),
   ) as { devDependencies: Record<string, string> };
-  assert.deepEqual(Object.keys(hostPkg.devDependencies), ["@verule/sdk"]);
+  assert.deepEqual(Object.keys(hostPkg.devDependencies), [
+    "@boringparts/verule",
+  ]);
 
   const hostRequire = createRequire(join(hostDir, "package.json"));
-  const sdkResolved = hostRequire.resolve("@verule/sdk");
+  const sdkResolved = hostRequire.resolve("@boringparts/verule");
   const sdkRequire = createRequire(sdkResolved);
   const engineResolved = sdkRequire.resolve("@verule/engine/binary");
   const hostReal = realpathSync(hostDir);

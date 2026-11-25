@@ -9,7 +9,7 @@
   "dependencies": {
     "@verule/acceptance-host-zod-data": "workspace:*",
     "@verule/adapter-zod": "catalog:",
-    "@verule/sdk": "catalog:",
+    "@boringparts/verule": "catalog:",
     "drizzle-orm": "catalog:",
     "drizzle-zod": "catalog:",
     "zod": "catalog:"

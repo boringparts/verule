@@ -4,14 +4,13 @@
   "tasks": {
     "build": {
       "dependsOn": [
+        "@boringparts/verule#build",
         "@verule/adapter-drizzle#build",
         "@verule/adapter-fixture#build",
         "@verule/adapter-fixture-complement#build",
         "@verule/adapter-zod#build",
-        "@verule/cli#build",
         "@verule/engine#build",
         "@verule/rules-reference#build",
-        "@verule/sdk#build",
         "@verule/test-hosts#build"
       ],
       "inputs": [],

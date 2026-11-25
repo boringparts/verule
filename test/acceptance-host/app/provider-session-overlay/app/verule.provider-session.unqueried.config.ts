@@ -1,5 +1,5 @@
+import { defineConfig } from "@boringparts/verule";
 import { neutralProductReviewRule } from "@verule/acceptance-host-app/rule";
-import { defineConfig } from "@verule/sdk";
 
 export default defineConfig({
   tsconfig: "tsconfig.json",

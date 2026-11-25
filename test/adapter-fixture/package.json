@@ -43,7 +43,7 @@
     "test": "node --conditions=source --test --test-reporter=spec 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@verule/sdk": "workspace:*"
+    "@boringparts/verule": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -146,7 +146,7 @@ function auditNodeModulesSymlinks(options: {
 }
 
 /**
- * Verifies that `@verule/cli`, `@verule/sdk`, the transitive `@verule/engine`
+ * Verifies that `@boringparts/verule`, the transitive `@verule/engine`
  * binary, and any optional direct packages resolve inside the host checkout's
  * `node_modules` tree with matching artifact digests and zero symlinks back to
  * the development repository.
@@ -170,12 +170,20 @@ export async function verifyHostArtifactResolution(
   });
 
   const hostRequire = createRequire(join(checkoutRealpath, "package.json"));
+  const sdkResolvedPath = realpathSync(
+    hostRequire.resolve("@boringparts/verule"),
+  );
+  if (!isInsideDirectory(sdkResolvedPath, checkoutRealpath)) {
+    throw new Error(
+      `Resolved @boringparts/verule outside host checkout: ${sdkResolvedPath}`,
+    );
+  }
   const cliPackagePath = realpathSync(
-    hostRequire.resolve("@verule/cli/package.json"),
+    join(dirname(dirname(sdkResolvedPath)), "package.json"),
   );
   if (!isInsideDirectory(cliPackagePath, checkoutRealpath)) {
     throw new Error(
-      `Resolved @verule/cli/package.json outside host checkout: ${cliPackagePath}`,
+      `Resolved @boringparts/verule/package.json outside host checkout: ${cliPackagePath}`,
     );
   }
   const cliManifestRaw: unknown = JSON.parse(
@@ -192,18 +200,11 @@ export async function verifyHostArtifactResolution(
     throw new Error(`Missing version in ${cliPackagePath}`);
   }
   const packedCli = options.artifacts.find(
-    (artifact) => artifact.name === "@verule/cli",
+    (artifact) => artifact.name === "@boringparts/verule",
   );
   if (packedCli !== undefined && cliVersion !== packedCli.version) {
     throw new Error(
-      `Resolved @verule/cli version ${cliVersion} does not match packed artifact version ${packedCli.version}`,
-    );
-  }
-
-  const sdkResolvedPath = realpathSync(hostRequire.resolve("@verule/sdk"));
-  if (!isInsideDirectory(sdkResolvedPath, checkoutRealpath)) {
-    throw new Error(
-      `Resolved @verule/sdk outside host checkout: ${sdkResolvedPath}`,
+      `Resolved @boringparts/verule version ${cliVersion} does not match packed artifact version ${packedCli.version}`,
     );
   }
 

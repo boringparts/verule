@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { CheckReport, VeruleConfig } from "@boringparts/verule";
 import { withAcceptanceHost } from "@verule/acceptance";
-import type { CheckReport, VeruleConfig } from "@verule/sdk";
 
 const configPath = "packages/app/verule.config.ts";
 const schedulerPath = "packages/app/src/scheduler.ts";
@@ -36,10 +36,10 @@ void test("verifies reentrantQueueFlagRule through installed CLI and SDK across 
         "@verule/adapter-drizzle",
         "@verule/adapter-zod",
       ],
-      directPackages: ["@verule/sdk", "@verule/cli", "@verule/rules-reference"],
+      directPackages: ["@boringparts/verule", "@verule/rules-reference"],
     },
     async (host) => {
-      const cliArtifact = host.artifact("@verule/cli");
+      const cliArtifact = host.artifact("@boringparts/verule");
       const rulesArtifact = host.artifact("@verule/rules-reference");
       const schedulerSource = host.readText(schedulerPath);
 

@@ -9,7 +9,7 @@
   "dependencies": {
     "@verule/acceptance-host-drizzle-data": "workspace:*",
     "@verule/adapter-drizzle": "catalog:",
-    "@verule/sdk": "catalog:"
+    "@boringparts/verule": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

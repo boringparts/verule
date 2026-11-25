@@ -1,4 +1,4 @@
-import { defineFactType } from "@verule/sdk";
+import { defineFactType } from "@boringparts/verule";
 
 export type FixtureCallSourceValue = {
   readonly text: string;

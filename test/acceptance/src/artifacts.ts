@@ -10,8 +10,7 @@ const maxTarBufferBytes = 64 * 1024 * 1024;
 
 export const CORE_VERULE_PACKAGES: readonly string[] = [
   "@verule/engine",
-  "@verule/sdk",
-  "@verule/cli",
+  "@boringparts/verule",
 ];
 
 export type PackedArtifact = {
@@ -78,7 +77,7 @@ async function readTarEntry(
 }
 
 /**
- * Packs `@verule/engine`, `@verule/sdk`, `@verule/cli`, and any optional
+ * Packs `@verule/engine`, `@boringparts/verule`, and any optional
  * extension packages into local `.tgz` files with computed digests.
  */
 export async function packWorkspaceArtifacts(

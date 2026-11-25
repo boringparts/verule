@@ -7,7 +7,7 @@ import type {
   CheckReport,
   Diagnostic,
   ObservationDetailEntry,
-} from "@verule/sdk";
+} from "@boringparts/verule";
 
 import type { PackedArtifactBundle } from "./artifacts.ts";
 import {
@@ -526,7 +526,7 @@ export async function withPoolOwnershipHost<T>(
         "@verule/adapter-drizzle",
         "@verule/adapter-zod",
       ],
-      directPackages: ["@verule/sdk", "@verule/cli", "@verule/rules-reference"],
+      directPackages: ["@boringparts/verule", "@verule/rules-reference"],
       ...(options.bundle === undefined ? {} : { bundle: options.bundle }),
       ...(options.tempRoot === undefined ? {} : { tempRoot: options.tempRoot }),
       ...(options.env === undefined ? {} : { env: options.env }),

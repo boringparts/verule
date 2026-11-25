@@ -1,4 +1,4 @@
-import { defineAdapter, defineFactProvider } from "@verule/sdk";
+import { defineAdapter, defineFactProvider } from "@boringparts/verule";
 
 import {
   ValidatorFieldFact,

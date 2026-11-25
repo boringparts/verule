@@ -5,16 +5,16 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  ValidatorSchemaFieldsFact,
-  type ValidatorSchemaFieldsFactValue,
-  type ValidatorSchemaSubjectKind,
-} from "@verule/adapter-drizzle";
-import {
   defineConfig,
   defineRule,
   runCheck,
   type FactResult,
-} from "@verule/sdk";
+} from "@boringparts/verule";
+import {
+  ValidatorSchemaFieldsFact,
+  type ValidatorSchemaFieldsFactValue,
+  type ValidatorSchemaSubjectKind,
+} from "@verule/adapter-drizzle";
 import {
   linkNodeModulesPackage,
   withTempHost,

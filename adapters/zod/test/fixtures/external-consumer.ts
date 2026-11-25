@@ -1,9 +1,9 @@
+import { defineConfig, defineRule } from "@boringparts/verule";
 import {
   ValidatorInputFieldsFact,
   ValidatorOutputFieldsFact,
   zodAdapter,
 } from "@verule/adapter-zod";
-import { defineConfig, defineRule } from "@verule/sdk";
 
 const rule = defineRule({
   id: "consumer-zod-rule",

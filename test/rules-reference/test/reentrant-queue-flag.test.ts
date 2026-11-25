@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { defineConfig, openSession, runCheck } from "@boringparts/verule";
 import {
   defineReentrantQueueModel,
   reentrantQueueFlagRule,
 } from "@verule/rules-reference";
-import { defineConfig, openSession, runCheck } from "@verule/sdk";
 import { withTempHost } from "@verule/test-hosts";
 
 const schedulerQueueModel = defineReentrantQueueModel({

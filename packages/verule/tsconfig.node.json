@@ -1,0 +1,18 @@
+{
+  "extends": "@verule/tooling-config/node.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "declarationMap": false
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "src/**/*.ts",
+    "test/*.ts",
+    "test/unit/**/*.ts",
+    "test/integration/**/*.ts",
+    "test/e2e/**/*.ts",
+    "test/helpers/**/*.ts",
+    "test/fixtures/type-contract/**/*.ts",
+    "*.config.ts"
+  ]
+}

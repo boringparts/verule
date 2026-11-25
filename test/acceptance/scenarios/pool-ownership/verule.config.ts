@@ -1,8 +1,8 @@
+import { defineConfig } from "@boringparts/verule";
 import {
   poolResourceOwnershipModel,
   poolResourceOwnershipRule,
 } from "@verule/rules-reference";
-import { defineConfig } from "@verule/sdk";
 
 export default defineConfig({
   tsconfig: "tsconfig.json",

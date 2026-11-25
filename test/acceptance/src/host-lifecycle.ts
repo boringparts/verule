@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { NormalizedVeruleConfig } from "@verule/sdk";
+import type { NormalizedVeruleConfig } from "@boringparts/verule";
 import {
   type CleanupFn,
   createHostFileAccessors,
@@ -114,7 +114,7 @@ export type PreparedAcceptanceHost = {
   startSession(
     options?: StartHostSessionOptions,
   ): Promise<AcceptanceSharedSession>;
-  loadSdk(): Promise<typeof import("@verule/sdk")>;
+  loadSdk(): Promise<typeof import("@boringparts/verule")>;
   loadConfig<TConfig = NormalizedVeruleConfig>(
     relativePath: string,
   ): Promise<TConfig>;
@@ -363,12 +363,14 @@ export async function prepareAcceptanceHost(
         });
         return session;
       },
-      async loadSdk(): Promise<typeof import("@verule/sdk")> {
+      async loadSdk(): Promise<typeof import("@boringparts/verule")> {
         const hostRequire = createRequire(join(hostDir, "package.json"));
-        const sdkPath = realpathSync(hostRequire.resolve("@verule/sdk"));
+        const sdkPath = realpathSync(
+          hostRequire.resolve("@boringparts/verule"),
+        );
         return (await import(
           pathToFileURL(sdkPath).href
-        )) as typeof import("@verule/sdk");
+        )) as typeof import("@boringparts/verule");
       },
       async loadConfig<TConfig = NormalizedVeruleConfig>(
         relativePath: string,
