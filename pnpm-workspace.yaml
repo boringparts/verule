@@ -11,6 +11,7 @@ minimumReleaseAgeStrict: true
 minimumReleaseAgeExclude:
   - tssae
   - "@tssae/*"
+  - "@boringparts/*"
 allowBuilds:
   esbuild: true
 overrides:
@@ -34,7 +35,7 @@ catalog:
   "@boringparts/verule": "workspace:*"
   drizzle-zod: 0.8.3
   drizzle-orm: 0.45.3
-  "@ykdz/cli-contract": 0.5.0
+  "@boringparts/cli-contract": 0.7.0
   oxfmt: ^0.79.0
   oxlint: 1.94.0
   tsrs: 7.1.0-beta.tsrs4

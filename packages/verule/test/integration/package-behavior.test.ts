@@ -4,11 +4,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
 import { linkNodeModulesPackage } from "@verule/test-hosts";
 
-import { checkReportSchema } from "../../src/report-wire.ts";
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
-import { captureCli } from "./cli-test-helpers.ts";
+import { testCliContract } from "./cli-test-helpers.ts";
 
 const require = createRequire(import.meta.url);
 const tscScriptPath = join(
@@ -67,17 +67,16 @@ void test("verule check traces first-party workspace packages via declarationMap
       await host.typecheck("packages/cjs/tsconfig.json");
 
       // Phase 1: with declarationMap present -> traces into packages/shared-pkg/src/index.ts, reports clone in CJS, and marks ext-pkg external
-      const json1 = await captureCli(
-        ["check", "--config", "verule.config.ts", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(json1.status, 1, json1.stderr);
-      const env1 = JSON.parse(json1.stdout) as {
-        readonly variant: string;
-        readonly data: unknown;
-      };
-      assert.equal(env1.variant, "findings");
-      const report1 = checkReportSchema.parse(env1.data);
+      const json1 = await runCliScenario(testCliContract, {
+        argv: ["check", "--config", "verule.config.ts", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(json1.termination.kind === "applicationResult");
+      assert.equal(json1.termination.exitCode, 1, json1.stderr);
+      assert.ok(json1.termination.result.kind === "data");
+      assert.ok(json1.termination.result.command === "check");
+      assert.equal(json1.termination.result.variant, "findings");
+      const report1 = json1.termination.result.data;
       assert.equal(report1.diagnostics.length, 1);
       const diag = report1.diagnostics[0]!;
       assert.equal(diag.at.file, "packages/cjs/src/app.ts");
@@ -101,17 +100,16 @@ void test("verule check traces first-party workspace packages via declarationMap
       // Phase 2: remove `.d.ts.map`, leaving first-party package as `.d.ts`-only -> reports missing-source-file with TS config hints
       host.removePath("packages/shared-pkg/dist/index.d.ts.map");
 
-      const json2 = await captureCli(
-        ["check", "--config", "verule.config.ts", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(json2.status, 0, json2.stderr);
-      const env2 = JSON.parse(json2.stdout) as {
-        readonly variant: string;
-        readonly data: unknown;
-      };
-      assert.equal(env2.variant, "clean");
-      const report2 = checkReportSchema.parse(env2.data);
+      const json2 = await runCliScenario(testCliContract, {
+        argv: ["check", "--config", "verule.config.ts", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(json2.termination.kind === "applicationResult");
+      assert.equal(json2.termination.exitCode, 0, json2.stderr);
+      assert.ok(json2.termination.result.kind === "data");
+      assert.ok(json2.termination.result.command === "check");
+      assert.equal(json2.termination.result.variant, "clean");
+      const report2 = json2.termination.result.data;
       assert.equal(report2.diagnostics.length, 0);
       assert.ok(
         report2.gaps.some((g) => g.kind === "missing-source-file"),
@@ -122,11 +120,11 @@ void test("verule check traces first-party workspace packages via declarationMap
         `Expected missing-behavior-summary gap, got ${JSON.stringify(report2.gaps)}`,
       );
 
-      const text2 = await captureCli(
-        ["check", "--config", "verule.config.ts"],
-        host.rootDir,
-      );
-      assert.equal(text2.status, 0, text2.stderr);
+      const text2 = await runCliScenario(testCliContract, {
+        argv: ["check", "--config", "verule.config.ts"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(text2.termination.exitCode, 0, text2.stderr);
       assert.match(text2.stdout, /gap \[missing-source-file\]:/u);
       assert.match(text2.stdout, /gap \[missing-behavior-summary\]:/u);
     },

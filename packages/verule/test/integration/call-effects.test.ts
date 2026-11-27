@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkReportSchema } from "../../src/report-wire.ts";
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { resolveCliHostDir, withCliTempHost } from "../helpers/cli-hosts.ts";
-import { captureCli } from "./cli-test-helpers.ts";
+import { testCliContract } from "./cli-test-helpers.ts";
 
 void test("verule check and --at explain verify close-A-clean-B, cross-file helpers, dynamic Gaps, validation vs raw, and reentrant scheduler callback field effects", async () => {
   await withCliTempHost(
@@ -21,19 +22,19 @@ void test("verule check and --at explain verify close-A-clean-B, cross-file help
       await host.typecheck();
 
       // 1. Run full `verule check --output json`
-      const jsonRes = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
+      const jsonRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(jsonRes.termination.kind === "applicationResult");
       assert.equal(
-        jsonRes.status,
+        jsonRes.termination.exitCode,
         1,
         `stdout=${jsonRes.stdout}\nstderr=${jsonRes.stderr}`,
       );
-      const envelope = JSON.parse(jsonRes.stdout) as {
-        readonly data: unknown;
-      };
-      const report = checkReportSchema.parse(envelope.data);
+      assert.ok(jsonRes.termination.result.kind === "data");
+      assert.ok(jsonRes.termination.result.command === "check");
+      const report = jsonRes.termination.result.data;
       assert.equal(report.status, "findings");
       assert.equal(report.diagnostics.length, 3);
       assert.ok(
@@ -58,8 +59,8 @@ void test("verule check and --at explain verify close-A-clean-B, cross-file help
 
       // 2. Run `verule check --rule resource-cleanup --at src/resources.ts:14 --output json` for explain cleanupPaths
       // Exit status is 1 because `closeAWronglyCleansB` in the same file has a finding, while `--at` explains line 14 (`covered_by_cleanup`).
-      const explainJsonRes = await captureCli(
-        [
+      const explainJsonRes = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--rule",
           "resource-cleanup",
@@ -68,13 +69,13 @@ void test("verule check and --at explain verify close-A-clean-B, cross-file help
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
-      assert.equal(explainJsonRes.status, 1);
-      const explainEnvelope = JSON.parse(explainJsonRes.stdout) as {
-        readonly data: unknown;
-      };
-      const explainReport = checkReportSchema.parse(explainEnvelope.data);
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(explainJsonRes.termination.kind === "applicationResult");
+      assert.equal(explainJsonRes.termination.exitCode, 1);
+      assert.ok(explainJsonRes.termination.result.kind === "data");
+      assert.ok(explainJsonRes.termination.result.command === "check");
+      const explainReport = explainJsonRes.termination.result.data;
       assert.equal(explainReport.explanation?.status, "covered_by_cleanup");
       assert.equal(explainReport.explanation?.cleanupPaths.length, 1);
       assert.ok(
@@ -84,11 +85,17 @@ void test("verule check and --at explain verify close-A-clean-B, cross-file help
       );
 
       // 3. Also verify human text output renders `covered_by_cleanup` and `cleanupPath`
-      const explainTextRes = await captureCli(
-        ["check", "--rule", "resource-cleanup", "--at", "src/resources.ts:14"],
-        host.rootDir,
-      );
-      assert.equal(explainTextRes.status, 1);
+      const explainTextRes = await runCliScenario(testCliContract, {
+        argv: [
+          "check",
+          "--rule",
+          "resource-cleanup",
+          "--at",
+          "src/resources.ts:14",
+        ],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(explainTextRes.termination.exitCode, 1);
       assert.match(explainTextRes.stdout, /covered_by_cleanup/);
       assert.match(explainTextRes.stdout, /cleanupPath/);
     },
