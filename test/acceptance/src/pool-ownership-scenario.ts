@@ -343,6 +343,7 @@ export function generatePoolOwnershipProject(
   const files: Record<string, string> = {
     "package.json": renderHostAppPackageJson(),
     "tsconfig.json": renderHostTsconfig(),
+    "tssae.summaries.json": readSeedFile("tssae.summaries.json"),
     "verule.config.ts": readSeedFile("verule.config.ts"),
   };
 
@@ -463,15 +464,9 @@ export function materializePoolOwnershipHost(
     recursive: true,
     force: true,
   });
-  for (const staleConfig of [
-    `${appSubdir}/verule.config.ts`,
-    `${appSubdir}/verule.native.config.ts`,
-    `${appSubdir}/verule.missing-adapter.config.ts`,
-  ]) {
-    const stalePath = host.resolvePath(staleConfig);
-    if (existsSync(stalePath)) {
-      rmSync(stalePath, { force: true });
-    }
+  const staleConfigPath = host.resolvePath(`${appSubdir}/verule.config.ts`);
+  if (existsSync(staleConfigPath)) {
+    rmSync(staleConfigPath, { force: true });
   }
 
   for (const [relPath, content] of Object.entries(generated.files)) {
@@ -480,6 +475,10 @@ export function materializePoolOwnershipHost(
   host.writeText(
     "tsconfig.json",
     renderHostTsconfig(`${appSubdir}/src/**/*.ts`),
+  );
+  host.writeText(
+    "tssae.summaries.json",
+    generated.files["tssae.summaries.json"]!,
   );
 
   const prefix = `${appSubdir}/`;
@@ -521,7 +520,7 @@ export async function withPoolOwnershipHost<T>(
 ): Promise<T> {
   return withAcceptanceHost(
     {
-      additionalPackages: ["@verule/rules-reference", "@tssae/adapters"],
+      additionalPackages: ["@verule/rules-reference"],
       directPackages: ["@boringparts/verule", "@verule/rules-reference"],
       ...(options.bundle === undefined ? {} : { bundle: options.bundle }),
       ...(options.tempRoot === undefined ? {} : { tempRoot: options.tempRoot }),
@@ -912,11 +911,11 @@ export function assertPoolOwnershipDiagnostic(
   assert.ok(
     diag.evidence.some(
       (ev) =>
-        ev.kind === "model" &&
-        ev.modelId === "pool-resource-ownership" &&
-        ev.at?.file === expectedFile,
+        ev.kind === "note" &&
+        ev.at?.file === expectedFile &&
+        ev.message.includes("outer host container"),
     ),
-    `Expected pool-resource-ownership model evidence: ${JSON.stringify(diag.evidence)}`,
+    `Expected outer host container note evidence: ${JSON.stringify(diag.evidence)}`,
   );
   assert.ok(
     diag.evidence.some(
@@ -948,9 +947,9 @@ export function assertPoolOwnershipInitialFindings(
   assert.equal(report.status, "findings");
   assert.equal(report.fileOrigins.length, spec.scale.fileCount);
   assert.equal(
-    report.gaps.some((gap) => gap.kind === "missing-instance-model"),
+    report.gaps.some((gap) => gap.kind === "missing-behavior-summary"),
     false,
-    `Unexpected missing-instance-model gap: ${JSON.stringify(report.gaps)}`,
+    `Unexpected missing-behavior-summary gap: ${JSON.stringify(report.gaps)}`,
   );
   assert.equal(
     report.diagnostics.length,
@@ -973,9 +972,9 @@ export function assertPoolOwnershipClean(
   assert.equal(report.fileOrigins.length, spec.scale.fileCount);
   assert.deepEqual(report.diagnostics, []);
   assert.equal(
-    report.gaps.some((gap) => gap.kind === "missing-instance-model"),
+    report.gaps.some((gap) => gap.kind === "missing-behavior-summary"),
     false,
-    `Unexpected missing-instance-model gap: ${JSON.stringify(report.gaps)}`,
+    `Unexpected missing-behavior-summary gap: ${JSON.stringify(report.gaps)}`,
   );
 }
 

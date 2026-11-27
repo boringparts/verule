@@ -7,16 +7,25 @@ const rule = defineRule({
     const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
     const xDecl = vars.find((v) => v.text.startsWith("x ="));
     const yDecl = vars.find((v) => v.text.startsWith("y ="));
-    const callSyn = calls.find((c) => c.text.includes("adaptValue("));
+    const zDecl = vars.find((v) => v.text.startsWith("z ="));
+    const callSyn = calls.find(
+      (c) => c.text.includes("adaptValue(") || c.text.includes("forwardValue("),
+    );
     if (!xDecl?.initializer || !yDecl?.initializer || !callSyn) return;
     const [impl] = await ctx.resolveImplementations([callSyn.ref]);
+    if (impl?.status === "inconclusive") {
+      ctx.recordGaps(impl.gaps);
+    }
+    if (zDecl?.initializer) {
+      await ctx.resolveInstances([zDecl.initializer]);
+    }
     const [xInst, yInst] = await ctx.resolveInstances([
       xDecl.initializer,
       yDecl.initializer,
     ]);
     if (
-      xInst?.instance &&
-      yInst?.instance &&
+      xInst?.status === "proved" &&
+      yInst?.status === "proved" &&
       !isSameInstance(xInst.instance, yInst.instance)
     ) {
       ctx.report({
@@ -29,6 +38,10 @@ const rule = defineRule({
 });
 
 export default defineConfig({
-  projects: ["packages/esm/tsconfig.json", "packages/cjs/tsconfig.json"],
+  projects: [
+    "packages/esm/tsconfig.json",
+    "packages/cjs/tsconfig.json",
+    "packages/shared-pkg/tsconfig.json",
+  ],
   rules: [rule],
 });

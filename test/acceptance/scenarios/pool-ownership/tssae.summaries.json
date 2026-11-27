@@ -1,0 +1,105 @@
+{
+  "id": "pool-resource-ownership",
+  "version": "1",
+  "entries": [
+    {
+      "match": { "memberPath": ["Disposable", "prototype", "_register"] },
+      "instances": {
+        "completeness": "complete",
+        "outcome": { "kind": "forwards-instance", "from": { "argIndex": 0 } }
+      },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [
+          {
+            "kind": "registers-into-container",
+            "item": { "argIndex": 0 },
+            "container": "receiver"
+          }
+        ]
+      }
+    },
+    {
+      "match": { "memberPath": ["DisposableStore", "prototype", "add"] },
+      "instances": {
+        "completeness": "complete",
+        "outcome": { "kind": "forwards-instance", "from": { "argIndex": 0 } }
+      },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [
+          {
+            "kind": "registers-into-container",
+            "item": { "argIndex": 0 },
+            "container": "receiver"
+          }
+        ]
+      }
+    },
+    {
+      "match": { "memberPath": ["DisposableStore", "prototype", "delete"] },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [
+          {
+            "kind": "detaches-from-container",
+            "item": { "argIndex": 0 },
+            "container": "receiver"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "memberPath": ["DisposableStore", "prototype", "deleteAndLeak"]
+      },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [
+          {
+            "kind": "detaches-from-container",
+            "item": { "argIndex": 0 },
+            "container": "receiver"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "memberPath": ["IInstantiationService", "prototype", "createInstance"]
+      },
+      "instances": {
+        "completeness": "complete",
+        "outcome": { "kind": "allocates-fresh-instance" }
+      }
+    },
+    {
+      "match": { "memberPath": ["dispose"] },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [{ "kind": "disposes-target", "target": "receiver" }]
+      }
+    },
+    {
+      "match": { "memberPath": ["IDisposable", "prototype", "dispose"] },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [{ "kind": "disposes-target", "target": "receiver" }]
+      }
+    },
+    {
+      "match": { "memberPath": ["Disposable", "prototype", "dispose"] },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [{ "kind": "disposes-target", "target": "receiver" }]
+      }
+    },
+    {
+      "match": { "memberPath": ["DisposableStore", "prototype", "dispose"] },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [{ "kind": "disposes-target", "target": "receiver" }]
+      }
+    }
+  ]
+}

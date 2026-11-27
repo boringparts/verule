@@ -70,7 +70,6 @@ type CheckData = {
     readonly sources: readonly (
       | { readonly kind: "config" }
       | { readonly kind: "rule"; readonly id: string }
-      | { readonly kind: "adapter"; readonly id: string }
     )[];
   }[];
   readonly diagnostics: readonly {

@@ -4,7 +4,6 @@ import { describe, it } from "node:test";
 import {
   VeruleExecutionError,
   defineConfig,
-  defineModel,
   defineRule,
   openSession,
   runCheck,
@@ -12,7 +11,6 @@ import {
   type BranchRef,
   type CallRef,
   type DeclarationRef,
-  type Model,
   type Rule,
   type SignatureRef,
   type SyntaxRef,
@@ -20,25 +18,15 @@ import {
 } from "@boringparts/verule";
 import { withTempHost } from "@verule/test-hosts";
 
-function createModeRulesAndModel(
+function createModeRules(
   disallowedMode: string,
-  modelVersion = "1",
-): { readonly model: Model; readonly rules: readonly Rule[] } {
-  const model = defineModel({
-    id: "mode-policy",
-    version: modelVersion,
-    description: "Policy specifying which sink mode is disallowed.",
-    facts: { disallowedMode },
-  });
-
+  policyVersion = "1",
+): readonly Rule[] {
   const rule = defineRule({
     id: "disallow-configured-mode",
+    description: `Disallow mode "${disallowedMode}" (v${policyVersion})`,
     run: async (ctx) => {
-      const policy = ctx.getModel("mode-policy");
-      const forbidden =
-        typeof policy?.facts?.disallowedMode === "string"
-          ? policy.facts.disallowedMode
-          : "fast";
+      const forbidden = disallowedMode;
 
       const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
       const sinkCalls = calls.filter((call) => call.text.startsWith("sink("));
@@ -58,7 +46,7 @@ function createModeRulesAndModel(
           const targetCall = modeArgs[index]!.call;
           ctx.report({
             at: targetCall.location,
-            message: `sink() called with disallowed mode "${forbidden}" (model v${policy?.version ?? "0"})`,
+            message: `sink() called with disallowed mode "${forbidden}" (policy v${policyVersion})`,
             findingKey: `disallowed-mode:${forbidden}`,
             basis: [
               {
@@ -68,7 +56,7 @@ function createModeRulesAndModel(
               },
               {
                 kind: "note",
-                message: `Model ${policy?.id ?? "default"}@${policy?.version ?? "0"}`,
+                message: `Policy mode-policy@${policyVersion}`,
               },
             ],
           });
@@ -77,45 +65,19 @@ function createModeRulesAndModel(
     },
   });
 
-  return { model, rules: [rule] };
+  return [rule];
 }
 
-void describe("@boringparts/verule defineModel and updatable AnalysisSession", () => {
-  void it("validates models and rejects duplicate model ids", () => {
-    const valid = defineModel({
-      id: "cleanup-model",
-      version: "1.0.0",
-      facts: { cleanupFns: ["dispose"] },
-    });
-    assert.equal(valid.id, "cleanup-model");
-
-    assert.throws(
-      () => defineModel({ id: "  " }),
-      (err: unknown) =>
-        err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
-    );
-
-    assert.throws(
-      () =>
-        defineConfig({
-          tsconfig: "tsconfig.json",
-          models: [defineModel({ id: "dup" }), defineModel({ id: "dup" })],
-        }),
-      (err: unknown) =>
-        err instanceof VeruleExecutionError && err.code === "INVALID_CONFIG",
-    );
-  });
-
+void describe("@boringparts/verule updatable AnalysisSession", () => {
   void it("updates snapshots incrementally, invalidates stale refs, recovers from failures, and matches cold runCheck on every step", async () => {
     await withTempHost({ host: "sdk-projects/watch-session" }, async (host) => {
       await host.typecheck("tsconfig.json");
       await host.typecheck("tsconfig.alt.json");
 
-      const initialSetup = createModeRulesAndModel("fast", "1");
+      const initialRules = createModeRules("fast", "1");
       let currentConfig = defineConfig({
         tsconfig: "tsconfig.json",
-        models: [initialSetup.model],
-        rules: initialSetup.rules,
+        rules: initialRules,
       });
 
       const session = await openSession({
@@ -268,14 +230,13 @@ void describe("@boringparts/verule defineModel and updatable AnalysisSession", (
           await runCheck({ cwd: host.rootDir, config: currentConfig }),
         );
 
-        // 7a. Update model version/facts -> report identity & diagnostics change and match cold runCheck
-        const updatedModelSetup = createModeRulesAndModel("safe", "2");
+        // 7a. Update rule options -> report identity & diagnostics change and match cold runCheck
+        const updatedRules = createModeRules("safe", "2");
         currentConfig = defineConfig({
           tsconfig: "tsconfig.json",
-          models: [updatedModelSetup.model],
-          rules: updatedModelSetup.rules,
+          rules: updatedRules,
         });
-        await session.update({ models: [updatedModelSetup.model] });
+        await session.update({ rules: updatedRules });
         const report7a = await session.check();
         assert.equal(report7a.status, "clean");
         assert.notEqual(
@@ -306,7 +267,6 @@ void describe("@boringparts/verule defineModel and updatable AnalysisSession", (
         });
         currentConfig = defineConfig({
           tsconfig: "tsconfig.json",
-          models: [updatedModelSetup.model],
           rules: [altRule],
         });
         await session.update({ rules: [altRule] });
@@ -319,11 +279,10 @@ void describe("@boringparts/verule defineModel and updatable AnalysisSession", (
         );
 
         // 7c. Update project entries (switch to tsconfig.alt.json) -> matches cold runCheck
-        const legacySetup = createModeRulesAndModel("legacy", "3");
+        const legacyRules = createModeRules("legacy", "3");
         currentConfig = defineConfig({
           projects: ["tsconfig.alt.json"],
-          models: [legacySetup.model],
-          rules: legacySetup.rules,
+          rules: legacyRules,
         });
         await session.update({ config: currentConfig });
         const report7c = await session.check();
@@ -346,11 +305,10 @@ void describe("@boringparts/verule defineModel and updatable AnalysisSession", (
         await host.typecheck("packages/a/tsconfig.json");
         await host.typecheck("packages/b/tsconfig.json");
 
-        const setup = createModeRulesAndModel("fast", "1");
+        const setupRules = createModeRules("fast", "1");
         const config = defineConfig({
           projects: ["packages/a/tsconfig.json", "packages/b/tsconfig.json"],
-          models: [setup.model],
-          rules: setup.rules,
+          rules: setupRules,
         });
 
         const controller = new AbortController();

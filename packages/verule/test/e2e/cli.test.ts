@@ -9,9 +9,16 @@ import { after, before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import type { CheckReport, VeruleConfig } from "@boringparts/verule";
-import { copyDirectory } from "@verule/test-hosts";
+import { linkNodeModulesPackage } from "@verule/test-hosts";
 
 import { spawnNdjsonProcess, withCliTempHost } from "../helpers/cli-hosts.ts";
+
+const cliRequire = createRequire(import.meta.url);
+const cliTscScriptPath = join(
+  dirname(cliRequire.resolve("typescript-7/package.json")),
+  "bin",
+  "tsc",
+);
 
 async function importConfig(configPath: string): Promise<VeruleConfig> {
   const loaded = (await import(pathToFileURL(configPath).href)) as {
@@ -374,11 +381,11 @@ void describe("deployed CLI e2e", () => {
           })),
           [
             {
-              line: 13,
+              line: 12,
               message: "runAction() can bypass required authorization branch.",
             },
             {
-              line: 33,
+              line: 32,
               message:
                 "runAction() is unreachable from function entry and cannot be verified as covered.",
             },
@@ -390,13 +397,13 @@ void describe("deployed CLI e2e", () => {
           ),
         );
         assert.equal(branchEnvelope.data.gaps.length, 1);
-        assert.equal(branchEnvelope.data.gaps[0]!.kind, "unmodeled-try-catch");
-        assert.equal(branchEnvelope.data.gaps[0]!.at?.line, 37);
+        assert.equal(branchEnvelope.data.gaps[0]!.kind, "with-statement");
+        assert.equal(branchEnvelope.data.gaps[0]!.at?.line, 5);
 
         const branchFindingsText = invoke(host.rootDir, "check");
         assert.equal(branchFindingsText.status, 1);
         assert.match(branchFindingsText.stdout, /host-auth-branch-coverage/u);
-        assert.match(branchFindingsText.stdout, /gap \[unmodeled-try-catch\]/u);
+        assert.match(branchFindingsText.stdout, /gap \[with-statement\]/u);
         assert.match(
           branchFindingsText.stdout,
           /Found 2 violation\(s\) \(1 gap\(s\)\)/u,
@@ -408,7 +415,7 @@ void describe("deployed CLI e2e", () => {
         });
         assert.deepEqual(branchEnvelope.data, branchSdkReport);
 
-        // Clean-with-gaps check: only covered + unmodeled try/catch -> exit 0 while still reporting gaps
+        // Clean-with-gaps check: only covered + unmodeled with-statement -> exit 0 while still reporting gaps
         host.writeText(
           "src/routes.ts",
           host.readText("variants/routes-clean.ts"),
@@ -429,10 +436,7 @@ void describe("deployed CLI e2e", () => {
         assert.equal(cleanWithGapEnvelope.variant, "clean");
         assert.equal(cleanWithGapEnvelope.data.diagnostics.length, 0);
         assert.equal(cleanWithGapEnvelope.data.gaps.length, 1);
-        assert.equal(
-          cleanWithGapEnvelope.data.gaps[0]!.kind,
-          "unmodeled-try-catch",
-        );
+        assert.equal(cleanWithGapEnvelope.data.gaps[0]!.kind, "with-statement");
 
         const cleanWithGapText = invoke(host.rootDir, "check");
         assert.equal(cleanWithGapText.status, 0, cleanWithGapText.stderr);
@@ -440,7 +444,7 @@ void describe("deployed CLI e2e", () => {
           cleanWithGapText.stdout,
           /No violations found.*1 gap\(s\)/u,
         );
-        assert.match(cleanWithGapText.stdout, /gap \[unmodeled-try-catch\]/u);
+        assert.match(cleanWithGapText.stdout, /gap \[with-statement\]/u);
       },
     );
   });
@@ -841,110 +845,49 @@ void describe("deployed CLI e2e", () => {
     );
   });
 
-  void it("supports third-party FactTypes, provider swapping, merging, and order-independent conflicts", async () => {
-    await withCliTempHost(
-      { host: "e2e/fact-providers", sdkPackageDir: deployedSdkPackageDir },
-      async (host) => {
-        await host.typecheck();
-
-        const swapA = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.a.config.ts",
-          "--output",
-          "json",
-        );
-        const swapB = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.b.config.ts",
-          "--output",
-          "json",
-        );
-        assert.equal(swapA.status, 1, swapA.stderr);
-        assert.equal(swapB.status, 1, swapB.stderr);
-        assert.match(swapA.stdout, /\[provider-a\]/u);
-        assert.match(swapB.stdout, /\[provider-b\]/u);
-
-        const mergeAB = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.ab.config.ts",
-          "--output",
-          "json",
-        );
-        const mergeBA = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.ba.config.ts",
-          "--output",
-          "json",
-        );
-        assert.equal(mergeAB.status, 1, mergeAB.stderr);
-        assert.equal(mergeBA.status, 1, mergeBA.stderr);
-        assert.equal(mergeAB.stdout, mergeBA.stdout);
-        assert.match(mergeAB.stdout, /\[provider-a, provider-b\]/u);
-
-        const conflictAC = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.conflict.ac.config.ts",
-          "--output",
-          "json",
-        );
-        const conflictCA = invoke(
-          host.rootDir,
-          "check",
-          "--config",
-          "verule.conflict.ca.config.ts",
-          "--output",
-          "json",
-        );
-        assert.equal(conflictAC.status, 2);
-        assert.equal(conflictCA.status, 2);
-        assert.equal(conflictAC.stdout, "");
-        assert.equal(conflictAC.stderr, conflictCA.stderr);
-        const conflictEnv = JSON.parse(conflictAC.stderr) as {
-          kind: string;
-          data: {
-            code: string;
-            conflict: {
-              parties: { providerId: string; conclusionSummary: string }[];
-            };
-          };
-        };
-        assert.equal(conflictEnv.kind, "failure");
-        assert.equal(conflictEnv.data.code, "FACT_CONFLICT");
-        assert.deepEqual(
-          conflictEnv.data.conflict.parties.map((p) => [
-            p.providerId,
-            p.conclusionSummary,
-          ]),
-          [
-            ["provider-a", "id=required"],
-            ["provider-conflict", "id=optional"],
-          ],
-        );
-      },
-    );
-  });
-
-  void it("resolves conditional ESM/CJS exports and falls back to declaration-only gaps", async () => {
+  void it("resolves first-party monorepo implementations via declarationMap and surfaces missing-source-file and missing-behavior-summary gaps", async () => {
     await withCliTempHost(
       {
         host: "e2e/package-behavior",
         sdkPackageDir: deployedSdkPackageDir,
+        syntheticPackages: {
+          "ext-pkg": {
+            packageJson: {
+              name: "ext-pkg",
+              version: "1.0.0",
+              type: "module",
+              exports: {
+                ".": {
+                  types: "./dist/index.d.ts",
+                  default: "./dist/index.js",
+                },
+              },
+            },
+            files: {
+              "dist/index.d.ts":
+                "export declare function opaqueExternal<T>(value: T): T;\n",
+              "dist/index.js":
+                "export function opaqueExternal(value) {\n  return value;\n}\n",
+            },
+          },
+        },
         setup: (host) => {
-          copyDirectory(
-            host.resolvePath("deps/dual-pkg"),
-            host.resolvePath("node_modules/dual-pkg"),
+          execFileSync(
+            process.execPath,
+            [
+              cliTscScriptPath,
+              "-p",
+              host.resolvePath("packages/shared-pkg/tsconfig.json"),
+              "--pretty",
+              "false",
+            ],
+            { cwd: host.rootDir, encoding: "utf8" },
           );
-          host.removePath("deps");
+          linkNodeModulesPackage(
+            host.rootDir,
+            "@ws/shared-pkg",
+            host.resolvePath("packages/shared-pkg"),
+          );
         },
       },
       async (host) => {
@@ -962,26 +905,26 @@ void describe("deployed CLI e2e", () => {
         );
         assert.ok(
           pkgData1.diagnostics[0]!.evidence.some(
-            (e) => e.at?.file === "node_modules/dual-pkg/lib/index.cjs",
+            (e) => e.at?.file === "packages/shared-pkg/src/index.ts",
           ),
+          JSON.stringify(pkgData1.diagnostics[0]!.evidence),
         );
         assert.ok(
           pkgData1.fileOrigins.every((o) => !o.file.includes("node_modules/")),
         );
+        assert.ok(
+          pkgData1.gaps.some((g) => g.kind === "missing-behavior-summary"),
+        );
 
-        host.removePath("node_modules/dual-pkg/lib/index.mjs");
-        host.removePath("node_modules/dual-pkg/lib/index.cjs");
+        host.removePath("packages/shared-pkg/dist/index.d.ts.map");
         const pkgCheck2 = invoke(host.rootDir, "check", "--output", "json");
         assert.equal(pkgCheck2.status, 0, pkgCheck2.stderr);
         const pkgData2 = (JSON.parse(pkgCheck2.stdout) as { data: CheckReport })
           .data;
+        assert.equal(pkgData2.diagnostics.length, 0);
+        assert.ok(pkgData2.gaps.some((g) => g.kind === "missing-source-file"));
         assert.ok(
-          pkgData2.gaps.some((g) => g.kind === "missing-instance-model"),
-        );
-        assert.ok(
-          pkgData2.gaps.some(
-            (g) => g.kind === "missing-package-implementation",
-          ),
+          pkgData2.gaps.some((g) => g.kind === "missing-behavior-summary"),
         );
       },
     );

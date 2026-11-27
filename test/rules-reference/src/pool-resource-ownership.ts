@@ -1,20 +1,14 @@
 import {
-  defineModel,
   defineRule,
   isSameInstance,
   type CallRef,
-  type CleanupModelOperation,
   type CleanupScopeRef,
   type DeclarationRef,
   type DiagnosticBasis,
   type DiagnosticLocation,
   type InstanceCleanupScopeResult,
-  type InstanceModelBehavior,
-  type InstanceModelMatch,
   type InstanceRef,
   type InstanceResolutionResult,
-  type LifecycleEventBehavior,
-  type Model,
   type ProjectedDeclarationRow,
   type ProjectedSyntaxLookupRow,
   type Rule,
@@ -24,12 +18,20 @@ import {
   type ValuePropagationTargetResult,
 } from "@boringparts/verule";
 
+/** Target matcher describing a class/interface method, symbol, or module member. */
+export type MemberTargetMatch = {
+  readonly symbol?: string;
+  readonly container?: string;
+  readonly member?: string;
+  readonly module?: string;
+};
+
 /** Specification of a factory-delegation scope whose executions create coexisting child items. */
 export type ChildItemScopeSpec = {
   readonly id: string;
   readonly kind: "factory-delegation";
   readonly label: string;
-  readonly match: InstanceModelMatch;
+  readonly match: MemberTargetMatch;
   readonly callbackArgumentIndex?: number;
 };
 
@@ -37,42 +39,23 @@ export type ChildItemScopeSpec = {
 export type OuterHostContainerSpec = {
   readonly id: string;
   readonly label: string;
-  readonly match: InstanceModelMatch;
+  readonly match: MemberTargetMatch;
   readonly argumentIndex?: number;
-};
-
-/** Declarative facts stored on a pool/child-resource ownership model. */
-export type PoolResourceOwnershipModelFacts = {
-  readonly childItemScopes?: readonly ChildItemScopeSpec[];
-  readonly outerHostContainers?: readonly OuterHostContainerSpec[];
-};
-
-/** Options for constructing a reusable pool/child resource ownership `Model`. */
-export type PoolResourceOwnershipModelOptions = {
-  readonly id: string;
-  readonly version?: string;
-  readonly description?: string;
-  readonly instanceBehaviors?: readonly InstanceModelBehavior[];
-  readonly cleanupOperations?: readonly CleanupModelOperation[];
-  readonly lifecycleEvents?: readonly LifecycleEventBehavior[];
-  readonly facts: PoolResourceOwnershipModelFacts;
 };
 
 /** Options for configuring the pool resource ownership rule. */
 export type PoolResourceOwnershipRuleOptions = {
   readonly id?: string;
   readonly description?: string;
+  readonly childItemScopes?: readonly ChildItemScopeSpec[];
+  readonly outerHostContainers?: readonly OuterHostContainerSpec[];
+  readonly containerInternalMatches?: readonly MemberTargetMatch[];
 };
 
-type ScopedSpec<T> = {
-  readonly spec: T;
-  readonly modelId: string;
-};
-
-type ParsedModelConfig = {
-  readonly childItemScopes: readonly ScopedSpec<ChildItemScopeSpec>[];
-  readonly outerHostContainers: readonly ScopedSpec<OuterHostContainerSpec>[];
-  readonly containerInternalMatches: readonly InstanceModelMatch[];
+type ParsedRuleConfig = {
+  readonly childItemScopes: readonly ChildItemScopeSpec[];
+  readonly outerHostContainers: readonly OuterHostContainerSpec[];
+  readonly containerInternalMatches: readonly MemberTargetMatch[];
 };
 
 type CallInfo = {
@@ -90,7 +73,6 @@ type CallInfo = {
 
 type ScopeEntry = {
   readonly spec: ChildItemScopeSpec;
-  readonly modelId: string;
   readonly triggerCall: CallInfo;
   readonly scopeFn: SyntaxNodeResult;
   readonly scopeRange: DiagnosticLocation;
@@ -107,7 +89,6 @@ type LocalContainerRecord = {
 type RegistrationRecord = {
   readonly info: CallInfo;
   readonly containerSpec: OuterHostContainerSpec;
-  readonly containerModelId: string;
   readonly containerExpr: SyntaxRef;
   readonly itemExpr: SyntaxRef;
   readonly propagationResults: readonly ValuePropagationTargetResult[];
@@ -145,6 +126,39 @@ const MAX_FACTORY_HOPS = 4;
 const MAX_LOOKUP_HOPS = 2;
 const MAX_LOOKUP_FILES = 32;
 
+const DEFAULT_CHILD_ITEM_SCOPES: readonly ChildItemScopeSpec[] = [
+  {
+    id: "resource-pool",
+    kind: "factory-delegation",
+    label: "ResourcePool item factory",
+    match: { symbol: "ResourcePool" },
+    callbackArgumentIndex: 0,
+  },
+];
+
+const DEFAULT_OUTER_HOST_CONTAINERS: readonly OuterHostContainerSpec[] = [
+  {
+    id: "disposable-register",
+    label: "Disposable._register",
+    match: { container: "Disposable", member: "_register" },
+    argumentIndex: 0,
+  },
+  {
+    id: "disposable-store-add",
+    label: "DisposableStore.add",
+    match: { container: "DisposableStore", member: "add" },
+    argumentIndex: 0,
+  },
+];
+
+const DEFAULT_CONTAINER_INTERNAL_MATCHES: readonly MemberTargetMatch[] = [
+  { container: "Disposable", member: "_register" },
+  { container: "DisposableStore", member: "add" },
+  { container: "DisposableStore", member: "delete" },
+  { container: "DisposableStore", member: "deleteAndLeak" },
+  { member: "dispose" },
+];
+
 function normalizeRelPath(filePath: string): string {
   return filePath.replaceAll("\\", "/").replace(/^\.\//u, "");
 }
@@ -160,124 +174,24 @@ function isLocationWithin(
   );
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isInstanceModelMatch(value: unknown): value is InstanceModelMatch {
-  if (!isObjectRecord(value)) return false;
-  return (
-    (value.symbol === undefined || typeof value.symbol === "string") &&
-    (value.container === undefined || typeof value.container === "string") &&
-    (value.member === undefined || typeof value.member === "string") &&
-    (value.module === undefined || typeof value.module === "string")
-  );
-}
-
-function parseChildScopeSpec(raw: unknown): ChildItemScopeSpec | null {
-  if (!isObjectRecord(raw) || !isInstanceModelMatch(raw.match)) {
-    return null;
-  }
-  if (typeof raw.id !== "string" || typeof raw.label !== "string") {
-    return null;
-  }
-  if (raw.kind !== "factory-delegation") {
-    return null;
-  }
-  return {
-    id: raw.id,
-    kind: "factory-delegation",
-    label: raw.label,
-    match: raw.match,
-    ...(typeof raw.callbackArgumentIndex === "number"
-      ? { callbackArgumentIndex: raw.callbackArgumentIndex }
-      : {}),
-  };
-}
-
-function parseModelConfig(models: readonly Model[]): ParsedModelConfig {
-  const childItemScopes: ScopedSpec<ChildItemScopeSpec>[] = [];
-  const outerHostContainers: ScopedSpec<OuterHostContainerSpec>[] = [];
-
-  for (const model of models) {
-    const facts = model.facts;
-    if (isObjectRecord(facts)) {
-      if (Array.isArray(facts.childItemScopes)) {
-        for (const raw of facts.childItemScopes) {
-          const parsed = parseChildScopeSpec(raw);
-          if (parsed) {
-            childItemScopes.push({ spec: parsed, modelId: model.id });
-          }
-        }
-      }
-      if (Array.isArray(facts.outerHostContainers)) {
-        for (const raw of facts.outerHostContainers) {
-          if (
-            isObjectRecord(raw) &&
-            typeof raw.id === "string" &&
-            typeof raw.label === "string" &&
-            isInstanceModelMatch(raw.match)
-          ) {
-            outerHostContainers.push({
-              spec: {
-                id: raw.id,
-                label: raw.label,
-                match: raw.match,
-                ...(typeof raw.argumentIndex === "number"
-                  ? { argumentIndex: raw.argumentIndex }
-                  : {}),
-              },
-              modelId: model.id,
-            });
-          }
-        }
-      }
-    }
-  }
-
-  if (outerHostContainers.length === 0) {
-    for (const model of models) {
-      for (const op of model.cleanupOperations ?? []) {
-        if (op.kind !== "registers-into-container") continue;
-        const label =
-          op.match.container && op.match.member
-            ? `${op.match.container}.${op.match.member}`
-            : (op.match.symbol ?? op.match.member ?? "container");
-        const argIndex =
-          typeof op.target === "object" && op.target !== null
-            ? op.target.argumentIndex
-            : 0;
-        outerHostContainers.push({
-          spec: {
-            id: label,
-            label,
-            match: op.match,
-            argumentIndex: argIndex,
-          },
-          modelId: model.id,
-        });
-      }
-    }
-  }
-
+function resolveRuleConfig(
+  options: PoolResourceOwnershipRuleOptions,
+): ParsedRuleConfig {
+  const childItemScopes = options.childItemScopes ?? DEFAULT_CHILD_ITEM_SCOPES;
+  const outerHostContainers =
+    options.outerHostContainers ?? DEFAULT_OUTER_HOST_CONTAINERS;
+  const containerInternalMatches = options.containerInternalMatches ?? [
+    ...outerHostContainers.map((c) => c.match),
+    ...DEFAULT_CONTAINER_INTERNAL_MATCHES,
+  ];
   return {
     childItemScopes,
     outerHostContainers,
-    containerInternalMatches: [
-      ...outerHostContainers.map((c) => c.spec.match),
-      ...models.flatMap((m) =>
-        (m.cleanupOperations ?? []).map((op) => op.match),
-      ),
-      ...models.flatMap((m) =>
-        (m.instanceBehaviors ?? [])
-          .filter((b) => b.kind === "forwards-argument")
-          .map((b) => b.match),
-      ),
-    ],
+    containerInternalMatches,
   };
 }
 
-function collectMatchKeywords(match: InstanceModelMatch): string[] {
+function collectMatchKeywords(match: MemberTargetMatch): string[] {
   const out: string[] = [];
   if (match.symbol) {
     const parts = match.symbol.split(".");
@@ -291,7 +205,7 @@ function collectMatchKeywords(match: InstanceModelMatch): string[] {
 }
 
 function matchesTargetSpec(
-  match: InstanceModelMatch,
+  match: MemberTargetMatch,
   target: {
     readonly name: string | null;
     readonly containerName: string | null;
@@ -324,7 +238,7 @@ function matchesTargetSpec(
   return true;
 }
 
-function matchesSpec(match: InstanceModelMatch, info: CallInfo): boolean {
+function matchesSpec(match: MemberTargetMatch, info: CallInfo): boolean {
   return matchesTargetSpec(match, {
     name: info.memberName,
     containerName: info.containerName,
@@ -687,7 +601,7 @@ async function discoverSemanticLookupFiles(
   ctx: RuleContext,
   entry: ScopeEntry,
   scopeCallInfos: readonly CallInfo[],
-  config: ParsedModelConfig,
+  config: ParsedRuleConfig,
   fileSyntaxCache: FileSyntaxCache,
   projectSources: ReadonlyMap<string, string>,
 ): Promise<readonly string[]> {
@@ -964,7 +878,7 @@ async function extractChildEndScopes(
 async function isInsideModeledContainerImpl(
   ctx: RuleContext,
   loc: DiagnosticLocation,
-  config: ParsedModelConfig,
+  config: ParsedRuleConfig,
   fileSyntaxCache: FileSyntaxCache,
 ): Promise<boolean> {
   const fileNodes = await getFileSyntaxNodes(ctx, loc.file, fileSyntaxCache);
@@ -1000,7 +914,7 @@ async function collectRegistrations(
   partition: ScopeAstPartition,
   scopeCallInfos: readonly CallInfo[],
   childEndRanges: readonly DiagnosticLocation[],
-  config: ParsedModelConfig,
+  config: ParsedRuleConfig,
   fileSyntaxCache: FileSyntaxCache,
   lookupFiles: readonly string[],
   checkedItemExprHandles: Set<string>,
@@ -1012,7 +926,7 @@ async function collectRegistrations(
   const regCalls: RegistrationRecord[] = [];
   for (const callInfo of scopeCallInfos) {
     if (isInsideChildEnd(callInfo.syntax.location)) continue;
-    for (const { spec, modelId } of config.outerHostContainers) {
+    for (const spec of config.outerHostContainers) {
       if (!matchesSpec(spec.match, callInfo)) continue;
       directRegCalls.add(callInfo.syntax.ref.handleId);
       const itemExpr = callInfo.arguments[spec.argumentIndex ?? 0];
@@ -1020,7 +934,6 @@ async function collectRegistrations(
         regCalls.push({
           info: callInfo,
           containerSpec: spec,
-          containerModelId: modelId,
           containerExpr: callInfo.receiverExpr,
           itemExpr,
           propagationResults: [],
@@ -1038,7 +951,7 @@ async function collectRegistrations(
 
   const outerKeywords = [
     ...new Set(
-      config.outerHostContainers.flatMap(({ spec }) =>
+      config.outerHostContainers.flatMap((spec) =>
         collectMatchKeywords(spec.match),
       ),
     ),
@@ -1055,18 +968,17 @@ async function collectRegistrations(
   const remoteRegistrations: {
     readonly info: CallInfo;
     readonly containerSpec: OuterHostContainerSpec;
-    readonly containerModelId: string;
     readonly containerExpr: SyntaxRef;
     readonly itemExpr: SyntaxRef;
   }[] = [];
 
   for (const info of reverseInfos) {
     if (isLocationWithin(info.syntax.location, entry.scopeRange)) continue;
-    const matched = config.outerHostContainers.find(({ spec }) =>
+    const matched = config.outerHostContainers.find((spec) =>
       matchesSpec(spec.match, info),
     );
     if (!matched || !info.receiverExpr) continue;
-    const itemExpr = info.arguments[matched.spec.argumentIndex ?? 0];
+    const itemExpr = info.arguments[matched.argumentIndex ?? 0];
     if (!itemExpr) continue;
     if (
       await isInsideModeledContainerImpl(
@@ -1080,8 +992,7 @@ async function collectRegistrations(
     }
     remoteRegistrations.push({
       info,
-      containerSpec: matched.spec,
-      containerModelId: matched.modelId,
+      containerSpec: matched,
       containerExpr: info.receiverExpr,
       itemExpr,
     });
@@ -1116,7 +1027,7 @@ async function collectRegistrations(
 
   const rowsByTarget = new Map<string, ValuePropagationTargetResult[]>();
   for (const row of propagation.results) {
-    if (!row.reachable) continue;
+    if (row.status !== "proved") continue;
     const rows = rowsByTarget.get(row.to.handleId) ?? [];
     rows.push(row);
     rowsByTarget.set(row.to.handleId, rows);
@@ -1280,16 +1191,13 @@ function formatWrongClause(
 
 function appendScopeOriginBasis(
   basis: DiagnosticBasis[],
-  ctx: RuleContext,
   entry: ScopeEntry,
-  extraModelId?: string,
 ): void {
-  const scopeModel = ctx.getModel(entry.modelId);
-  if (scopeModel) basis.push(scopeModel);
-  if (extraModelId && extraModelId !== entry.modelId) {
-    const extraModel = ctx.getModel(extraModelId);
-    if (extraModel) basis.push(extraModel);
-  }
+  basis.push({
+    kind: "note",
+    message: `Ownership scope '${entry.spec.label}' (${entry.spec.id})`,
+    at: entry.triggerCall.syntax.location,
+  });
   basis.push(entry.triggerCall.syntax);
   if (
     entry.scopeFn.location.file !== entry.triggerCall.syntax.location.file ||
@@ -1325,7 +1233,11 @@ async function surfaceExternalCleanupGaps(
     for (let i = 0; i < callInfo.arguments.length; i += 1) {
       const res = argResolutions[cursor];
       cursor += 1;
-      if (res?.instance && isSameInstance(res.instance, targetInstance)) {
+      if (
+        res?.status === "proved" &&
+        res.instance !== null &&
+        isSameInstance(res.instance, targetInstance)
+      ) {
         passesTarget = true;
       }
     }
@@ -1387,11 +1299,15 @@ async function evaluateRegistrations(
 
     const containerRes = containerResolutions[idx];
     const isLocalContainer =
-      containerRes?.allocationLocation !== null &&
-      containerRes?.allocationLocation !== undefined &&
+      containerRes?.status === "proved" &&
+      containerRes.allocationLocation !== null &&
       isLocationWithin(containerRes.allocationLocation, entry.scopeRange);
 
-    if (isLocalContainer && containerRes.instance && containerRes.instanceKey) {
+    if (
+      isLocalContainer &&
+      containerRes.instance !== null &&
+      containerRes.instanceKey !== null
+    ) {
       if (!localContainersByKey.has(containerRes.instanceKey)) {
         localContainersByKey.set(containerRes.instanceKey, {
           instance: containerRes.instance,
@@ -1424,7 +1340,11 @@ async function evaluateRegistrations(
 
     let coveredOnChildEnd = false;
     let cleanupScopeRes: InstanceCleanupScopeResult | undefined;
-    if (itemRes?.instance && childEndScopes.length > 0) {
+    if (
+      itemRes?.status === "proved" &&
+      itemRes.instance !== null &&
+      childEndScopes.length > 0
+    ) {
       const cleanupResults = await ctx.instanceCleanup({
         scopes: childEndScopes,
         targets: [itemRes.instance],
@@ -1433,7 +1353,7 @@ async function evaluateRegistrations(
       cleanupScopeRes = cleanupResults[0];
       if (
         cleanupResults.length > 0 &&
-        cleanupResults.every((r) => r.targetResults[0]?.cleanedOnAllPaths)
+        cleanupResults.every((r) => r.targetResults[0]?.status === "proved")
       ) {
         coveredOnChildEnd = true;
       }
@@ -1446,7 +1366,8 @@ async function evaluateRegistrations(
         "pass",
         () => ({
           scopeId: entry.spec.id,
-          instanceKey: itemRes?.instanceKey ?? null,
+          instanceKey:
+            itemRes?.status === "proved" ? itemRes.instanceKey : null,
         }),
       );
       continue;
@@ -1457,7 +1378,9 @@ async function evaluateRegistrations(
     reportedKeys.add(findingKey);
 
     const wronglyDisposed =
-      cleanupScopeRes && itemRes?.instance
+      cleanupScopeRes &&
+      itemRes?.status === "proved" &&
+      itemRes.instance !== null
         ? await findWronglyDisposedInstances(
             ctx,
             cleanupScopeRes,
@@ -1468,10 +1391,9 @@ async function evaluateRegistrations(
         : [];
 
     const basis: DiagnosticBasis[] = [];
-    appendScopeOriginBasis(basis, ctx, entry, reg.containerModelId);
+    appendScopeOriginBasis(basis, entry);
     basis.push(reg.info.syntax, {
-      kind: "model",
-      modelId: reg.containerModelId,
+      kind: "note",
       message: `${reg.containerSpec.label} registers child resource onto outer host container`,
       at: reg.info.syntax.location,
     });
@@ -1485,7 +1407,9 @@ async function evaluateRegistrations(
     );
     const closedWrongClause = wrongClause.length > 0 ? `${wrongClause})` : "";
     const targetDesc =
-      itemSyn?.text?.slice(0, 60) ?? itemRes?.instanceKey ?? "child resource";
+      itemSyn?.text?.slice(0, 60) ??
+      (itemRes?.status === "proved" ? itemRes.instanceKey : null) ??
+      "child resource";
 
     ctx.report({
       at: reg.info.syntax.location,
@@ -1521,7 +1445,7 @@ async function verifyLocalContainers(
         to: returnedExprs,
         lookupFiles,
       });
-      if (prop.reachableTargets.length > 0) covered = true;
+      if (prop.results.some((r) => r.status === "proved")) covered = true;
     }
 
     if (!covered && childEndScopes.length > 0) {
@@ -1533,7 +1457,7 @@ async function verifyLocalContainers(
       cleanupScopeRes = cleanupResults[0];
       if (
         cleanupResults.length > 0 &&
-        cleanupResults.every((r) => r.targetResults[0]?.cleanedOnAllPaths)
+        cleanupResults.every((r) => r.targetResults[0]?.status === "proved")
       ) {
         covered = true;
       }
@@ -1568,7 +1492,7 @@ async function verifyLocalContainers(
         : [];
 
     const basis: DiagnosticBasis[] = [];
-    appendScopeOriginBasis(basis, ctx, entry);
+    appendScopeOriginBasis(basis, entry);
     basis.push(localContainer.firstRegistration.syntax);
     appendWronglyDisposedBasis(basis, wronglyDisposed);
 
@@ -1663,7 +1587,7 @@ async function verifyUnregisteredDisposables(
       lookupFiles,
     });
     for (const row of prop.results) {
-      if (row.reachable) returnedHandleIds.add(row.from.handleId);
+      if (row.status === "proved") returnedHandleIds.add(row.from.handleId);
     }
   }
 
@@ -1679,7 +1603,7 @@ async function verifyUnregisteredDisposables(
 
   for (const [idx, item] of remainingVars.entries()) {
     const instRes = instResolutions[idx];
-    if (!instRes?.instance) continue;
+    if (instRes?.status !== "proved" || instRes.instance === null) continue;
 
     let covered = false;
     let cleanupScopeRes: InstanceCleanupScopeResult | undefined;
@@ -1692,7 +1616,7 @@ async function verifyUnregisteredDisposables(
       cleanupScopeRes = cleanupResults[0];
       if (
         cleanupResults.length > 0 &&
-        cleanupResults.every((r) => r.targetResults[0]?.cleanedOnAllPaths)
+        cleanupResults.every((r) => r.targetResults[0]?.status === "proved")
       ) {
         covered = true;
       }
@@ -1736,7 +1660,7 @@ async function verifyUnregisteredDisposables(
       : [];
 
     const basis: DiagnosticBasis[] = [];
-    appendScopeOriginBasis(basis, ctx, entry);
+    appendScopeOriginBasis(basis, entry);
     basis.push(instRes);
     appendWronglyDisposedBasis(basis, wronglyDisposed);
 
@@ -1757,7 +1681,7 @@ async function verifyUnregisteredDisposables(
 async function checkChildScope(
   ctx: RuleContext,
   entry: ScopeEntry,
-  config: ParsedModelConfig,
+  config: ParsedRuleConfig,
   fileSyntaxCache: FileSyntaxCache,
   projectSources: ReadonlyMap<string, string>,
   reportedKeys: Set<string>,
@@ -1842,132 +1766,6 @@ async function checkChildScope(
 }
 
 /**
- * Declares a model specifying pool/child-item scopes, outer host registration
- * containers, and instance allocation/cleanup behaviors.
- */
-export function definePoolResourceOwnershipModel(
-  options: PoolResourceOwnershipModelOptions,
-): Model {
-  return defineModel({
-    id: options.id,
-    ...(options.version !== undefined ? { version: options.version } : {}),
-    ...(options.description !== undefined
-      ? { description: options.description }
-      : {}),
-    ...(options.instanceBehaviors !== undefined
-      ? { instanceBehaviors: options.instanceBehaviors }
-      : {}),
-    ...(options.cleanupOperations !== undefined
-      ? { cleanupOperations: options.cleanupOperations }
-      : {}),
-    ...(options.lifecycleEvents !== undefined
-      ? { lifecycleEvents: options.lifecycleEvents }
-      : {}),
-    facts: options.facts,
-  });
-}
-
-/**
- * Shared project model calibrated against VS Code PR #290505 for `ResourcePool`,
- * `Disposable._register`, `DisposableStore.add/delete`, and `IInstantiationService.createInstance`.
- */
-export const poolResourceOwnershipModel: Model =
-  definePoolResourceOwnershipModel({
-    id: "pool-resource-ownership",
-    version: "1",
-    description:
-      "Models Disposable._register, DisposableStore.add/delete, IInstantiationService.createInstance, and ResourcePool item factories.",
-    instanceBehaviors: [
-      {
-        kind: "forwards-argument",
-        match: { container: "Disposable", member: "_register" },
-        argumentIndex: 0,
-        description: "Disposable._register returns its registered disposable",
-      },
-      {
-        kind: "forwards-argument",
-        match: { container: "DisposableStore", member: "add" },
-        argumentIndex: 0,
-        description: "DisposableStore.add returns its added disposable",
-      },
-      {
-        kind: "allocates-fresh-instance",
-        match: {
-          container: "IInstantiationService",
-          member: "createInstance",
-        },
-        description:
-          "IInstantiationService.createInstance allocates a fresh component instance",
-      },
-    ],
-    cleanupOperations: [
-      {
-        kind: "disposes-target",
-        match: { member: "dispose" },
-        target: "receiver",
-        description: ".dispose() disposes the receiver resource instance",
-      },
-      {
-        kind: "registers-into-container",
-        match: { container: "Disposable", member: "_register" },
-        target: { argumentIndex: 0 },
-        containerTarget: "receiver",
-        description:
-          "Disposable._register registers child into the outer Disposable host",
-      },
-      {
-        kind: "registers-into-container",
-        match: { container: "DisposableStore", member: "add" },
-        target: { argumentIndex: 0 },
-        containerTarget: "receiver",
-        description:
-          "DisposableStore.add registers child into the DisposableStore container",
-      },
-      {
-        kind: "detaches-from-container",
-        match: { container: "DisposableStore", member: "delete" },
-        target: { argumentIndex: 0 },
-        containerTarget: "receiver",
-        description:
-          "DisposableStore.delete detaches a child item from the DisposableStore container",
-      },
-      {
-        kind: "detaches-from-container",
-        match: { container: "DisposableStore", member: "deleteAndLeak" },
-        target: { argumentIndex: 0 },
-        containerTarget: "receiver",
-        description:
-          "DisposableStore.deleteAndLeak detaches a child item from DisposableStore without disposing it",
-      },
-    ],
-    facts: {
-      childItemScopes: [
-        {
-          id: "resource-pool",
-          kind: "factory-delegation",
-          label: "ResourcePool item factory",
-          match: { symbol: "ResourcePool" },
-          callbackArgumentIndex: 0,
-        },
-      ],
-      outerHostContainers: [
-        {
-          id: "disposable-register",
-          label: "Disposable._register",
-          match: { container: "Disposable", member: "_register" },
-          argumentIndex: 0,
-        },
-        {
-          id: "disposable-store-add",
-          label: "DisposableStore.add",
-          match: { container: "DisposableStore", member: "add" },
-          argumentIndex: 0,
-        },
-      ],
-    },
-  });
-
-/**
  * Creates a rule verifying that resources created inside coexisting pool/child
  * item factories are owned and disposed by each item rather than registered on
  * an outer host container or leaked on item disposal.
@@ -1975,17 +1773,19 @@ export const poolResourceOwnershipModel: Model =
 export function createPoolResourceOwnershipRule(
   options: PoolResourceOwnershipRuleOptions = {},
 ): Rule {
+  const config = resolveRuleConfig(options);
   return defineRule({
     id: options.id ?? "pool-resource-ownership",
     description:
       options.description ??
       "Verify that resources created inside pool item factories are owned and disposed per item rather than registered on an outer host container.",
     run: async (ctx) => {
-      const config = parseModelConfig(ctx.models);
       if (config.childItemScopes.length === 0) return;
 
-      const scopeSpecs = config.childItemScopes.map((s) => s.spec);
-      const candidateCalls = await discoverCandidateCalls(ctx, scopeSpecs);
+      const candidateCalls = await discoverCandidateCalls(
+        ctx,
+        config.childItemScopes,
+      );
       if (candidateCalls.length === 0) return;
 
       ctx.checkpoint(
@@ -2001,7 +1801,7 @@ export function createPoolResourceOwnershipRule(
 
       const scopeEntries: ScopeEntry[] = [];
       for (const info of callInfos) {
-        const matched = config.childItemScopes.find(({ spec }) =>
+        const matched = config.childItemScopes.find((spec) =>
           matchesSpec(spec.match, info),
         );
         if (!matched) continue;
@@ -2011,13 +1811,13 @@ export function createPoolResourceOwnershipRule(
           info.syntax.location,
           "pass",
           () => ({
-            scopeId: matched.spec.id,
-            scopeKind: matched.spec.kind,
+            scopeId: matched.id,
+            scopeKind: matched.kind,
             seedFile: info.syntax.location.file,
           }),
         );
 
-        const cbArg = info.arguments[matched.spec.callbackArgumentIndex ?? 0];
+        const cbArg = info.arguments[matched.callbackArgumentIndex ?? 0];
         if (!cbArg) continue;
 
         const resolvedScope = await resolveScopeFunctionNode(
@@ -2029,8 +1829,7 @@ export function createPoolResourceOwnershipRule(
         if (!resolvedScope) continue;
 
         scopeEntries.push({
-          spec: matched.spec,
-          modelId: matched.modelId,
+          spec: matched,
           triggerCall: info,
           scopeFn: resolvedScope.scopeFn,
           scopeRange: resolvedScope.scopeFn.location,
@@ -2053,6 +1852,6 @@ export function createPoolResourceOwnershipRule(
   });
 }
 
-/** Default rule checking pool item resource ownership via `poolResourceOwnershipModel` or custom models. */
+/** Default rule checking pool item resource ownership. */
 export const poolResourceOwnershipRule: Rule =
   createPoolResourceOwnershipRule();

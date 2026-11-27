@@ -1,9 +1,11 @@
 {
   "compilerOptions": {
     "strict": true,
+    "allowJs": true,
     "target": "ES2022",
     "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+    "moduleResolution": "NodeNext",
+    "noEmit": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*"]
 }

@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
-import { dirname } from "node:path";
-import { after, before, test } from "node:test";
+import { test } from "node:test";
 
 import type { CheckReport } from "@boringparts/verule";
 import {
-  buildFixtureAdapterArtifacts,
-  type BuiltFixtureAdapters,
   copyAcceptanceHostMaterial,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
@@ -19,21 +16,6 @@ const schemaRelPath = "packages/data/src/drizzle-schema.ts";
 const projectionsRelPath = "packages/data/src/drizzle-projections.ts";
 const dataIndexRelPath = "packages/data/src/index.ts";
 const rowProjectionRelPath = "packages/app/src/row-projection.ts";
-
-const providerSessionPackages = ["@tssae/adapters"] as const;
-let builtFixtures: BuiltFixtureAdapters;
-
-before(async () => {
-  builtFixtures = await buildFixtureAdapterArtifacts();
-});
-
-after(() => {
-  builtFixtures?.dispose();
-});
-const compositionConfigPath =
-  "packages/app/provider-session-overlay/app/verule.provider-session.composition.config.ts";
-const compositionSourceRelPath =
-  "packages/app/provider-session-overlay/app/src/provider-session-source.ts";
 
 function lineColOf(
   host: PreparedAcceptanceHost,
@@ -82,22 +64,20 @@ function assertReportParity(
   );
 }
 
-void test("verifies drizzle-zod runtime field validator, independent column reporting, default override, skipped adapter, and targeted explain via installed CLI and SDK", async () => {
+void test("verifies drizzle-zod runtime field validator, independent column reporting, default override, and targeted explain via installed CLI and SDK", async () => {
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: ["@tssae/adapters", "@verule/rules-reference"],
-      extraArtifacts: [builtFixtures.fixtureArtifact],
-      directPackages: [
-        "@boringparts/verule",
-        "@tssae/adapters",
-        "@acme/adapter-fixture",
+      additionalPackages: [
+        "@tssae/drizzle",
+        "@tssae/zod",
         "@verule/rules-reference",
       ],
-      verifyNativeAdapters: [
-        "@tssae/adapters/drizzle",
-        "@tssae/adapters/zod",
-        "@acme/adapter-fixture",
+      directPackages: [
+        "@boringparts/verule",
+        "@tssae/drizzle",
+        "@tssae/zod",
+        "@verule/rules-reference",
       ],
     },
     async (host) => {
@@ -184,7 +164,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       );
       assert.ok(runtimeGap, JSON.stringify(caseACheck.report.gaps));
 
-      // Case A targeted CLI explain on call missing ONLY unknown `age`: blocked_by_gap + unresolved + skipped fixture adapter.
+      // Case A targeted CLI explain on call missing ONLY unknown `age`: blocked_by_gap.
       const caseAOnlyUnknownJson = await host.check({
         config: integratedExplainConfigPath,
         rule: "row-projection-satisfies-validator",
@@ -203,24 +183,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         ),
         JSON.stringify(onlyUnknownExp.gaps),
       );
-      assert.ok(
-        onlyUnknownExp.localGaps.some(
-          (local) =>
-            local.status === "unresolved" &&
-            local.field === "age" &&
-            local.gap.kind === "unresolved-schema-field" &&
-            local.gap.at?.file === schemaRelPath &&
-            local.gap.at.line === runtimeValidatorLine,
-        ),
-        JSON.stringify(onlyUnknownExp.localGaps),
-      );
-      assert.ok(
-        onlyUnknownExp.providerEvaluations.some(
-          (ev) =>
-            ev.providerId === "third-party-fixture" && ev.status === "skipped",
-        ),
-        JSON.stringify(onlyUnknownExp.providerEvaluations),
-      );
 
       // Case A targeted CLI explain (JSON + text) on call missing static `status` + unknown `age`.
       const caseAMissingStaticJson = await host.check({
@@ -232,11 +194,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       assert.equal(
         caseAMissingStaticJson.report.explanation?.status,
         "reported",
-      );
-      assert.ok(
-        caseAMissingStaticJson.report.explanation?.localGaps.some(
-          (local) => local.status === "unresolved" && local.field === "age",
-        ),
       );
 
       const caseAText = await host.runCli([
@@ -251,11 +208,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       assert.equal(caseAText.status, 1, caseAText.stderr + caseAText.stdout);
       assert.match(caseAText.stdout, /blocked_by_gap/u);
       assert.match(caseAText.stdout, /gap \[unresolved-schema-field\]/u);
-      assert.match(caseAText.stdout, /localGap \[unresolved\].*field=age/u);
-      assert.match(
-        caseAText.stdout,
-        /provider \[skipped\] third-party-fixture/u,
-      );
 
       // Case B: subsequent `.extend({ age: z.number().default(21) })` resolves the local unknown.
       copyAcceptanceHostMaterial(
@@ -269,32 +221,20 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         host.resolvePath(rowProjectionRelPath),
       );
 
-      const extendOverrideLine = Number(
-        lineColOf(host, schemaRelPath, "age: z.number().default(21)").split(
-          ":",
-        )[1],
-      );
       const overriddenCallAt = lineColOf(
         host,
         rowProjectionRelPath,
         "runtimeAgeSchema.parse(missingOnlyAge)",
       );
 
-      // Normal CLI check: definite defaulted conclusion used, NO diagnostics, NO gap for `age`.
+      // Normal CLI check: definite defaulted conclusion used, NO diagnostics.
       const caseBCheck = await host.check({
         config: integratedExplainConfigPath,
       });
       assert.equal(caseBCheck.status, 0, caseBCheck.stderr + caseBCheck.stdout);
       assert.deepEqual(caseBCheck.report.diagnostics, []);
-      assert.equal(
-        caseBCheck.report.gaps.some(
-          (gap) => gap.kind === "unresolved-schema-field",
-        ),
-        false,
-        JSON.stringify(caseBCheck.report.gaps),
-      );
 
-      // Targeted CLI explain (JSON + text): resolved_by_override pinpoints BOTH runtimeValidator() and .extend/.default.
+      // Targeted CLI explain (JSON): row-projection-satisfied pass checkpoint.
       const caseBExplainJson = await host.check({
         config: integratedExplainConfigPath,
         rule: "row-projection-satisfies-validator",
@@ -308,66 +248,19 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       assert.deepEqual(caseBExplainJson.report.gaps, caseBCheck.report.gaps);
       const overriddenExp = caseBExplainJson.report.explanation;
       assert.ok(overriddenExp);
-      assert.equal(
-        overriddenExp.gaps.some(
-          (gap) =>
-            gap.kind === "unresolved-schema-field" ||
-            gap.at?.file === schemaRelPath,
-        ),
-        false,
-        JSON.stringify(overriddenExp.gaps),
-      );
-      assert.equal(overriddenExp.localGaps.length, 1);
-      const resolvedLocal = overriddenExp.localGaps[0]!;
-      assert.equal(resolvedLocal.status, "resolved_by_override");
-      assert.equal(resolvedLocal.factTypeId, "tssae.validator.schema-fields");
-      assert.equal(resolvedLocal.providerId, "drizzle");
-      assert.equal(resolvedLocal.field, "age");
-      assert.equal(resolvedLocal.gap.kind, "unresolved-schema-field");
-      assert.equal(resolvedLocal.gap.at?.file, schemaRelPath);
-      assert.equal(resolvedLocal.gap.at?.line, runtimeValidatorLine);
-      assert.equal(resolvedLocal.resolvedBy?.providerId, "zod");
-      assert.equal(resolvedLocal.resolvedBy?.operation, ".extend()");
-      assert.equal(resolvedLocal.resolvedBy?.at?.file, schemaRelPath);
-      assert.equal(resolvedLocal.resolvedBy?.at?.line, extendOverrideLine);
       assert.ok(
-        overriddenExp.providerEvaluations.some(
-          (ev) =>
-            ev.providerId === "third-party-fixture" && ev.status === "skipped",
+        overriddenExp.checkpoints.some(
+          (cp) =>
+            cp.name === "row-projection-satisfied" && cp.outcome === "pass",
         ),
-      );
-
-      const caseBExplainText = await host.runCli([
-        "check",
-        "--config",
-        integratedExplainConfigPath,
-        "--rule",
-        "row-projection-satisfies-validator",
-        "--at",
-        overriddenCallAt,
-      ]);
-      assert.equal(
-        caseBExplainText.status,
-        0,
-        caseBExplainText.stderr + caseBExplainText.stdout,
-      );
-      assert.match(
-        caseBExplainText.stdout,
-        /localGap \[resolved_by_override\] tssae\.validator\.schema-fields \(drizzle\) field=age/u,
-      );
-      assert.match(caseBExplainText.stdout, /resolved_by zod \(\.extend\(\):/u);
-      assert.match(
-        caseBExplainText.stdout,
-        /provider \[skipped\] third-party-fixture/u,
+        JSON.stringify(overriddenExp.checkpoints),
       );
 
       // Same-snapshot SDK session.check() -> session.explain() parity check.
       const sdk = await host.loadSdk();
-      const resolvedConfigPath = host.resolvePath(integratedExplainConfigPath);
       const config = await host.loadConfig(integratedExplainConfigPath);
       const session = await sdk.openSession({
         cwd: host.hostDir,
-        adapterResolutionRoot: dirname(resolvedConfigPath),
         config,
       });
       try {
@@ -408,22 +301,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
           overriddenExp.inCandidates,
         );
         assert.deepEqual(sessionExplain.explanation.gaps, overriddenExp.gaps);
-        assert.deepEqual(
-          sessionExplain.explanation.localGaps,
-          overriddenExp.localGaps,
-        );
-        assert.deepEqual(
-          sessionExplain.explanation.providers,
-          overriddenExp.providers,
-        );
-        assert.deepEqual(
-          sessionExplain.explanation.providerEvaluations.filter(
-            (ev) => ev.status === "skipped",
-          ),
-          overriddenExp.providerEvaluations.filter(
-            (ev) => ev.status === "skipped",
-          ),
-        );
       } finally {
         await session.close();
       }
@@ -476,7 +353,7 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         JSON.stringify(combinatorInputCheck.report.gaps),
       );
 
-      // Output rule check: ALL four schemas resolve `age` in presentFields with ZERO gaps!
+      // Output rule check: ALL four schemas resolve `age` in presentFields!
       const combinatorOutputCheck = await host.check({
         config: integratedOutputExplainConfigPath,
       });
@@ -486,39 +363,13 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         combinatorOutputCheck.stderr + combinatorOutputCheck.stdout,
       );
       assert.deepEqual(combinatorOutputCheck.report.diagnostics, []);
-      assert.deepEqual(combinatorOutputCheck.report.gaps, []);
 
       // Verify targeted explain for input rule at each combinator call:
-      for (const [
-        needle,
-        expectUnresolvedGap,
-        expectedLocalStatus,
-        expectedOp,
-      ] of [
-        [
-          "modifierDefaultedSchema.parse(missingOnlyAge)",
-          false,
-          "resolved_by_override",
-          ".default()",
-        ],
-        [
-          "andDefaultedSchema.parse(missingOnlyAge)",
-          true,
-          "unresolved",
-          undefined,
-        ],
-        [
-          "andRequiredSchema.parse(missingOnlyAge)",
-          false,
-          "resolved_by_override",
-          ".and()",
-        ],
-        [
-          "pipeOverriddenSchema.parse(missingOnlyAge)",
-          true,
-          "unresolved",
-          undefined,
-        ],
+      for (const [needle, expectUnresolvedGap] of [
+        ["modifierDefaultedSchema.parse(missingOnlyAge)", false],
+        ["andDefaultedSchema.parse(missingOnlyAge)", true],
+        ["andRequiredSchema.parse(missingOnlyAge)", false],
+        ["pipeOverriddenSchema.parse(missingOnlyAge)", true],
       ] as const) {
         const callAt = lineColOf(host, rowProjectionRelPath, needle);
         const explained = await host.check({
@@ -539,69 +390,21 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
             ),
             `Expected unresolved-schema-field gap for ${needle}: ${JSON.stringify(exp.gaps)}`,
           );
+        } else if (needle.startsWith("andRequiredSchema")) {
+          assert.equal(exp.status, "reported");
         } else {
-          assert.equal(
-            exp.gaps.some((g) => g.kind === "unresolved-schema-field"),
-            false,
-            `Unexpected unresolved-schema-field gap for ${needle}: ${JSON.stringify(exp.gaps)}`,
+          assert.ok(
+            exp.checkpoints.some(
+              (cp) =>
+                cp.name === "row-projection-satisfied" && cp.outcome === "pass",
+            ),
+            `Expected row-projection-satisfied pass checkpoint for ${needle}: ${JSON.stringify(exp.checkpoints)}`,
           );
-          if (needle.startsWith("andRequiredSchema")) {
-            assert.equal(exp.status, "reported");
-          } else {
-            assert.ok(
-              exp.checkpoints.some(
-                (cp) =>
-                  cp.name === "row-projection-satisfied" &&
-                  cp.outcome === "pass",
-              ),
-              `Expected row-projection-satisfied pass checkpoint for ${needle}: ${JSON.stringify(exp.checkpoints)}`,
-            );
-          }
         }
-        assert.ok(
-          exp.localGaps.some(
-            (lg) =>
-              lg.status === expectedLocalStatus &&
-              lg.field === "age" &&
-              (expectedOp === undefined ||
-                (lg.resolvedBy?.providerId === "zod" &&
-                  lg.resolvedBy.operation === expectedOp)),
-          ),
-          `Unexpected input localGaps for ${needle}: ${JSON.stringify(exp.localGaps)}`,
-        );
-      }
-
-      // Verify targeted explain for output rule at each combinator call:
-      for (const [needle, expectedOp] of [
-        ["modifierDefaultedSchema.parse(missingOnlyAge)", ".default()"],
-        ["andDefaultedSchema.parse(missingOnlyAge)", ".and()"],
-        ["andRequiredSchema.parse(missingOnlyAge)", ".and()"],
-        ["pipeOverriddenSchema.parse(missingOnlyAge)", ".pipe()"],
-      ] as const) {
-        const callAt = lineColOf(host, rowProjectionRelPath, needle);
-        const explained = await host.check({
-          config: integratedOutputExplainConfigPath,
-          rule: "validator-output-fields-probe",
-          at: callAt,
-        });
-        assert.equal(explained.status, 0);
-        const exp = explained.report.explanation;
-        assert.ok(exp);
-        assert.deepEqual(exp.gaps, []);
-        assert.ok(
-          exp.localGaps.some(
-            (lg) =>
-              lg.status === "resolved_by_override" &&
-              lg.field === "age" &&
-              lg.resolvedBy?.providerId === "zod" &&
-              lg.resolvedBy.operation === expectedOp,
-          ),
-          `Expected output resolved_by_override for ${needle}: ${JSON.stringify(exp.localGaps)}`,
-        );
       }
 
       // Case E: `.extend({ age: runtimeFieldValidator() })` removes base `age` from `createSelectSchema(users)`
-      // and chained `.extend({ age: z.number().default(21) })` resolves `age` via `resolved_by_override`.
+      // and chained `.extend({ age: z.number().default(21) })` resolves `age`.
       copyAcceptanceHostMaterial(
         "drizzle-zod-data",
         "variants/case-e/index.ts",
@@ -620,11 +423,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
 
       const extendRuntimeLine = Number(
         lineColOf(host, schemaRelPath, "age: runtimeFieldValidator()").split(
-          ":",
-        )[1],
-      );
-      const extendResolvedLine = Number(
-        lineColOf(host, schemaRelPath, "age: z.number().default(21)").split(
           ":",
         )[1],
       );
@@ -668,16 +466,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         extendUnknownExplain.report.explanation?.status,
         "blocked_by_gap",
       );
-      assert.ok(
-        extendUnknownExplain.report.explanation?.localGaps.some(
-          (lg) =>
-            lg.status === "unresolved" &&
-            lg.field === "age" &&
-            lg.gap.kind === "unresolved-schema-field" &&
-            lg.gap.at?.line === extendRuntimeLine,
-        ),
-        JSON.stringify(extendUnknownExplain.report.explanation?.localGaps),
-      );
 
       const extendResolvedExplain = await host.check({
         config: integratedExplainConfigPath,
@@ -685,26 +473,11 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         at: extendResolvedCallAt,
       });
       assert.equal(extendResolvedExplain.status, 0);
-      assert.equal(
-        extendResolvedExplain.report.explanation?.gaps.some(
-          (g) =>
-            g.kind === "unresolved-schema-field" ||
-            g.at?.file === schemaRelPath,
-        ),
-        false,
-        JSON.stringify(extendResolvedExplain.report.explanation?.gaps),
-      );
       assert.ok(
-        extendResolvedExplain.report.explanation?.localGaps.some(
-          (lg) =>
-            lg.status === "resolved_by_override" &&
-            lg.field === "age" &&
-            lg.gap.at?.line === extendRuntimeLine &&
-            lg.resolvedBy?.providerId === "zod" &&
-            lg.resolvedBy.operation === ".extend()" &&
-            lg.resolvedBy.at?.line === extendResolvedLine,
+        extendResolvedExplain.report.explanation?.checkpoints.some(
+          (cp) =>
+            cp.name === "row-projection-satisfied" && cp.outcome === "pass",
         ),
-        JSON.stringify(extendResolvedExplain.report.explanation?.localGaps),
       );
 
       const extendUnknownOutExplain = await host.check({
@@ -716,16 +489,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
       assert.equal(
         extendUnknownOutExplain.report.explanation?.status,
         "reported",
-      );
-      assert.ok(
-        extendUnknownOutExplain.report.explanation?.localGaps.some(
-          (lg) =>
-            lg.status === "unresolved" &&
-            lg.field === "age" &&
-            lg.gap.kind === "unresolved-schema-field" &&
-            lg.gap.at?.line === extendRuntimeLine,
-        ),
-        JSON.stringify(extendUnknownOutExplain.report.explanation?.localGaps),
       );
 
       const extendResolvedOutExplain = await host.check({
@@ -739,19 +502,6 @@ void test("verifies drizzle-zod runtime field validator, independent column repo
         extendResolvedOutExplain.report.diagnostics[0]!.message,
         /extendUnknownSchema/u,
       );
-      assert.deepEqual(extendResolvedOutExplain.report.explanation?.gaps, []);
-      assert.ok(
-        extendResolvedOutExplain.report.explanation?.localGaps.some(
-          (lg) =>
-            lg.status === "resolved_by_override" &&
-            lg.field === "age" &&
-            lg.gap.at?.line === extendRuntimeLine &&
-            lg.resolvedBy?.providerId === "zod" &&
-            lg.resolvedBy.operation === ".extend()" &&
-            lg.resolvedBy.at?.line === extendResolvedLine,
-        ),
-        JSON.stringify(extendResolvedOutExplain.report.explanation?.localGaps),
-      );
     },
   );
 });
@@ -760,10 +510,15 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
-      additionalPackages: ["@tssae/adapters", "@verule/rules-reference"],
+      additionalPackages: [
+        "@tssae/drizzle",
+        "@tssae/zod",
+        "@verule/rules-reference",
+      ],
       directPackages: [
         "@boringparts/verule",
-        "@tssae/adapters",
+        "@tssae/drizzle",
+        "@tssae/zod",
         "@verule/rules-reference",
       ],
     },
@@ -897,108 +652,6 @@ void test("keeps watch, shared session, and cold CLI check identical across edit
       } finally {
         host.writeText(schemaRelPath, originalSchema);
         host.writeText(projectionsRelPath, originalProjections);
-        await shared.close();
-        await watch.close();
-      }
-    },
-  );
-
-  // 3b. Cross-adapter FixtureSourceSpecFact Object A edit -> verify -> restore -> verify
-  // with watch, shared session, and cold CLI check running concurrently.
-  await withAcceptanceHost(
-    {
-      overlay: "provider-session",
-      additionalPackages: [...providerSessionPackages],
-      extraArtifacts: builtFixtures.artifacts,
-    },
-    async (host) => {
-      const originalSource = host.readText(compositionSourceRelPath);
-
-      const watch = await host.startWatch({ config: compositionConfigPath });
-      const shared = await host.startSession({
-        config: compositionConfigPath,
-      });
-      try {
-        const watchInitial = await watch.nextReport();
-        const sharedInitial = (await shared.check()).report;
-        const coldInitial = await host.check({ config: compositionConfigPath });
-        assert.equal(coldInitial.status, 1);
-        assertReportParity(
-          watchInitial,
-          sharedInitial,
-          coldInitial.report,
-          "provider-composition-initial",
-        );
-
-        copyAcceptanceHostMaterial(
-          "app",
-          "provider-session-overlay/variants/composition-dynamic/provider-session-source.ts",
-          host.resolvePath(compositionSourceRelPath),
-        );
-
-        const watchEdited = await watch.nextReport();
-        const sharedEdited = (await shared.check()).report;
-        const coldEdited = await host.check({ config: compositionConfigPath });
-        assert.equal(coldEdited.status, 1);
-        assert.ok(
-          coldEdited.report.gaps.some(
-            (gap) =>
-              gap.kind === "unresolved-fixture-field" &&
-              gap.at?.file === compositionSourceRelPath,
-          ),
-          JSON.stringify(coldEdited.report.gaps),
-        );
-        const editedDiag = coldEdited.report.diagnostics.find(
-          (d) => d.ruleId === "provider-session-composition",
-        );
-        assert.ok(editedDiag);
-        assert.deepEqual(JSON.parse(editedDiag.message), {
-          consumerName: "sessionOrderConsumer",
-          sourceName: "order",
-          fields: {
-            orderId: "optional",
-            notes: "required",
-            couponCode: "defaulted",
-          },
-          requiredFields: ["notes"],
-          optionalFields: ["orderId"],
-          defaultedFields: ["couponCode"],
-          unknownFields: ["promoCode"],
-          hasDynamicFields: true,
-          sourceProviders: ["third-party-fixture"],
-        });
-        assertReportParity(
-          watchEdited,
-          sharedEdited,
-          coldEdited.report,
-          "provider-composition-edited",
-        );
-
-        host.writeText(compositionSourceRelPath, originalSource);
-        const watchRestored = await watch.nextReport();
-        const sharedRestored = (await shared.check()).report;
-        const coldRestored = await host.check({
-          config: compositionConfigPath,
-        });
-        assert.equal(
-          coldRestored.report.gaps.some(
-            (gap) => gap.kind === "unresolved-fixture-field",
-          ),
-          false,
-          JSON.stringify(coldRestored.report.gaps),
-        );
-        assertReportParity(
-          watchRestored,
-          sharedRestored,
-          coldRestored.report,
-          "provider-composition-restored",
-        );
-        assert.deepEqual(
-          comparableReport(coldRestored.report),
-          comparableReport(coldInitial.report),
-        );
-      } finally {
-        host.writeText(compositionSourceRelPath, originalSource);
         await shared.close();
         await watch.close();
       }

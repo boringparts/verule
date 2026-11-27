@@ -1,0 +1,31 @@
+{
+  "id": "acme-lifecycle",
+  "version": "1.0.0",
+  "entries": [
+    {
+      "match": {
+        "package": "@acme/lifecycle",
+        "memberPath": ["Disposable", "prototype", "_register"]
+      },
+      "instances": {
+        "completeness": "complete",
+        "outcome": {
+          "kind": "forwards-instance",
+          "from": { "argIndex": 0 }
+        }
+      }
+    },
+    {
+      "match": {
+        "package": "@acme/lifecycle",
+        "memberPath": ["IMenuService", "prototype", "createMenu"]
+      },
+      "instances": {
+        "completeness": "complete",
+        "outcome": {
+          "kind": "allocates-fresh-instance"
+        }
+      }
+    }
+  ]
+}

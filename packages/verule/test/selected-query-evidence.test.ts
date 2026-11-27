@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  defineAdapter,
   defineConfig,
-  defineFactProvider,
-  defineFactType,
-  defineModel,
   defineRule,
+  evidenceOf,
+  extractBasisEvidence,
   openSession,
+  registerProvenance,
   runCheck,
   type DiagnosticBasis,
   type Evidence,
@@ -16,16 +15,18 @@ import {
 import { withTempHost } from "@verule/test-hosts";
 
 void describe("@boringparts/verule selected query evidence", () => {
-  void it("threads provenance from selected CallTargetInfo, ValuePropagationPath/TargetResult, SyntaxNodeResult, and Model while excluding unselected candidates", async () => {
+  void it("threads provenance from selected CallTargetInfo, ValuePropagationPath/TargetResult, SyntaxNodeResult, and custom Evidence while excluding unselected candidates", async () => {
     await withTempHost(
       { host: "sdk-queries/selected-evidence-propagation" },
       async (host) => {
         await host.typecheck();
 
-        const policyModel = defineModel({
-          id: "restricted-data-policy",
-          description: "Restricted loader outputs must not reach public sinks.",
-        });
+        const policyEvidence: Evidence = {
+          kind: "summary",
+          summaryId: "restricted-data-policy",
+          summarySource: "local",
+          message: "Restricted loader outputs must not reach public sinks.",
+        };
 
         const rule = defineRule({
           id: "selected-relation-basis",
@@ -102,9 +103,10 @@ void describe("@boringparts/verule selected query evidence", () => {
             const selectedFlow = propagation.results.find(
               (res) =>
                 res.from.handleId ===
-                  restrictedLoader.callSyntax.ref.handleId && res.reachable,
+                  restrictedLoader.callSyntax.ref.handleId &&
+                res.status === "proved",
             );
-            assert.ok(selectedFlow);
+            assert.ok(selectedFlow && selectedFlow.status === "proved");
             const selectedPath = selectedFlow.paths[0];
             assert.ok(selectedPath);
 
@@ -120,9 +122,6 @@ void describe("@boringparts/verule selected query evidence", () => {
               () => ({ target: selectedFlow.to.handleId }),
             );
 
-            const model = ctx.getModel("restricted-data-policy");
-            assert.ok(model);
-
             const customNote: Evidence = {
               kind: "note",
               message: "Business rule: restricted data cannot enter sink().",
@@ -130,7 +129,7 @@ void describe("@boringparts/verule selected query evidence", () => {
             };
 
             const basis: readonly DiagnosticBasis[] = [
-              model,
+              policyEvidence,
               restrictedLoader.targetInfo,
               selectedPath,
               restrictedLoader.callSyntax,
@@ -152,7 +151,6 @@ void describe("@boringparts/verule selected query evidence", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [policyModel],
             rules: [rule],
           }),
         });
@@ -166,12 +164,8 @@ void describe("@boringparts/verule selected query evidence", () => {
           assert.equal(diag.at.file, "src/app.ts");
           assert.equal(diag.at.line, 6);
 
-          // Model evidence is emitted first as requested in basis order.
-          assert.deepEqual(diag.evidence[0], {
-            kind: "model",
-            modelId: "restricted-data-policy",
-            message: "Restricted loader outputs must not reach public sinks.",
-          });
+          // Policy summary evidence is emitted first as requested in basis order.
+          assert.deepEqual(diag.evidence[0], policyEvidence);
 
           // Target declaration evidence points to loadRestricted in src/sources.ts.
           assert.ok(
@@ -308,16 +302,30 @@ void describe("@boringparts/verule selected query evidence", () => {
       async (host) => {
         await host.typecheck();
 
-        const cleanupModel = defineModel({
-          id: "resource-cleanup-model",
-          cleanupOperations: [
+        host.writeText(
+          "tssae.summaries.json",
+          JSON.stringify(
             {
-              kind: "disposes-target",
-              match: { container: "Resource", member: "dispose" },
-              target: "receiver",
+              id: "resource-cleanup-summary",
+              entries: [
+                {
+                  match: { memberPath: ["Resource", "prototype", "dispose"] },
+                  effects: {
+                    completeness: "complete",
+                    resourceOps: [
+                      {
+                        kind: "disposes-target",
+                        target: "receiver",
+                      },
+                    ],
+                  },
+                },
+              ],
             },
-          ],
-        });
+            null,
+            2,
+          ),
+        );
 
         const rule = defineRule({
           id: "selected-other-relations",
@@ -355,8 +363,12 @@ void describe("@boringparts/verule selected query evidence", () => {
             assert.ok(covItem);
 
             const [instRes] = await ctx.resolveInstances([makeCall.ref]);
-            assert.ok(instRes && instRes.instance !== null);
-            const instInfo = instRes.instances[0]!;
+            assert.ok(
+              instRes &&
+                instRes.status === "proved" &&
+                instRes.instance !== null,
+            );
+            const instInfo = instRes.instances[0];
 
             const [projInstWithLoc] = await ctx.projectInstances(
               [instRes.instance],
@@ -444,7 +456,6 @@ void describe("@boringparts/verule selected query evidence", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [cleanupModel],
             rules: [rule],
           }),
         });
@@ -473,147 +484,66 @@ void describe("@boringparts/verule selected query evidence", () => {
     );
   });
 
-  void it("threads FactResult and FactContribution.basis transitively into derived facts and diagnostics", async () => {
+  void it("threads provenance registered via registerProvenance() through evidenceOf() and rule reports", async () => {
     await withTempHost(
-      { host: "sdk-queries/selected-evidence-facts" },
+      { host: "sdk-queries/selected-evidence-relations" },
       async (host) => {
         await host.typecheck();
 
-        const SourceOriginFact = defineFactType<
-          "call",
-          undefined,
-          { readonly tag: string }
-        >({
-          id: "test.source-origin",
-          subjectKind: "call",
-        });
-        const DerivedSinkFact = defineFactType<
-          "syntax",
-          undefined,
-          { readonly tainted: boolean }
-        >({
-          id: "test.derived-sink",
-          subjectKind: "syntax",
-        });
-
-        const sourceAdapter = defineAdapter({
-          id: "test-source-adapter",
-          provides: [
-            defineFactProvider(SourceOriginFact, async (ctx) => {
-              const calls = await ctx.findSyntax({
-                files: ["src/service.ts"],
-                kinds: ["CallExpression"],
-              });
-              const resolved = await ctx.resolveCalls(
-                calls.map((c) => c.ref),
-                { select: { location: true } },
-              );
-              const callees = await ctx.calleesOf(
-                resolved
-                  .map((r) => r.call)
-                  .filter((c): c is NonNullable<typeof c> => c !== null),
-              );
-              const out = [];
-              for (const entry of callees) {
-                const target = entry.resolvedTargets.find(
-                  (t) => t.name === "fetchSecret",
-                );
-                if (!target) continue;
-                out.push({
-                  subject: entry.call,
-                  value: { tag: "secret" },
-                  basis: [entry, target],
-                });
-              }
-              return out;
-            }),
-          ],
-        });
-
-        const derivedAdapter = defineAdapter({
-          id: "test-derived-adapter",
-          provides: [
-            defineFactProvider(DerivedSinkFact, async (ctx) => {
-              const calls = await ctx.findSyntax({
-                files: ["src/service.ts"],
-                kinds: ["CallExpression"],
-              });
-              const fetchCall = calls.find((c) => c.text === "fetchSecret()");
-              if (!fetchCall) return [];
-              const [resolved] = await ctx.resolveCalls([fetchCall.ref], {
-                select: { location: true },
-              });
-              if (!resolved?.call) return [];
-              const [callTarget] = await ctx.calleesOf([resolved.call]);
-              if (!callTarget) return [];
-              return [
-                {
-                  subject: fetchCall.ref,
-                  value: { tainted: true },
-                  basis: [callTarget],
-                  evidence: [
-                    {
-                      kind: "note",
-                      message: "Derived taint from call target provenance.",
-                      at: fetchCall.location,
-                    },
-                  ],
-                },
-              ];
-            }),
-          ],
-        });
-
         const rule = defineRule({
-          id: "fact-basis-rule",
+          id: "domain-provenance-rule",
           run: async (ctx) => {
-            const origins = await ctx.facts(SourceOriginFact);
-            const derived = await ctx.facts(DerivedSinkFact);
-            assert.equal(origins.length, 1);
-            assert.equal(derived.length, 1);
             const calls = await ctx.findSyntax({
-              files: ["src/service.ts"],
+              files: ["src/impl.ts"],
               kinds: ["CallExpression"],
             });
-            const fetchCall = calls.find((c) => c.text === "fetchSecret()");
-            assert.ok(fetchCall);
+            const makeCall = calls.find((c) => c.text === "makeResource()");
+            assert.ok(makeCall);
+
+            const domainItem = registerProvenance(
+              { schemaName: "userSchema" },
+              [
+                {
+                  kind: "source",
+                  message:
+                    "Domain provenance attached via registerProvenance()",
+                  at: makeCall.location,
+                },
+              ],
+            );
+            assert.equal(evidenceOf(domainItem).length, 1);
+
+            const combined = extractBasisEvidence([
+              domainItem,
+              {
+                kind: "note",
+                message: "Rule diagnostic note",
+                at: makeCall.location,
+              },
+            ]);
+            assert.equal(combined.length, 2);
 
             ctx.report({
-              at: fetchCall.location,
-              message: "Derived fact violation.",
-              basis: [origins[0]!, derived[0]!],
+              at: makeCall.location,
+              message: "Domain provenance diagnostic.",
+              basis: [domainItem],
             });
           },
         });
 
         const report = await runCheck({
           cwd: host.rootDir,
-          config: defineConfig({
-            tsconfig: "tsconfig.json",
-            adapters: [sourceAdapter, derivedAdapter],
-            rules: [rule],
-          }),
+          config: defineConfig({ tsconfig: "tsconfig.json", rules: [rule] }),
         });
 
         assert.equal(report.diagnostics.length, 1);
-        const diag = report.diagnostics[0]!;
         assert.ok(
-          diag.evidence.some(
+          report.diagnostics[0]!.evidence.some(
             (ev) =>
               ev.kind === "source" &&
-              ev.at?.file === "src/service.ts" &&
-              ev.at.line === 1,
+              ev.message ===
+                "Domain provenance attached via registerProvenance()",
           ),
-          JSON.stringify(diag.evidence),
-        );
-        assert.ok(
-          diag.evidence.some(
-            (ev) =>
-              ev.kind === "note" &&
-              ev.message === "Derived taint from call target provenance." &&
-              ev.at?.line === 5,
-          ),
-          JSON.stringify(diag.evidence),
         );
       },
     );

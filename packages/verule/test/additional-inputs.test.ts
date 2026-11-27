@@ -5,10 +5,7 @@ import { describe, it } from "node:test";
 import {
   VeruleExecutionError,
   createAdditionalInputRegistry,
-  defineAdapter,
   defineConfig,
-  defineFactProvider,
-  defineFactType,
   defineRule,
   openSession,
   requestSharedReport,
@@ -51,7 +48,7 @@ function assertMatchesCold(
 }
 
 void describe("@boringparts/verule additional inputs", () => {
-  void it("merges config, rule, and adapter declarations for the same physical file while preserving all sources and keeping compiler sourceFiles unchanged", async () => {
+  void it("merges config, rule, and summary declarations for the same physical file while preserving all sources and keeping compiler sourceFiles unchanged", async () => {
     await withTempHost(
       {
         host: "sdk-projects/additional-inputs-basic",
@@ -124,12 +121,12 @@ void describe("@boringparts/verule additional inputs", () => {
           id: "allowlist-reader",
         });
         registrar.registerAdditionalInput("./src/../allowed-packages.json", {
-          kind: "adapter",
-          id: "package-allowlist-adapter",
+          kind: "summary",
+          id: "package-allowlist-summary",
         });
         registrar.registerAdditionalInput("allowed-packages.link.json", {
-          kind: "adapter",
-          id: "symlink-adapter",
+          kind: "summary",
+          id: "symlink-summary",
         });
 
         const standaloneEntries = registrar.listAdditionalInputs();
@@ -137,18 +134,18 @@ void describe("@boringparts/verule additional inputs", () => {
         assert.equal(standaloneEntries[0]?.file, "allowed-packages.json");
         assert.deepEqual(standaloneEntries[0]?.sources, [
           { kind: "config" },
-          { kind: "adapter", id: "package-allowlist-adapter" },
-          { kind: "adapter", id: "symlink-adapter" },
+          { kind: "summary", id: "package-allowlist-summary" },
+          { kind: "summary", id: "symlink-summary" },
           { kind: "rule", id: "allowlist-reader" },
         ] satisfies readonly AdditionalInputSource[]);
         assert.equal(registrar.getTrackedAbsolutePaths().length, 1);
 
-        // Session integration with adapter registration sharing the same mechanism
+        // Session integration with summary registration sharing the same mechanism
         const session = await openSession({ cwd: host.rootDir, config });
         try {
           session.registerAdditionalInput("./src/../allowed-packages.json", {
-            kind: "adapter",
-            id: "package-allowlist-adapter",
+            kind: "summary",
+            id: "package-allowlist-summary",
           });
 
           const report = await session.check();
@@ -165,7 +162,7 @@ void describe("@boringparts/verule additional inputs", () => {
           assert.ok(merged.digest && merged.digest.length > 0);
           assert.deepEqual(merged.sources, [
             { kind: "config" },
-            { kind: "adapter", id: "package-allowlist-adapter" },
+            { kind: "summary", id: "package-allowlist-summary" },
             { kind: "rule", id: "allowlist-auditor" },
             { kind: "rule", id: "allowlist-reader" },
           ]);
@@ -185,7 +182,7 @@ void describe("@boringparts/verule additional inputs", () => {
             err.code === "INVALID_CONFIG",
         );
 
-        // runCheck without adapter registration still preserves config + rule sources
+        // runCheck preserves config + rule sources
         const coldReport = await runCheck({ cwd: host.rootDir, config });
         assert.equal(coldReport.additionalInputs.length, 1);
         assert.deepEqual(coldReport.additionalInputs[0]?.sources, [
@@ -453,93 +450,109 @@ void describe("@boringparts/verule additional inputs", () => {
     );
   });
 
-  void it("tracks additional inputs read inside LibraryAdapter.extract, preserves adapter sources on fact cache reuse, and invalidates facts when only the adapter manifest changes", async () => {
+  void it("tracks auto-discovered local tssae.summaries.json in additionalInputs and updates shared session reports when only the summary file changes", async () => {
     await withTempHost(
-      { host: "sdk-projects/additional-inputs-adapter" },
+      {
+        files: {
+          "package.json": JSON.stringify({
+            name: "summary-additional-input-host",
+            private: true,
+            type: "module",
+          }),
+          "tsconfig.json": JSON.stringify({
+            compilerOptions: {
+              strict: true,
+              target: "ES2022",
+              module: "NodeNext",
+              moduleResolution: "NodeNext",
+            },
+            include: ["src/**/*.ts"],
+          }),
+          "src/app.ts": [
+            'import { transformToken } from "@acme/token";',
+            "export function check(): string {",
+            '  const orig = { tag: "orig" };',
+            "  const next = transformToken(orig);",
+            "  return next.tag;",
+            "}",
+            "",
+          ].join("\n"),
+          "tssae.summaries.json": JSON.stringify(
+            {
+              id: "local-token-summary",
+              entries: [
+                {
+                  match: {
+                    package: "@acme/token",
+                    memberPath: ["transformToken"],
+                  },
+                  instances: {
+                    completeness: "complete",
+                    outcome: {
+                      kind: "forwards-instance",
+                      from: { argIndex: 0 },
+                    },
+                  },
+                },
+              ],
+            },
+            null,
+            2,
+          ),
+        },
+        syntheticPackages: {
+          "@acme/token": {
+            packageJson: {
+              name: "@acme/token",
+              version: "1.0.0",
+              types: "./index.d.ts",
+            },
+            files: {
+              "index.d.ts":
+                "export declare function transformToken<T>(x: T): T;\n",
+            },
+          },
+        },
+      },
       async (host) => {
         await host.typecheck();
 
         await withTempHost(
-          { prefix: "verule-adapter-sock-" },
+          { prefix: "verule-summary-sock-" },
           async (socketHost) => {
             const socketPath = socketHost.resolvePath("shared.sock");
 
-            const RequiredFieldsFact = defineFactType<
-              "syntax",
-              undefined,
-              readonly string[]
-            >({
-              id: "policy.required-fields",
-              subjectKind: "syntax",
-            });
+            const rule = defineRule({
+              id: "require-forwarded-token",
+              run: async (ctx) => {
+                const vars = await ctx.findSyntax({
+                  kinds: ["VariableDeclaration"],
+                });
+                const origVar = vars.find((v) => v.text.startsWith("orig ="));
+                const nextVar = vars.find((v) => v.text.startsWith("next ="));
+                if (!origVar?.initializer || !nextVar?.initializer) return;
 
-            let extractCount = 0;
-            const policyAdapter = defineAdapter({
-              id: "policy-manifest-adapter",
-              provides: [
-                defineFactProvider(RequiredFieldsFact, async (ctx) => {
-                  extractCount += 1;
-                  const raw = ctx.readAdditionalInput("schema-policy.json");
-                  const parsed = JSON.parse(raw) as {
-                    readonly requiredFields: readonly string[];
-                  };
-                  const calls = await ctx.findSyntax({
-                    kinds: ["CallExpression"],
+                const [origInst, nextInst] = await ctx.resolveInstances([
+                  origVar.initializer,
+                  nextVar.initializer,
+                ]);
+                if (
+                  origInst?.status === "proved" &&
+                  nextInst?.status === "proved" &&
+                  origInst.instanceKey !== nextInst.instanceKey
+                ) {
+                  ctx.report({
+                    at: nextVar.location,
+                    message: "transformToken allocated a distinct instance",
+                    basis: [origInst, nextInst],
                   });
-                  return calls
-                    .filter((call) => call.text.startsWith("validatePayload("))
-                    .map((call) => ({
-                      subject: call.ref,
-                      value: parsed.requiredFields,
-                      evidence: [
-                        {
-                          kind: "source" as const,
-                          message: `Policy requires [${parsed.requiredFields.join(", ")}]`,
-                          at: call.location,
-                        },
-                      ],
-                    }));
-                }),
-              ],
-            });
-
-            const consumerRule = defineRule({
-              id: "policy-consumer",
-              run: async (ctx) => {
-                const facts = await ctx.facts(RequiredFieldsFact);
-                const [locations] = [
-                  await ctx.syntaxOf(
-                    facts.map((f) => f.subject),
-                    { select: { location: true } },
-                  ),
-                ];
-                for (const [idx, fact] of facts.entries()) {
-                  const loc = locations[idx]?.location;
-                  if (loc && fact.value.includes("tenantId")) {
-                    ctx.report({
-                      at: loc,
-                      message: "Payload missing policy-required field tenantId",
-                      findingKey: "missing:tenantId",
-                      basis: [fact],
-                    });
-                  }
                 }
-              },
-            });
-
-            const auditorRule = defineRule({
-              id: "policy-auditor",
-              run: async (ctx) => {
-                ctx.registerAdditionalInput("./schema-policy.json");
-                await ctx.facts(RequiredFieldsFact);
               },
             });
 
             const config = defineConfig({
               tsconfig: "tsconfig.json",
-              additionalInputs: ["schema-policy.json"],
-              adapters: [policyAdapter],
-              rules: [consumerRule, auditorRule],
+              rules: [rule],
             });
 
             const abortController = new AbortController();
@@ -547,92 +560,61 @@ void describe("@boringparts/verule additional inputs", () => {
               | Awaited<ReturnType<typeof startSharedSession>>
               | undefined;
             try {
-              // Verify single-session cache reuse across rules and across repeated check() calls preserves adapter source
-              const directSession = await openSession({
-                cwd: host.rootDir,
-                config,
-              });
-              try {
-                const first = await directSession.check();
-                assert.equal(first.status, "clean");
-                assert.equal(extractCount, 1);
-                assert.deepEqual(first.additionalInputs[0]?.sources, [
-                  { kind: "config" },
-                  { kind: "adapter", id: "policy-manifest-adapter" },
-                  { kind: "rule", id: "policy-auditor" },
-                ]);
-
-                // Second check on same snapshot hits FactCache (extractCount stays 1) and still preserves adapter source
-                const second = await directSession.check({
-                  observe: "summary",
-                });
-                assert.equal(extractCount, 1);
-                assert.deepEqual(second.additionalInputs[0]?.sources, [
-                  { kind: "config" },
-                  { kind: "adapter", id: "policy-manifest-adapter" },
-                  { kind: "rule", id: "policy-auditor" },
-                ]);
-              } finally {
-                await directSession.close();
-              }
-
-              // Verify shared session invalidates FactCache immediately when only the adapter-read manifest changes
-              const adapterOnlyConfig = defineConfig({
-                tsconfig: "tsconfig.json",
-                adapters: [policyAdapter],
-                rules: [consumerRule],
-              });
               sharedSession = await startSharedSession({
                 cwd: host.rootDir,
                 endpoint: socketPath,
-                config: adapterOnlyConfig,
+                config,
                 signal: abortController.signal,
               });
 
               const r1 = await requestSharedReport({ endpoint: socketPath });
               assert.equal(r1.status, "clean");
-              assert.deepEqual(r1.additionalInputs[0]?.sources, [
-                { kind: "adapter", id: "policy-manifest-adapter" },
-              ]);
+              assert.ok(
+                r1.additionalInputs.some(
+                  (entry) =>
+                    entry.file === "tssae.summaries.json" &&
+                    entry.sources.some(
+                      (s) =>
+                        s.kind === "summary" && s.id === "local-token-summary",
+                    ),
+                ),
+                JSON.stringify(r1.additionalInputs),
+              );
               assertMatchesCold(
                 r1,
-                await runCheck({
-                  cwd: host.rootDir,
-                  config: adapterOnlyConfig,
-                }),
-                "adapter-manifest-initial",
+                await runCheck({ cwd: host.rootDir, config }),
+                "summary-initial",
               );
 
               host.writeText(
-                "schema-policy.json",
-                JSON.stringify({ requiredFields: ["id", "tenantId"] }, null, 2),
+                "tssae.summaries.json",
+                JSON.stringify(
+                  {
+                    id: "local-token-summary",
+                    entries: [
+                      {
+                        match: {
+                          package: "@acme/token",
+                          memberPath: ["transformToken"],
+                        },
+                        instances: {
+                          completeness: "complete",
+                          outcome: { kind: "allocates-fresh-instance" },
+                        },
+                      },
+                    ],
+                  },
+                  null,
+                  2,
+                ),
               );
               const r2 = await requestSharedReport({ endpoint: socketPath });
               assert.equal(r2.status, "findings");
               assert.equal(r2.diagnostics.length, 1);
               assertMatchesCold(
                 r2,
-                await runCheck({
-                  cwd: host.rootDir,
-                  config: adapterOnlyConfig,
-                }),
-                "adapter-manifest-violation",
-              );
-
-              host.writeText(
-                "schema-policy.json",
-                JSON.stringify({ requiredFields: ["id"] }, null, 2),
-              );
-              const r3 = await requestSharedReport({ endpoint: socketPath });
-              assert.equal(r3.status, "clean");
-              assert.equal(r3.diagnostics.length, 0);
-              assertMatchesCold(
-                r3,
-                await runCheck({
-                  cwd: host.rootDir,
-                  config: adapterOnlyConfig,
-                }),
-                "adapter-manifest-restored",
+                await runCheck({ cwd: host.rootDir, config }),
+                "summary-updated-violation",
               );
             } finally {
               abortController.abort();

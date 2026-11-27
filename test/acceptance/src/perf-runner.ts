@@ -178,10 +178,7 @@ export type RunPoolOwnershipPerfOptions = {
 };
 
 const defaultOperationTimeoutMs = 120_000;
-const poolOwnershipAdditionalPackages = [
-  "@verule/rules-reference",
-  "@tssae/adapters",
-] as const;
+const poolOwnershipAdditionalPackages = ["@verule/rules-reference"] as const;
 
 export function formatTierLabel(tier: PoolOwnershipScaleSpec): string {
   return `${String(tier.fileCount)}/${String(tier.candidateFactoryCount)}`;

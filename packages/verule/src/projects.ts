@@ -39,7 +39,10 @@ function canonicalEvidenceKey(evidence: readonly Evidence[]): string {
       kind: item.kind,
       message: item.message,
       ...(item.at !== undefined ? { at: canonicalLocationKey(item.at) } : {}),
-      ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
+      ...(item.summaryId !== undefined ? { summaryId: item.summaryId } : {}),
+      ...(item.summarySource !== undefined
+        ? { summarySource: item.summarySource }
+        : {}),
       ...(item.declaration !== undefined
         ? { declaration: item.declaration }
         : {}),

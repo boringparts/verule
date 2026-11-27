@@ -231,29 +231,28 @@ void describe("@boringparts/verule external TypeScript consumer contract", () =>
           expectedPattern: /TS2322|TS2345/u,
         },
         {
-          name: 'CallRef passed to FactType<"syntax">',
+          name: "un-narrowed ValuePropagationTargetResult cannot read .paths",
           body: `
-            declare const callRef: CallRef;
-            declare const syntaxFact: FactType<"syntax", { readonly mode?: string } | undefined, string>;
-            await ctx.facts(syntaxFact, { targets: [callRef] });
+            declare const synRef: SyntaxRef;
+            const prop = await ctx.valuePropagation({ propagation: "value", from: synRef, to: [synRef] });
+            const row = prop.results[0];
+            if (row) {
+              void row.paths;
+            }
           `,
-          expectedPattern: /TS2322|TS2345/u,
+          expectedPattern: /TS2339/u,
         },
         {
-          name: "wrong condition passed to FactType",
+          name: "proved ValuePropagationTargetResult does not expose .gaps",
           body: `
-            declare const syntaxFact: FactType<"syntax", { readonly mode: "a" | "b" }, string>;
-            await ctx.facts(syntaxFact, { condition: { mode: "c" } });
+            declare const synRef: SyntaxRef;
+            const prop = await ctx.valuePropagation({ propagation: "value", from: synRef, to: [synRef] });
+            const row = prop.results[0];
+            if (row?.status === "proved") {
+              void row.gaps;
+            }
           `,
-          expectedPattern: /TS2322|TS2345/u,
-        },
-        {
-          name: "non-string providerId passed to facts",
-          body: `
-            declare const syntaxFact: FactType<"syntax", undefined, string>;
-            await ctx.facts(syntaxFact, { providerId: 123 });
-          `,
-          expectedPattern: /TS2322|TS2345/u,
+          expectedPattern: /TS2339/u,
         },
         {
           name: "SyntaxRef passed to projectInstances",
@@ -383,7 +382,7 @@ void describe("@boringparts/verule external TypeScript consumer contract", () =>
 
       for (const testCase of negativeCases) {
         const snippet = [
-          'import type { CallRef, DeclarationRef, FactType, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@boringparts/verule";',
+          'import type { CallRef, DeclarationRef, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@boringparts/verule";',
           "",
           "export async function checkContract(ctx: RuleContext): Promise<void> {",
           testCase.body,

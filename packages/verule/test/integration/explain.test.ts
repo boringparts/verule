@@ -205,19 +205,28 @@ void test("verule check rejects unknown --rule, invalid --at, and invalid --obse
   );
 });
 
-void test("verule check --observe and --at surface adapter providers, ruleId, candidates, and reuse", async () => {
+void test("verule check --observe and --at surface engine metrics, ruleId, candidates, and reuse", async () => {
   await withCliTempHost(
-    { host: "integration/explain-facts-observe" },
+    { host: "integration/explain-checkpoints" },
     async (host) => {
       await host.typecheck();
 
       const textRes = await captureCli(
-        ["check", "--observe", "detail", "--at", "src/app.ts:2:1"],
+        [
+          "check",
+          "--config",
+          "verule.observe-reuse.config.ts",
+          "--observe",
+          "detail",
+          "--at",
+          "src/app.ts:2:1",
+        ],
         host.rootDir,
       );
       assert.equal(textRes.status, 0, textRes.stderr);
-      assert.match(textRes.stdout, /providers: .*sample-provider/u);
-      assert.match(textRes.stdout, /provider=sample-provider/u);
+      assert.match(textRes.stdout, /lowering:/u);
+      assert.match(textRes.stdout, /irCache:/u);
+      assert.match(textRes.stdout, /summaryLookup:/u);
       assert.match(textRes.stdout, /rule=rule-first/u);
       assert.match(textRes.stdout, /rule=rule-second/u);
       assert.match(textRes.stdout, /cache=computed/u);

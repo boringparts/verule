@@ -40,11 +40,6 @@ type NdjsonLine =
             readonly id: string;
             readonly digest: string;
           }[];
-          readonly models: readonly {
-            readonly id: string;
-            readonly version?: string;
-            readonly digest: string;
-          }[];
         };
         readonly sequence: number;
         readonly trigger: "initial" | "change";
@@ -109,7 +104,7 @@ async function runColdJsonCheck(cwd: string, configArg?: string) {
   return { status, data: envelope.data };
 }
 
-void test("verule watch --output ndjson aligns every round with independent verule check, reloads rules/models/config, and recovers from errors", async () => {
+void test("verule watch --output ndjson aligns every round with independent verule check, reloads rules/policy/config, and recovers from errors", async () => {
   await withCliTempHost({ host: "integration/watch-ndjson" }, async (host) => {
     await host.typecheck();
     await host.typecheck("tsconfig.alt.json");
@@ -212,14 +207,14 @@ void test("verule watch --output ndjson aligns every round with independent veru
     host.writeText("verule.config.ts", savedConfig);
     await assertMatchesColdCheck(7, "findings");
 
-    // 7a. Modify imported model file -> reloads model and updates identity & findings
+    // 7a. Modify imported policy module -> reloads rules and updates identity & findings
     host.replaceText(
-      "verule.model.ts",
-      'version: "1",\n  facts: { disallowedMode: "fast" },',
-      'version: "2",\n  facts: { disallowedMode: "safe" },',
+      "verule.policy.ts",
+      'version: "1",\n  disallowedMode: "fast",',
+      'version: "2",\n  disallowedMode: "safe",',
     );
     const r8 = await assertMatchesColdCheck(8, "clean");
-    assert.equal(r8.identity.models[0]?.version, "2");
+    assert.notEqual(r8.identity.configDigest, r5.identity.configDigest);
 
     // 7b. Modify imported rules file -> reloads rule
     host.writeText(

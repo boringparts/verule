@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { text } from "@ykdz/cli-contract";
 import { z } from "zod";
@@ -8,9 +8,7 @@ import { REPORT_SCHEMA_VERSION, watchProject } from "./index.ts";
 import {
   appendGapLines,
   checkReportSchema,
-  factConflictDetailsSchema,
   formatDiagnosticsLines,
-  toWireFactConflict,
   toWireReport,
 } from "./report-wire.ts";
 
@@ -44,7 +42,6 @@ export const watchFailureRecordSchema = z.object({
   trigger: z.enum(["initial", "change"]),
   code: z.string(),
   message: z.string(),
-  conflict: factConflictDetailsSchema.optional(),
 });
 
 export type WireWatchFailureRecord = z.infer<typeof watchFailureRecordSchema>;
@@ -98,7 +95,6 @@ export async function* streamWatchEvents<
       return {
         config: loaded.config,
         watchFiles: loaded.watchFiles,
-        adapterResolutionRoot: dirname(loaded.configPath),
       };
     },
   });
@@ -133,9 +129,6 @@ export async function* streamWatchEvents<
         trigger: event.trigger,
         code: event.code,
         message: event.message,
-        ...(event.conflict !== undefined
-          ? { conflict: toWireFactConflict(event.conflict) }
-          : {}),
       });
     }
   }

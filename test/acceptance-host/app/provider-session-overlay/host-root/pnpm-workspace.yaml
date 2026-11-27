@@ -1,9 +1,0 @@
-packages:
-  - packages/data
-  - packages/app
-catalog:
-  "@tssae/adapters": "*"
-  "@acme/adapter-fixture": "*"
-  "@acme/adapter-fixture-complement": "*"
-  "@boringparts/verule": "*"
-  drizzle-orm: 0.45.3

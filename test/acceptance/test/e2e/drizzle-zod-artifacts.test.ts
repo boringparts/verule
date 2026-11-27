@@ -2,30 +2,27 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import type { CheckReport, FactResult } from "@boringparts/verule";
+import type { CheckReport } from "@boringparts/verule";
 import {
-  ValidatorSchemaFieldsFact,
-  type ValidatorSchemaFieldsFactValue,
-  type ValidatorSchemaSubjectKind,
-} from "@tssae/adapters/drizzle";
-import {
-  ValidatorInputFieldsFact,
-  ValidatorOutputFieldsFact,
-  type ValidatorInputFieldsFactValue,
-  type ValidatorOutputFieldsFactValue,
-  type ValidatorSubjectKind,
-} from "@tssae/adapters/zod";
+  drizzleZodValidator,
+  extractDrizzleZodSchemas,
+  type DrizzleZodSchemaResult,
+} from "@tssae/drizzle";
+import type {
+  ValidatorInputFieldsResult,
+  ValidatorOutputFieldsResult,
+} from "@tssae/zod";
 import {
   copyAcceptanceHostMaterial,
   withAcceptanceHost,
 } from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
 
-const adapterSpecifiers = [
-  "@tssae/adapters/drizzle",
-  "@tssae/adapters/zod",
+const packageNames = [
+  "@tssae/drizzle",
+  "@tssae/zod",
+  "@verule/rules-reference",
 ] as const;
-const packageNames = ["@tssae/adapters", "@verule/rules-reference"] as const;
 const directPackageNames = ["@boringparts/verule", ...packageNames] as const;
 const mainConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
 const multiSourceConfigPath = "packages/app/verule.multiple-sources.config.ts";
@@ -46,26 +43,22 @@ function semanticReport(report: CheckReport) {
   };
 }
 
-void test("loads both installed native adapters from the neutral static host and keeps reports stable across CLI, watch, and shared sessions", async (t) => {
+void test("loads @tssae/drizzle and @tssae/zod from the neutral static host and keeps reports stable across CLI, watch, and shared sessions", async (t) => {
   await withAcceptanceHost(
     {
       overlay: "drizzle-zod",
       additionalPackages: [...packageNames],
       directPackages: directPackageNames,
-      verifyNativeAdapters: [...adapterSpecifiers],
     },
     async (host) => {
-      const adaptersArtifact = host.artifact("@tssae/adapters");
-      const adaptersExports = adaptersArtifact.manifest.exports as
-        | Record<string, unknown>
-        | undefined;
-      for (const subpath of ["./drizzle", "./zod"] as const) {
-        const entry = adaptersExports?.[subpath] as
-          | Record<string, string>
+      for (const pkgName of ["@tssae/drizzle", "@tssae/zod"] as const) {
+        const pkgArtifact = host.artifact(pkgName);
+        const pkgExports = pkgArtifact.manifest.exports as
+          | Record<string, Record<string, string>>
           | undefined;
-        assert.equal(entry?.default, `./dist/${subpath.slice(2)}/index.js`);
-        assert.equal(entry?.types, `./dist/${subpath.slice(2)}/index.d.ts`);
-        assert.equal(entry?.source, undefined);
+        assert.equal(pkgExports?.["."]?.default, "./dist/index.js");
+        assert.equal(pkgExports?.["."]?.types, "./dist/index.d.ts");
+        assert.equal(pkgExports?.["."]?.source, undefined);
       }
       const rulesArtifact = host.artifact("@verule/rules-reference");
       const rulesExports = rulesArtifact.manifest.exports as
@@ -79,15 +72,9 @@ void test("loads both installed native adapters from the neutral static host and
       assert.ok(tssaeArtifact.binarySha256);
       assert.equal(host.audit.hasSourceConditionInExports, false);
       assert.equal(host.audit.engineBinarySha256, tssaeArtifact.binarySha256);
-      const adapterLibraries = adapterSpecifiers.map((specifier) => {
-        const lib = host.nativeLibraries[specifier];
-        assert.ok(lib);
-        return lib;
-      });
 
       const sdk = await host.loadSdk();
       const mainConfig = await host.loadConfig(mainConfigPath);
-      assert.deepEqual(mainConfig.adapterPackages, adapterSpecifiers);
 
       const coldInitial = await host.check({
         config: mainConfigPath,
@@ -104,16 +91,16 @@ void test("loads both installed native adapters from the neutral static host and
       );
       assert.ok(appProject);
       assert.ok(!appProject.sourceFiles.includes(projectionsRelPath));
-      for (const providerId of ["drizzle", "zod"] as const) {
-        assert.ok(
-          (coldInitial.report.observation?.engineExtractions[providerId]
-            ?.extractions ?? 0) > 0,
-          `Expected an observed extraction from the ${providerId} provider.`,
-        );
-      }
+      assert.ok(coldInitial.report.observation);
+      assert.ok(coldInitial.report.observation.lowering);
+      assert.ok(coldInitial.report.observation.irCache);
+      assert.ok(coldInitial.report.observation.summaryLookup);
+      assert.ok(
+        coldInitial.report.observation.queryCount > 0,
+        JSON.stringify(coldInitial.report.observation),
+      );
       const sdkInitial = await sdk.runCheck({
         cwd: host.hostDir,
-        adapterResolutionRoot: host.appDir,
         config: mainConfig,
       });
       assert.deepEqual(
@@ -144,7 +131,6 @@ void test("loads both installed native adapters from the neutral static host and
 
       const explicitSession = await sdk.openSession({
         cwd: host.hostDir,
-        adapterResolutionRoot: host.appDir,
         config: mainConfig,
       });
       try {
@@ -200,7 +186,6 @@ void test("loads both installed native adapters from the neutral static host and
 
         const sdkMissing = await sdk.runCheck({
           cwd: host.hostDir,
-          adapterResolutionRoot: host.appDir,
           config: mainConfig,
         });
         const watchMissing = await watch.nextReport();
@@ -278,7 +263,6 @@ void test("loads both installed native adapters from the neutral static host and
         );
         const sdkRestored = await sdk.runCheck({
           cwd: host.hostDir,
-          adapterResolutionRoot: host.appDir,
           config: mainConfig,
         });
         const watchRestored = await watch.nextReport();
@@ -312,7 +296,6 @@ void test("loads both installed native adapters from the neutral static host and
         }
         const sdkSchemaChanged = await sdk.runCheck({
           cwd: host.hostDir,
-          adapterResolutionRoot: host.appDir,
           config: mainConfig,
         });
         const watchSchemaChanged = await watch.nextReport();
@@ -450,7 +433,6 @@ void test("loads both installed native adapters from the neutral static host and
 
       const sdkMultiple = await sdk.runCheck({
         cwd: host.hostDir,
-        adapterResolutionRoot: host.appDir,
         config: multiConfig,
       });
       assert.deepEqual(
@@ -485,17 +467,10 @@ void test("loads both installed native adapters from the neutral static host and
       }
 
       t.diagnostic(
-        [
-          "Installed native adapters:",
-          ...adapterLibraries.map(
-            (adapter) =>
-              `${adapter.packageName} ${adapter.path} SHA-256 ${adapter.sha256}`,
-          ),
-          `Engine binary SHA-256 ${host.audit.engineBinarySha256}`,
-        ].join("\n"),
+        `Engine binary SHA-256 ${host.audit.engineBinarySha256}; drizzle=${host.artifact("@tssae/drizzle").version}; zod=${host.artifact("@tssae/zod").version}`,
       );
 
-      // Dual-adapter drizzle-zod provenance, non-null column default override,
+      // drizzle-zod provenance, non-null column default override,
       // explicit refine (replace + callback), and local same-named function counterexample.
       const originalSchema = host.readText(schemaRelPath);
       const fakeSelectRelPath = "packages/app/src/fake-select.ts";
@@ -513,102 +488,95 @@ void test("loads both installed native adapters from the neutral static host and
         await runTscTypecheck(host.hostDir, "packages/app/tsconfig.json");
         await runTscTypecheck(host.hostDir, "packages/data/tsconfig.json");
 
-        let schemaFieldsFacts: readonly FactResult<
-          ValidatorSchemaSubjectKind,
-          ValidatorSchemaFieldsFactValue
-        >[] = [];
-        let zodInputFacts: readonly FactResult<
-          ValidatorSubjectKind,
-          ValidatorInputFieldsFactValue
-        >[] = [];
-        let zodOutputFacts: readonly FactResult<
-          ValidatorSubjectKind,
-          ValidatorOutputFieldsFactValue
-        >[] = [];
+        let schemaResults: readonly DrizzleZodSchemaResult[] = [];
+        let zodInputResults: readonly ValidatorInputFieldsResult[] = [];
+        let zodOutputResults: readonly ValidatorOutputFieldsResult[] = [];
 
         const inspectRule = sdk.defineRule({
           id: "inspect-dual-drizzle-zod",
           run: async (ctx) => {
-            schemaFieldsFacts = await ctx.facts(ValidatorSchemaFieldsFact);
-            zodInputFacts = await ctx.facts(ValidatorInputFieldsFact, {
-              condition: { scope: "schemas" },
-            });
-            zodOutputFacts = await ctx.facts(ValidatorOutputFieldsFact, {
-              condition: { scope: "schemas" },
-            });
+            if (ctx.project.configFile === "packages/data/tsconfig.json") {
+              schemaResults = await extractDrizzleZodSchemas(ctx, {
+                refineFields: true,
+              });
+              zodInputResults = await drizzleZodValidator.extractInputFields(
+                ctx,
+                { scope: "schemas" },
+              );
+              zodOutputResults = await drizzleZodValidator.extractOutputFields(
+                ctx,
+                { scope: "schemas" },
+              );
+            } else {
+              const appSchemas = await drizzleZodValidator.extractInputFields(
+                ctx,
+                { scope: "schemas" },
+              );
+              zodInputResults = [...zodInputResults, ...appSchemas];
+            }
           },
         });
 
         const dualReport = await sdk.runCheck({
           cwd: host.hostDir,
-          adapterResolutionRoot: host.appDir,
-          config: {
-            ...mainConfig,
+          config: sdk.defineConfig({
+            projects: [
+              "packages/data/tsconfig.json",
+              "packages/app/tsconfig.json",
+            ],
             rules: [inspectRule],
-          },
+          }),
         });
         assert.equal(dualReport.status, "clean");
 
-        // Local same-named createSelectSchema MUST NOT emit ValidatorSchemaFieldsFact or acquire Drizzle columns.
+        // Local same-named createSelectSchema MUST NOT emit DrizzleZodSchemaResult or acquire Drizzle columns.
         assert.equal(
-          schemaFieldsFacts.length,
+          schemaResults.length,
           4,
-          `Expected 4 real drizzle-zod calls (users, workspace, page, refinedWorkspaceSchema), got ${schemaFieldsFacts.length}`,
+          `Expected 4 real drizzle-zod calls (users, workspace, page, refinedWorkspaceSchema), got ${schemaResults.length}`,
         );
 
-        const fakeLocalIn = zodInputFacts.find(
-          (f) => f.value.schemaName === "fakeLocalSelectSchema",
+        const fakeLocalIn = zodInputResults.find(
+          (f) => f.schemaName === "fakeLocalSelectSchema",
         );
         assert.ok(fakeLocalIn);
-        assert.deepEqual(fakeLocalIn.value.requiredFields, []);
-        assert.equal(fakeLocalIn.value.hasDynamicFields, true);
+        assert.deepEqual(fakeLocalIn.requiredFields, []);
+        assert.equal(fakeLocalIn.hasDynamicFields, true);
         assert.ok(fakeLocalIn.gaps.some((g) => g.kind === "unresolved-schema"));
 
-        const refinedIn = zodInputFacts.find(
-          (f) => f.value.schemaName === "refinedWorkspaceSchema",
+        const refinedIn = zodInputResults.find(
+          (f) => f.schemaName === "refinedWorkspaceSchema",
         );
-        const refinedOut = zodOutputFacts.find(
-          (f) => f.value.schemaName === "refinedWorkspaceSchema",
+        const refinedOut = zodOutputResults.find(
+          (f) => f.schemaName === "refinedWorkspaceSchema",
         );
         assert.ok(refinedIn && refinedOut);
-        assert.deepEqual(refinedIn.value.requiredFields, ["id"]);
-        assert.deepEqual(refinedIn.value.defaultedFields, ["name", "plan"]);
-        assert.deepEqual(refinedIn.value.optionalFields, [
-          "name",
-          "plan",
-          "slug",
-        ]);
-        assert.equal(refinedIn.value.fields.name?.nullable, true);
-        assert.equal(refinedIn.value.fields.slug?.nullable, false);
-        assert.deepEqual(refinedOut.value.presentFields, [
-          "id",
-          "name",
-          "plan",
-        ]);
-        assert.deepEqual(refinedOut.value.optionalFields, ["slug"]);
+        assert.deepEqual(refinedIn.requiredFields, ["id"]);
+        assert.deepEqual(refinedIn.defaultedFields, ["name", "plan"]);
+        assert.deepEqual(refinedIn.optionalFields, ["name", "plan", "slug"]);
+        assert.equal(refinedIn.fields.name?.nullable, true);
+        assert.equal(refinedIn.fields.slug?.nullable, false);
+        assert.deepEqual(refinedOut.presentFields, ["id", "name", "plan"]);
+        assert.deepEqual(refinedOut.optionalFields, ["slug"]);
 
         // Non-null column `users.age` overridden by `.extend({ age: z.number().default(18) })`
-        const userIn = zodInputFacts.find(
-          (f) => f.value.schemaName === "userSchema",
+        const userIn = zodInputResults.find(
+          (f) => f.schemaName === "userSchema",
         );
-        const userOut = zodOutputFacts.find(
-          (f) => f.value.schemaName === "userSchema",
+        const userOut = zodOutputResults.find(
+          (f) => f.schemaName === "userSchema",
         );
         assert.ok(userIn && userOut);
-        assert.deepEqual(userIn.value.requiredFields, [
-          "fullName",
-          "id",
-          "status",
-        ]);
-        assert.deepEqual(userIn.value.defaultedFields, ["age"]);
-        assert.deepEqual(userIn.value.optionalFields, ["age"]);
-        assert.deepEqual(userOut.value.presentFields, [
+        assert.deepEqual(userIn.requiredFields, ["fullName", "id", "status"]);
+        assert.deepEqual(userIn.defaultedFields, ["age"]);
+        assert.deepEqual(userIn.optionalFields, ["age"]);
+        assert.deepEqual(userOut.presentFields, [
           "age",
           "fullName",
           "id",
           "status",
         ]);
-        assert.deepEqual(userOut.value.defaultedFields, ["age"]);
+        assert.deepEqual(userOut.defaultedFields, ["age"]);
         // Evidence traces back to BOTH table column declaration (line 9) and .extend override (line 34)!
         assert.ok(
           userIn.evidence.some(
@@ -621,7 +589,7 @@ void test("loads both installed native adapters from the neutral static host and
           ),
         );
         assert.ok(
-          userIn.value.fields.age?.evidence?.some(
+          userIn.fields.age?.evidence?.some(
             (ev) => ev.at?.file === schemaRelPath && ev.at.line === 34,
           ),
         );

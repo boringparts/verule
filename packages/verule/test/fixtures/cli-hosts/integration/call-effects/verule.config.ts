@@ -1,30 +1,4 @@
-import {
-  defineConfig,
-  defineModel,
-  defineRule,
-  isSameInstance,
-} from "@boringparts/verule";
-
-const lifecycleModel = defineModel({
-  id: "cli-lifecycle-model",
-  instanceBehaviors: [
-    { kind: "allocates-fresh-instance", match: { symbol: "createResource" } },
-  ],
-  cleanupOperations: [
-    {
-      kind: "disposes-target",
-      match: { member: "dispose" },
-      target: "receiver",
-    },
-  ],
-  lifecycleEvents: [
-    {
-      kind: "lifecycle-end-callback",
-      match: { symbol: "onDidClose" },
-      callbackArgumentIndex: 0,
-    },
-  ],
-});
+import { defineConfig, defineRule, isSameInstance } from "@boringparts/verule";
 
 const cleanupRule = defineRule({
   id: "resource-cleanup",
@@ -58,14 +32,14 @@ const cleanupRule = defineRule({
       if (!resAVar?.initializer || !closeCall) continue;
 
       const [instRes] = await ctx.resolveInstances([resAVar.initializer]);
-      if (!instRes?.instance) continue;
+      if (instRes?.status !== "proved" || instRes.instance === null) continue;
 
       const [cleanup] = await ctx.instanceCleanup({
         scopes: [closeCall.ref],
         targets: [instRes.instance],
       });
       const tr = cleanup?.targetResults[0];
-      if (tr && !tr.cleanedOnAllPaths) {
+      if (tr && tr.status === "disproved") {
         const wrong = cleanup.disposedInstances.find(
           (d) => !isSameInstance(d.instance, instRes.instance),
         );
@@ -132,9 +106,9 @@ const validationRule = defineRule({
           : null;
 
       if (
-        cov?.status !== "covered" ||
-        rawProp.reachableTargets.length > 0 ||
-        (dataProp?.reachableTargets.length ?? 0) === 0
+        cov?.status !== "proved" ||
+        rawProp.results.some((r) => r.status === "proved") ||
+        !(dataProp?.results.some((r) => r.status === "proved") ?? false)
       ) {
         ctx.report({
           at: sinkCall.location,
@@ -180,7 +154,7 @@ const schedulerRule = defineRule({
         branches: guardBranches.map((b) => b.ref),
         targets: [clearWrite.syntax],
       });
-      if (cov?.status !== "covered") {
+      if (cov?.status !== "proved") {
         ctx.report({
           at: clearWrite.location,
           message: "Post-callback flag clear is missing ALLOW_RECURSE guard.",
@@ -193,6 +167,5 @@ const schedulerRule = defineRule({
 
 export default defineConfig({
   tsconfig: "tsconfig.json",
-  models: [lifecycleModel],
   rules: [cleanupRule, validationRule, schedulerRule],
 });

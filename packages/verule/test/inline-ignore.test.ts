@@ -15,6 +15,23 @@ void describe("@boringparts/verule inline ignore directives", () => {
     await withTempHost(
       { host: "sdk-projects/inline-ignore-basic" },
       async (host) => {
+        host.writeText(
+          "src/app.ts",
+          [
+            "declare function dangerous(label: string): void;",
+            "declare function helper(flag: boolean): void;",
+            "",
+            "export function run(flag: boolean, onDone?: () => void): void {",
+            "  // verule-ignore-next-code-line no-dangerous -- Legacy path kept for compatibility.",
+            '  dangerous("legacy");',
+            "  if (flag) {",
+            "    helper(flag);",
+            "  }",
+            "  onDone?.();",
+            "}",
+            "",
+          ].join("\n"),
+        );
         await host.typecheck();
 
         const noDangerousRule = defineRule({
@@ -30,23 +47,12 @@ void describe("@boringparts/verule inline ignore directives", () => {
                 });
               }
             }
-            // Also exercise branchCoverage so a gap is produced inside the same function.
-            const fns = await ctx.findSyntax({
-              kinds: ["FunctionDeclaration"],
-            });
-            const runFn = fns.find((fn) =>
-              fn.text.includes("export function run"),
-            );
-            if (runFn) {
-              const helperCall = calls.find((c) =>
-                c.text.startsWith("helper("),
-              );
-              if (helperCall) {
-                await ctx.branchCoverage({
-                  function: runFn.ref,
-                  branches: [],
-                  targets: [helperCall.ref],
-                });
+            // Also exercise calleesOf on a dynamic callback so a gap is produced inside the same function.
+            const dynCall = calls.find((c) => c.text.startsWith("onDone?.("));
+            if (dynCall) {
+              const [resolved] = await ctx.resolveCalls([dynCall.ref]);
+              if (resolved?.call) {
+                await ctx.calleesOf([resolved.call]);
               }
             }
           },
@@ -97,7 +103,7 @@ void describe("@boringparts/verule inline ignore directives", () => {
           assert.equal(consumerDiag.evidence[0]?.at?.file, "src/app.ts");
           assert.equal(consumerDiag.evidence[0]?.at?.line, 6);
           assert.ok(
-            initial.gaps.some((g) => g.kind === "unmodeled-try-catch"),
+            initial.gaps.some((g) => g.kind === "dynamic-callee"),
             "gaps must not be deleted by inline ignore",
           );
 
