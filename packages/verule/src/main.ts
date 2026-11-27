@@ -10,8 +10,8 @@ import {
   text,
   versionCapability,
   type WriteCliOutput,
-} from "@ykdz/cli-contract";
-import { isNodeBrokenPipe } from "@ykdz/cli-contract/node";
+} from "@boringparts/cli-contract";
+import { isNodeBrokenPipe } from "@boringparts/cli-contract/node";
 import { z } from "zod";
 
 import type { CliCommandIdentity } from "./cli-command-identity.ts";
@@ -202,6 +202,11 @@ function formatCheckFindingsText(report: WireCheckReport) {
     : text.lines([summary, ...extras]);
 }
 
+export type CliDependencies = {
+  readonly cwd: string;
+  readonly signal?: AbortSignal | undefined;
+};
+
 type CheckCliInput = {
   readonly config?: string | undefined;
   readonly session?: string | undefined;
@@ -211,103 +216,98 @@ type CheckCliInput = {
   readonly observeLimit?: string | undefined;
 };
 
-function createCliContract(
-  identity: CliCommandIdentity,
+const define = defineCli<CliDependencies>();
+
+const versionInput = z.object({});
+const versionOutputSchema = z.object({ cli: z.string(), engine: z.string() });
+const checkInput = z.object({
+  config: z.string().min(1).optional(),
+  session: z.string().min(1).optional(),
+  rule: z.string().min(1).optional(),
+  at: z.string().min(1).optional(),
+  observe: z.enum(["off", "summary", "detail"]).optional(),
+  observeLimit: z.string().min(1).optional(),
+});
+const watchInput = z.object({
+  config: z.string().min(1).optional(),
+});
+const sessionInput = z.object({
+  config: z.string().min(1).optional(),
+  socket: z.string().min(1),
+});
+
+async function executeCheck(
+  input: CheckCliInput,
   workingDirectory: string,
-  signal?: AbortSignal,
-) {
-  const define = defineCli();
-  const versionInput = z.object({});
-  const checkInput = z.object({
-    config: z.string().min(1).optional(),
-    session: z.string().min(1).optional(),
-    rule: z.string().min(1).optional(),
-    at: z.string().min(1).optional(),
-    observe: z.enum(["off", "summary", "detail"]).optional(),
-    observeLimit: z.string().min(1).optional(),
-  });
-  const watchInput = z.object({
-    config: z.string().min(1).optional(),
-  });
-  const sessionInput = z.object({
-    config: z.string().min(1).optional(),
-    socket: z.string().min(1),
-  });
+): Promise<
+  | { readonly ok: true; readonly report: WireCheckReport }
+  | {
+      readonly ok: false;
+      readonly failure: {
+        readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
+        readonly code: string;
+        readonly message: string;
+      };
+    }
+> {
+  try {
+    const observeLimit =
+      input.observeLimit !== undefined
+        ? parseObserveLimit(input.observeLimit)
+        : undefined;
 
-  async function executeCheck(input: CheckCliInput): Promise<
-    | { readonly ok: true; readonly report: WireCheckReport }
-    | {
-        readonly ok: false;
-        readonly failure: {
-          readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
-          readonly code: string;
-          readonly message: string;
-        };
-      }
-  > {
-    try {
-      const observeLimit =
-        input.observeLimit !== undefined
-          ? parseObserveLimit(input.observeLimit)
-          : undefined;
-
-      if (input.session !== undefined) {
-        if (input.config !== undefined) {
-          throw new VeruleExecutionError(
-            "INVALID_CONFIG",
-            'Cannot combine "--session" with "--config"; the shared session is already bound to a configuration.',
-          );
-        }
-        const report = await requestSharedReport({
-          endpoint: input.session,
-          cwd: workingDirectory,
-          ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
-          ...(input.at !== undefined ? { at: input.at } : {}),
-          ...(input.observe !== undefined ? { observe: input.observe } : {}),
-          ...(observeLimit !== undefined ? { observeLimit } : {}),
-        });
-        return { ok: true, report: toWireReport(report) };
-      }
-
-      const configStart = performance.now();
-      const loaded = await loadProjectConfigWithDependencies(
-        workingDirectory,
-        input.config,
-      );
-      const configLoadMs = performance.now() - configStart;
-
-      const report = await runCheck({
+    if (input.session !== undefined) {
+      const report = await requestSharedReport({
+        endpoint: input.session,
         cwd: workingDirectory,
-        config: loaded.config,
-        configLoadMs,
         ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
         ...(input.at !== undefined ? { at: input.at } : {}),
         ...(input.observe !== undefined ? { observe: input.observe } : {}),
         ...(observeLimit !== undefined ? { observeLimit } : {}),
       });
       return { ok: true, report: toWireReport(report) };
-    } catch (err) {
-      if (err instanceof VeruleExecutionError) {
-        return {
-          ok: false,
-          failure: {
-            reportVersion: REPORT_SCHEMA_VERSION,
-            code: err.code,
-            message: err.message,
-          },
-        };
-      }
+    }
+
+    const configStart = performance.now();
+    const loaded = await loadProjectConfigWithDependencies(
+      workingDirectory,
+      input.config,
+    );
+    const configLoadMs = performance.now() - configStart;
+
+    const report = await runCheck({
+      cwd: workingDirectory,
+      config: loaded.config,
+      configLoadMs,
+      ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
+      ...(input.at !== undefined ? { at: input.at } : {}),
+      ...(input.observe !== undefined ? { observe: input.observe } : {}),
+      ...(observeLimit !== undefined ? { observeLimit } : {}),
+    });
+    return { ok: true, report: toWireReport(report) };
+  } catch (err) {
+    if (err instanceof VeruleExecutionError) {
       return {
         ok: false,
         failure: {
           reportVersion: REPORT_SCHEMA_VERSION,
-          code: "ENGINE_ERROR",
-          message: err instanceof Error ? err.message : String(err),
+          code: err.code,
+          message: err.message,
         },
       };
     }
+    return {
+      ok: false,
+      failure: {
+        reportVersion: REPORT_SCHEMA_VERSION,
+        code: "ENGINE_ERROR",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
+}
 
+function createCliContract(identity: CliCommandIdentity) {
   return define({
     root: "verule",
     help: helpCapability({
@@ -316,12 +316,18 @@ function createCliContract(
         usage: "Usage",
         commands: "Commands",
         options: "Options",
+        constraints: "Constraints",
         schema: "Contract Discovery",
       },
       wording: {
         commandPlaceholder: "command",
-        choices: "(choices: {choices})",
-        default: "(default: {value})",
+        outputModePlaceholder: "mode",
+        choices: "{usage} (choices: {choices})",
+        choicesAndDefault: "{usage} (choices: {choices}, default: {value})",
+        list: "{left}, {right}",
+        facts: "{left} with {right}",
+        present: "{field}",
+        forbiddenCombination: "Cannot combine {facts}.",
       },
     }),
     version: versionCapability({
@@ -346,36 +352,43 @@ function createCliContract(
         description:
           "Show the installed Verule CLI and analysis engine versions.",
         input: versionInput,
-        outputs: define.outputModes("version", versionInput, (mode) => ({
-          default: "text",
-          modes: {
-            text: mode.atomic({
-              format: "text",
-              description: "Display the installed versions.",
-              success: {
-                kind: "data",
-                variants: {
-                  versions: {
-                    description: "Installed CLI and engine versions.",
-                    schema: z.object({ cli: z.string(), engine: z.string() }),
-                    exitCode: 0,
-                    text: ({ cli, engine }) =>
-                      text.line(
-                        `${identity.commandName} ${cli} (engine ${engine})`,
-                      ),
-                  },
+        outputs: (factory) => {
+          const execution = factory.atomic({
+            success: {
+              kind: "data",
+              variants: {
+                versions: {
+                  description: "Installed CLI and engine versions.",
+                  schema: versionOutputSchema,
+                  exitCode: 0,
                 },
               },
-              failures: {},
-              handler: async ({ outcome }) => {
-                return outcome.data.versions({
-                  cli: identity.version,
-                  engine: await getEngineVersion(),
-                });
-              },
-            }),
-          },
-        })),
+            },
+            failures: {},
+            handler: async ({ outcome }) => {
+              return outcome.data.versions({
+                cli: identity.version,
+                engine: await getEngineVersion(),
+              });
+            },
+          });
+
+          return {
+            default: "text",
+            modes: {
+              text: execution.text({
+                description: "Display the installed versions.",
+                success: {
+                  versions: ({ cli, engine }) =>
+                    text.line(
+                      `${identity.commandName} ${cli} (engine ${engine})`,
+                    ),
+                },
+                failures: {},
+              }),
+            },
+          };
+        },
       }),
       ...define.command("check")({
         kind: "command",
@@ -418,88 +431,73 @@ function createCliContract(
             description: "Limit detail observation entries (e.g. 20 or 4096b).",
           },
         },
+        usageConstraints: [
+          {
+            kind: "forbiddenCombination",
+            all: [
+              { kind: "present", field: "session" },
+              { kind: "present", field: "config" },
+            ],
+          },
+        ],
         input: checkInput,
-        outputs: define.outputModes("check", checkInput, (mode) => ({
-          default: "text",
-          modes: {
-            text: mode.atomic({
-              format: "text",
-              description: "Display check diagnostics as human-readable text.",
-              success: {
-                kind: "data",
-                variants: {
-                  clean: {
-                    description: "Analysis completed with zero violations.",
-                    schema: checkReportSchema,
-                    exitCode: 0,
-                    text: formatCheckCleanText,
-                  },
-                  findings: {
-                    description: "Analysis completed and reported violations.",
-                    schema: checkReportSchema,
-                    exitCode: 1,
-                    text: formatCheckFindingsText,
-                  },
+        outputs: (factory) => {
+          const execution = factory.atomic({
+            success: {
+              kind: "data",
+              variants: {
+                clean: {
+                  description: "Analysis completed with zero violations.",
+                  schema: checkReportSchema,
+                  exitCode: 0,
+                },
+                findings: {
+                  description: "Analysis completed and reported violations.",
+                  schema: checkReportSchema,
+                  exitCode: 1,
                 },
               },
-              failures: {
-                failed: {
-                  description:
-                    "Configuration, project loading, rule execution, or engine failure.",
-                  schema: checkFailureSchema,
-                  exitCode: 2,
-                  text: ({ code, message }) =>
+            },
+            failures: {
+              failed: {
+                description:
+                  "Configuration, project loading, rule execution, or engine failure.",
+                schema: checkFailureSchema,
+                exitCode: 2,
+              },
+            },
+            handler: async ({ input, dependencies, outcome }) => {
+              const outcomeResult = await executeCheck(input, dependencies.cwd);
+              if (!outcomeResult.ok) {
+                return outcome.failure.failed(outcomeResult.failure);
+              }
+              return outcomeResult.report.status === "findings"
+                ? outcome.data.findings(outcomeResult.report)
+                : outcome.data.clean(outcomeResult.report);
+            },
+          });
+
+          return {
+            default: "text",
+            modes: {
+              text: execution.text({
+                description:
+                  "Display check diagnostics as human-readable text.",
+                success: {
+                  clean: formatCheckCleanText,
+                  findings: formatCheckFindingsText,
+                },
+                failures: {
+                  failed: ({ code, message }) =>
                     text.line(`Check failed [${code}]: ${message}`),
                 },
-              },
-              handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input);
-                if (!outcomeResult.ok) {
-                  return outcome.failure.failed(outcomeResult.failure);
-                }
-                return outcomeResult.report.status === "findings"
-                  ? outcome.data.findings(outcomeResult.report)
-                  : outcome.data.clean(outcomeResult.report);
-              },
-            }),
-            json: mode.atomic({
-              format: "structured",
-              description: "Emit a versioned JSON check report.",
-              success: {
-                kind: "data",
-                variants: {
-                  clean: {
-                    description: "Analysis completed with zero violations.",
-                    schema: checkReportSchema,
-                    exitCode: 0,
-                  },
-                  findings: {
-                    description: "Analysis completed and reported violations.",
-                    schema: checkReportSchema,
-                    exitCode: 1,
-                  },
-                },
-              },
-              failures: {
-                failed: {
-                  description:
-                    "Configuration, project loading, rule execution, or engine failure.",
-                  schema: checkFailureSchema,
-                  exitCode: 2,
-                },
-              },
-              handler: async ({ input, outcome }) => {
-                const outcomeResult = await executeCheck(input);
-                if (!outcomeResult.ok) {
-                  return outcome.failure.failed(outcomeResult.failure);
-                }
-                return outcomeResult.report.status === "findings"
-                  ? outcome.data.findings(outcomeResult.report)
-                  : outcome.data.clean(outcomeResult.report);
-              },
-            }),
-          },
-        })),
+              }),
+              json: execution.structured({
+                description: "Emit a versioned JSON check report.",
+              }),
+            },
+          };
+        },
       }),
       ...define.command("watch")({
         kind: "command",
@@ -516,68 +514,50 @@ function createCliContract(
           },
         },
         input: watchInput,
-        outputs: define.outputModes("watch", watchInput, (mode) => ({
-          default: "text",
-          modes: {
-            text: mode.stream({
-              format: "text",
-              description: "Display watch reports as human-readable text.",
-              success: {
-                kind: "stream",
-                records: {
-                  report: {
-                    description: "Complete analysis report for a snapshot.",
-                    schema: watchReportRecordSchema,
-                    text: formatWatchReportText,
-                  },
-                  failed: {
-                    description: "Single-round check failure.",
-                    schema: watchFailureRecordSchema,
-                    text: ({ sequence, code, message }) =>
-                      text.line(
-                        `[watch #${sequence}] Check failed [${code}]: ${message}`,
-                      ),
-                  },
-                },
-                text: () => text.line("Watch stopped."),
+        outputs: (factory) => {
+          const execution = factory.stream({
+            records: {
+              report: {
+                description: "Complete analysis report for a snapshot.",
+                schema: watchReportRecordSchema,
               },
-              failures: {},
-              handler: ({ input, outcome }) =>
-                streamWatchEvents(
-                  workingDirectory,
-                  input.config,
-                  signal,
-                  outcome,
-                ),
-            }),
-            ndjson: mode.stream({
-              format: "structured",
-              description:
-                "Emit complete analysis reports as NDJSON stream records.",
-              success: {
-                kind: "stream",
-                records: {
-                  report: {
-                    description: "Complete analysis report for a snapshot.",
-                    schema: watchReportRecordSchema,
-                  },
-                  failed: {
-                    description: "Single-round check failure.",
-                    schema: watchFailureRecordSchema,
-                  },
-                },
+              failed: {
+                description: "Single-round check failure.",
+                schema: watchFailureRecordSchema,
               },
-              failures: {},
-              handler: ({ input, outcome }) =>
-                streamWatchEvents(
-                  workingDirectory,
-                  input.config,
-                  signal,
-                  outcome,
-                ),
-            }),
-          },
-        })),
+            },
+            failures: {},
+            handler: ({ input, dependencies, outcome }) =>
+              streamWatchEvents(
+                dependencies.cwd,
+                input.config,
+                dependencies.signal,
+                outcome,
+              ),
+          });
+
+          return {
+            default: "text",
+            modes: {
+              text: execution.text({
+                description: "Display watch reports as human-readable text.",
+                records: {
+                  report: formatWatchReportText,
+                  failed: ({ sequence, code, message }) =>
+                    text.line(
+                      `[watch #${sequence}] Check failed [${code}]: ${message}`,
+                    ),
+                },
+                failures: {},
+                terminal: () => text.line("Watch stopped."),
+              }),
+              ndjson: execution.structured({
+                description:
+                  "Emit complete analysis reports as NDJSON stream records.",
+              }),
+            },
+          };
+        },
       }),
       ...define.command("session")({
         kind: "command",
@@ -599,94 +579,90 @@ function createCliContract(
           },
         },
         input: sessionInput,
-        outputs: define.outputModes("session", sessionInput, (mode) => ({
-          default: "text",
-          modes: {
-            text: mode.stream({
-              format: "text",
-              description: "Emit shared session readiness and shutdown text.",
-              success: {
-                kind: "stream",
-                records: {
-                  ready: {
-                    description:
-                      "Shared session is initialized and listening for queries.",
-                    schema: sessionReadyRecordSchema,
-                    text: formatSessionReadyText,
-                  },
-                },
-                text: () => text.line("Shared session stopped."),
+        outputs: (factory) => {
+          const execution = factory.stream({
+            records: {
+              ready: {
+                description:
+                  "Shared session is initialized and listening for queries.",
+                schema: sessionReadyRecordSchema,
               },
-              failures: {
-                failed: {
-                  description: "Shared session failed to start.",
-                  schema: checkFailureSchema,
-                  exitCode: 2,
-                  text: ({ code, message }) =>
+            },
+            failures: {
+              failed: {
+                description: "Shared session failed to start.",
+                schema: checkFailureSchema,
+                exitCode: 2,
+              },
+            },
+            handler: ({ input, dependencies, outcome }) =>
+              streamSharedSession(
+                dependencies.cwd,
+                input.config,
+                input.socket,
+                dependencies.signal,
+                outcome,
+              ),
+          });
+
+          return {
+            default: "text",
+            modes: {
+              text: execution.text({
+                description: "Emit shared session readiness and shutdown text.",
+                records: {
+                  ready: formatSessionReadyText,
+                },
+                failures: {
+                  failed: ({ code, message }) =>
                     text.line(`Session failed [${code}]: ${message}`),
                 },
-              },
-              handler: ({ input, outcome }) =>
-                streamSharedSession(
-                  workingDirectory,
-                  input.config,
-                  input.socket,
-                  signal,
-                  outcome,
-                ),
-            }),
-            ndjson: mode.stream({
-              format: "structured",
-              description:
-                "Emit shared session readiness and lifecycle events as NDJSON.",
-              success: {
-                kind: "stream",
-                records: {
-                  ready: {
-                    description:
-                      "Shared session is initialized and listening for queries.",
-                    schema: sessionReadyRecordSchema,
-                  },
-                },
-              },
-              failures: {
-                failed: {
-                  description: "Shared session failed to start.",
-                  schema: checkFailureSchema,
-                  exitCode: 2,
-                },
-              },
-              handler: ({ input, outcome }) =>
-                streamSharedSession(
-                  workingDirectory,
-                  input.config,
-                  input.socket,
-                  signal,
-                  outcome,
-                ),
-            }),
-          },
-        })),
+                terminal: () => text.line("Shared session stopped."),
+              }),
+              ndjson: execution.structured({
+                description:
+                  "Emit shared session readiness and lifecycle events as NDJSON.",
+              }),
+            },
+          };
+        },
       }),
     },
   });
+}
+
+// Cache compiled contracts per identity so repeated CLI invocations do not rebuild schemas.
+const cliContractCache = new Map<
+  string,
+  ReturnType<typeof createCliContract>
+>();
+
+/** Returns the memoized Verule CLI contract for the given command identity. */
+export function getCliContract(identity: CliCommandIdentity) {
+  const cacheKey = `${identity.commandName}\0${identity.version}`;
+  const cached = cliContractCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const contract = createCliContract(identity);
+  cliContractCache.set(cacheKey, contract);
+  return contract;
 }
 
 /** Returns the process status after all output has been written. */
 export async function runCli(runtime: CliRuntime): Promise<number> {
   try {
     const workingDirectory = runtime.cwd ?? process.cwd();
-    const contract = createCliContract(
-      runtime.identity,
-      workingDirectory,
-      runtime.signal,
-    );
+    const contract = getCliContract(runtime.identity);
     const rawArgs = runtime.argv.slice(2);
     const effectiveArgs = rawArgs.length === 0 ? ["version"] : rawArgs;
     const invocation = parseCliInvocation(contract, effectiveArgs);
     const { exitCode } = await executeCli(contract, {
       invocation,
-      dependencies: undefined,
+      dependencies: {
+        cwd: workingDirectory,
+        signal: runtime.signal,
+      },
       write: runtime.write,
     });
     return exitCode;

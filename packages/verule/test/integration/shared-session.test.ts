@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { runCli } from "../../src/main.ts";
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
 import {
   TEST_CLI_IDENTITY,
-  captureCli,
-  captureCliJson,
   createNdjsonStreamHarness,
+  testCliContract,
 } from "./cli-test-helpers.ts";
 
 type SessionNdjsonLine =
@@ -34,48 +35,21 @@ type SessionNdjsonLine =
       readonly kind: "streamSuccess";
     };
 
-type CheckEnvelope =
-  | {
-      readonly kind: "data";
-      readonly variant: "clean" | "findings";
-      readonly data: {
-        readonly reportVersion: string;
-        readonly status: "clean" | "findings";
-        readonly projects: readonly unknown[];
-        readonly fileOrigins: readonly unknown[];
-        readonly diagnostics: readonly {
-          readonly id: string;
-          readonly ruleId: string;
-          readonly at: { readonly file: string; readonly line: number };
-          readonly message: string;
-          readonly evidence: readonly unknown[];
-          readonly projects: readonly string[];
-        }[];
-        readonly gaps: readonly unknown[];
-        readonly identity: {
-          readonly snapshotDigest: string;
-          readonly configDigest: string;
-          readonly rules: readonly {
-            readonly id: string;
-            readonly digest: string;
-          }[];
-        };
-        readonly observation?: unknown;
-        readonly explanation?: {
-          readonly status: string;
-          readonly ruleId: string;
-        };
-      };
-    }
-  | {
-      readonly kind: "failure";
-      readonly variant: "failed";
-      readonly data: {
-        readonly reportVersion: string;
-        readonly code: string;
-        readonly message: string;
-      };
-    };
+async function runCheckScenarioData(
+  argv: readonly string[],
+  cwd: string,
+  expectedStatus: 0 | 1,
+) {
+  const obs = await runCliScenario(testCliContract, {
+    argv,
+    dependencies: { cwd },
+  });
+  assert.ok(obs.termination.kind === "applicationResult", obs.stderr);
+  assert.equal(obs.termination.exitCode, expectedStatus, obs.stderr);
+  assert.ok(obs.termination.result.kind === "data", obs.stderr);
+  assert.ok(obs.termination.result.command === "check");
+  return obs.termination.result.data;
+}
 
 void test("verule session and verule check --session align every round with standalone verule check", async (t) => {
   await withCliTempHost(
@@ -101,25 +75,22 @@ void test("verule session and verule check --session align every round with stan
         extraArgs: readonly string[] = [],
       ) {
         const start = performance.now();
-        const sharedRes = await captureCliJson<CheckEnvelope>(
+        const sharedData = await runCheckScenarioData(
           ["check", "--session", socketPath, ...extraArgs, "--output", "json"],
           tmpdir(),
+          expectedStatus,
         );
         const elapsedMs = performance.now() - start;
         t.diagnostic(`CLI shared query (${label}): ${elapsedMs.toFixed(2)}ms`);
 
-        assert.equal(sharedRes.status, expectedStatus, sharedRes.stderr);
-        assert.equal(sharedRes.envelope.kind, "data");
-
-        const coldRes = await captureCliJson<CheckEnvelope>(
+        const coldData = await runCheckScenarioData(
           ["check", "--config", configPath, ...extraArgs, "--output", "json"],
           host.rootDir,
+          expectedStatus,
         );
-        assert.equal(coldRes.status, expectedStatus, coldRes.stderr);
-        assert.equal(coldRes.envelope.kind, "data");
 
-        assert.deepEqual(sharedRes.envelope.data, coldRes.envelope.data);
-        return sharedRes.envelope.data;
+        assert.deepEqual(sharedData, coldData);
+        return sharedData;
       }
 
       const sessionPromise = runCli({
@@ -150,9 +121,9 @@ void test("verule session and verule check --session align every round with stan
       // 1. Initial clean state from another working directory
       await queryAndCompare("initial-clean", 0);
 
-      // Cannot combine --session and --config
-      const invalidCombo = await captureCliJson<CheckEnvelope>(
-        [
+      // Cannot combine --session and --config (rejected by declarative usageConstraints)
+      const invalidCombo = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--session",
           socketPath,
@@ -161,11 +132,21 @@ void test("verule session and verule check --session align every round with stan
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
-      assert.equal(invalidCombo.status, 2);
-      assert.equal(invalidCombo.envelope.kind, "failure");
-      assert.equal(invalidCombo.envelope.data.code, "INVALID_CONFIG");
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(invalidCombo.termination.kind, "usageFailure");
+      assert.equal(invalidCombo.termination.exitCode, 2);
+      assert.equal(invalidCombo.termination.command, "check");
+      assert.deepEqual(invalidCombo.termination.issues, [
+        {
+          code: "forbiddenCombinationViolation",
+          facts: [
+            { kind: "present", field: "session" },
+            { kind: "present", field: "config" },
+          ],
+        },
+      ]);
+      assert.equal(invalidCombo.stdout, "");
 
       // 2. Introduce violation -> query immediately (0ms)
       const savedConsumer = host.readText("src/consumer.ts");
@@ -178,15 +159,15 @@ void test("verule session and verule check --session align every round with stan
       assert.equal(findingsData.diagnostics.length, 1);
 
       // Text mode check via --session
-      const textFindings = await captureCli(
-        ["check", "--session", socketPath],
-        tmpdir(),
-      );
-      assert.equal(textFindings.status, 1, textFindings.stderr);
+      const textFindings = await runCliScenario(testCliContract, {
+        argv: ["check", "--session", socketPath],
+        dependencies: { cwd: tmpdir() },
+      });
+      assert.equal(textFindings.termination.exitCode, 1, textFindings.stderr);
       assert.match(textFindings.stdout, /disallow-mode/u);
 
       // Targeted explain & rule filter via --session
-      const explained = await captureCliJson<CheckEnvelope>(
+      const explainedData = await runCheckScenarioData(
         [
           "check",
           "--session",
@@ -199,13 +180,12 @@ void test("verule session and verule check --session align every round with stan
           "json",
         ],
         tmpdir(),
+        1,
       );
-      assert.equal(explained.status, 1, explained.stderr);
-      assert.equal(explained.envelope.kind, "data");
-      assert.equal(explained.envelope.data.explanation?.status, "reported");
+      assert.equal(explainedData.explanation?.status, "reported");
 
       // Observation mode via --session
-      const observed = await captureCliJson<CheckEnvelope>(
+      const observedData = await runCheckScenarioData(
         [
           "check",
           "--session",
@@ -216,10 +196,9 @@ void test("verule session and verule check --session align every round with stan
           "json",
         ],
         tmpdir(),
+        1,
       );
-      assert.equal(observed.status, 1, observed.stderr);
-      assert.equal(observed.envelope.kind, "data");
-      assert.ok(observed.envelope.data.observation);
+      assert.ok(observedData.observation);
 
       // 3. Fix violation -> query immediately -> retracted
       host.writeText("src/consumer.ts", savedConsumer);
@@ -239,13 +218,15 @@ void test("verule session and verule check --session align every round with stan
       const savedConfig = host.readText("verule.config.ts");
       host.writeText("verule.config.ts", "export default { broken(");
 
-      const brokenRes = await captureCliJson<CheckEnvelope>(
-        ["check", "--session", socketPath, "--output", "json"],
-        tmpdir(),
-      );
-      assert.equal(brokenRes.status, 2);
-      assert.equal(brokenRes.envelope.kind, "failure");
-      assert.equal(brokenRes.envelope.data.code, "INVALID_CONFIG");
+      const brokenRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--session", socketPath, "--output", "json"],
+        dependencies: { cwd: tmpdir() },
+      });
+      assert.ok(brokenRes.termination.kind === "applicationResult");
+      assert.equal(brokenRes.termination.exitCode, 2);
+      assert.ok(brokenRes.termination.result.kind === "failure");
+      assert.ok(brokenRes.termination.result.command === "check");
+      assert.equal(brokenRes.termination.result.data.code, "INVALID_CONFIG");
 
       // Restore config and update policy module -> recovers immediately
       host.writeText("verule.config.ts", savedConfig);
@@ -268,20 +249,20 @@ void test("verule session and verule check --session align every round with stan
       assert.equal(harness.records.at(-1)?.kind, "streamSuccess");
       assert.equal(existsSync(socketPath), false);
 
-      const afterCloseShared = await captureCliJson<CheckEnvelope>(
-        ["check", "--session", socketPath, "--output", "json"],
-        tmpdir(),
-      );
-      assert.equal(afterCloseShared.status, 2);
-      assert.equal(afterCloseShared.envelope.kind, "failure");
+      const afterCloseShared = await runCliScenario(testCliContract, {
+        argv: ["check", "--session", socketPath, "--output", "json"],
+        dependencies: { cwd: tmpdir() },
+      });
+      assert.ok(afterCloseShared.termination.kind === "applicationResult");
+      assert.equal(afterCloseShared.termination.exitCode, 2);
+      assert.equal(afterCloseShared.termination.result.kind, "failure");
 
-      const standaloneAfterClose = await captureCliJson<CheckEnvelope>(
+      const standaloneAfterClose = await runCheckScenarioData(
         ["check", "--config", configPath, "--output", "json"],
         host.rootDir,
+        0,
       );
-      assert.equal(standaloneAfterClose.status, 0);
-      assert.equal(standaloneAfterClose.envelope.kind, "data");
-      assert.deepEqual(standaloneAfterClose.envelope.data, recovered);
+      assert.deepEqual(standaloneAfterClose, recovered);
     },
   );
 });
@@ -299,11 +280,17 @@ void test("verule session text mode prints ready and shutdown lines and exits 2 
       rmSync(socketDir, { recursive: true, force: true });
     });
 
-    const missingRes = await captureCli(
-      ["session", "--config", "missing.config.ts", "--socket", socketPath],
-      host.rootDir,
-    );
-    assert.equal(missingRes.status, 2);
+    const missingRes = await runCliScenario(testCliContract, {
+      argv: [
+        "session",
+        "--config",
+        "missing.config.ts",
+        "--socket",
+        socketPath,
+      ],
+      dependencies: { cwd: host.rootDir },
+    });
+    assert.equal(missingRes.termination.exitCode, 2);
     assert.match(missingRes.stderr, /Session failed/u);
     assert.equal(existsSync(socketPath), false);
 

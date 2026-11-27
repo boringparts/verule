@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { runCli } from "../../src/main.ts";
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
 import {
   TEST_CLI_IDENTITY,
-  captureCli,
   createNdjsonStreamHarness,
+  testCliContract,
 } from "./cli-test-helpers.ts";
 
 type NdjsonLine =
@@ -74,34 +76,28 @@ type NdjsonLine =
     };
 
 async function runColdJsonCheck(cwd: string, configArg?: string) {
-  const { status, stdout, stderr } = await captureCli(
-    [
+  const obs = await runCliScenario(testCliContract, {
+    argv: [
       "check",
       ...(configArg ? ["--config", configArg] : []),
       "--output",
       "json",
     ],
-    cwd,
+    dependencies: { cwd },
+  });
+  assert.ok(
+    obs.termination.kind === "applicationResult" &&
+      (obs.termination.exitCode === 0 || obs.termination.exitCode === 1),
+    `unexpected check failure: ${obs.stderr}`,
   );
   assert.ok(
-    status === 0 || status === 1,
-    `unexpected check failure: ${stderr}`,
+    obs.termination.result.kind === "data" &&
+      obs.termination.result.command === "check",
   );
-  const envelope = JSON.parse(stdout) as {
-    readonly kind: "data";
-    readonly variant: "clean" | "findings";
-    readonly data: {
-      readonly reportVersion: string;
-      readonly status: "clean" | "findings";
-      readonly projects: readonly unknown[];
-      readonly fileOrigins: readonly unknown[];
-      readonly additionalInputs: readonly unknown[];
-      readonly diagnostics: readonly unknown[];
-      readonly gaps: readonly unknown[];
-      readonly identity: unknown;
-    };
+  return {
+    status: obs.termination.exitCode,
+    data: obs.termination.result.data,
   };
-  return { status, data: envelope.data };
 }
 
 void test("verule watch --output ndjson aligns every round with independent verule check, reloads rules/policy/config, and recovers from errors", async () => {
@@ -152,7 +148,16 @@ void test("verule watch --output ndjson aligns every round with independent veru
           gaps: rec.data.gaps,
           identity: rec.data.identity,
         },
-        cold.data,
+        {
+          reportVersion: cold.data.reportVersion,
+          status: cold.data.status,
+          projects: cold.data.projects,
+          fileOrigins: cold.data.fileOrigins,
+          additionalInputs: cold.data.additionalInputs,
+          diagnostics: cold.data.diagnostics,
+          gaps: cold.data.gaps,
+          identity: cold.data.identity,
+        },
       );
       return rec.data;
     }

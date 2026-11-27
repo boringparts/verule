@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { text } from "@ykdz/cli-contract";
+import { text } from "@boringparts/cli-contract";
 import { z } from "zod";
 
 import { loadProjectConfigWithDependencies } from "./config-loader.ts";

@@ -4,11 +4,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
 import { INLINE_IGNORE_RULE_ID } from "@boringparts/verule";
 import { API as Ts7Api } from "typescript-7/unstable/sync";
 
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
-import { captureCli } from "./cli-test-helpers.ts";
+import { testCliContract } from "./cli-test-helpers.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const oxfmtBin = join(repoRoot, "node_modules", ".bin", "oxfmt");
@@ -21,22 +22,21 @@ void test("verule check exits 1 on standalone unused/ambiguous/malformed/unknown
       await host.typecheck();
 
       // 1. Suppressed cleanly -> exit 0.
-      const cleanRes = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(cleanRes.status, 0, cleanRes.stderr);
-      const cleanEnv = JSON.parse(cleanRes.stdout) as {
-        variant: string;
-        data: { status: string; diagnostics: unknown[] };
-      };
-      assert.equal(cleanEnv.variant, "clean");
-      assert.equal(cleanEnv.data.status, "clean");
-      assert.deepEqual(cleanEnv.data.diagnostics, []);
+      const cleanRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(cleanRes.termination.kind === "applicationResult");
+      assert.equal(cleanRes.termination.exitCode, 0, cleanRes.stderr);
+      assert.ok(cleanRes.termination.result.kind === "data");
+      assert.ok(cleanRes.termination.result.command === "check");
+      assert.equal(cleanRes.termination.result.variant, "clean");
+      assert.equal(cleanRes.termination.result.data.status, "clean");
+      assert.deepEqual(cleanRes.termination.result.data.diagnostics, []);
 
       // 2. Explain suppressed line -> reports suppressed_by_ignore with comment location and reason.
-      const explainJson = await captureCli(
-        [
+      const explainJson = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--rule",
           "no-danger",
@@ -45,42 +45,25 @@ void test("verule check exits 1 on standalone unused/ambiguous/malformed/unknown
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
-      assert.equal(explainJson.status, 0, explainJson.stderr);
-      const explainEnv = JSON.parse(explainJson.stdout) as {
-        data: {
-          explanation: {
-            status: string;
-            inlineIgnore?: {
-              matched: boolean;
-              ruleId?: string;
-              reason?: string;
-              commentAt?: { file: string; line: number };
-            };
-          };
-        };
-      };
-      assert.equal(explainEnv.data.explanation.status, "suppressed_by_ignore");
-      assert.equal(explainEnv.data.explanation.inlineIgnore?.matched, true);
-      assert.equal(
-        explainEnv.data.explanation.inlineIgnore?.ruleId,
-        "no-danger",
-      );
-      assert.equal(
-        explainEnv.data.explanation.inlineIgnore?.reason,
-        "Approved legacy entry.",
-      );
-      assert.equal(
-        explainEnv.data.explanation.inlineIgnore?.commentAt?.line,
-        4,
-      );
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(explainJson.termination.kind === "applicationResult");
+      assert.equal(explainJson.termination.exitCode, 0, explainJson.stderr);
+      assert.ok(explainJson.termination.result.kind === "data");
+      assert.ok(explainJson.termination.result.command === "check");
+      const explain = explainJson.termination.result.data.explanation;
+      assert.ok(explain);
+      assert.equal(explain.status, "suppressed_by_ignore");
+      assert.equal(explain.inlineIgnore?.matched, true);
+      assert.equal(explain.inlineIgnore?.ruleId, "no-danger");
+      assert.equal(explain.inlineIgnore?.reason, "Approved legacy entry.");
+      assert.equal(explain.inlineIgnore?.commentAt?.line, 4);
 
-      const explainText = await captureCli(
-        ["check", "--rule", "no-danger", "--at", "src/app.ts:5:3"],
-        host.rootDir,
-      );
-      assert.equal(explainText.status, 0, explainText.stderr);
+      const explainText = await runCliScenario(testCliContract, {
+        argv: ["check", "--rule", "no-danger", "--at", "src/app.ts:5:3"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(explainText.termination.exitCode, 0, explainText.stderr);
       assert.match(explainText.stdout, /suppressed_by_ignore/u);
       assert.match(explainText.stdout, /Approved legacy entry\./u);
 
@@ -96,51 +79,43 @@ void test("verule check exits 1 on standalone unused/ambiguous/malformed/unknown
         ].join("\n"),
       );
 
-      const unusedJson = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(unusedJson.status, 1, unusedJson.stderr);
-      const unusedEnv = JSON.parse(unusedJson.stdout) as {
-        variant: string;
-        data: {
-          status: string;
-          projects: unknown[];
-          diagnostics: {
-            ruleId: string;
-            at: { line: number };
-            message: string;
-          }[];
-        };
-      };
-      assert.equal(unusedEnv.variant, "findings");
-      assert.equal(unusedEnv.data.projects.length, 1);
-      assert.equal(unusedEnv.data.diagnostics.length, 1);
-      assert.equal(
-        unusedEnv.data.diagnostics[0]?.ruleId,
-        INLINE_IGNORE_RULE_ID,
-      );
-      assert.equal(unusedEnv.data.diagnostics[0]?.at.line, 2);
+      const unusedJson = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(unusedJson.termination.kind === "applicationResult");
+      assert.equal(unusedJson.termination.exitCode, 1, unusedJson.stderr);
+      assert.ok(unusedJson.termination.result.kind === "data");
+      assert.ok(unusedJson.termination.result.command === "check");
+      assert.equal(unusedJson.termination.result.variant, "findings");
+      const unusedData = unusedJson.termination.result.data;
+      assert.equal(unusedData.projects.length, 1);
+      assert.equal(unusedData.diagnostics.length, 1);
+      assert.equal(unusedData.diagnostics[0]?.ruleId, INLINE_IGNORE_RULE_ID);
+      assert.equal(unusedData.diagnostics[0]?.at.line, 2);
 
-      const unusedText = await captureCli(["check"], host.rootDir);
-      assert.equal(unusedText.status, 1);
+      const unusedText = await runCliScenario(testCliContract, {
+        argv: ["check"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(unusedText.termination.exitCode, 1);
       assert.match(unusedText.stdout, /verule\/inline-ignore/u);
       assert.match(unusedText.stdout, /Unused inline ignore directive/u);
 
       // 4. Partial check (--rule no-other) must leave no-danger directive undetermined and exit 0.
-      const partialRes = await captureCli(
-        ["check", "--rule", "no-other", "--output", "json"],
-        host.rootDir,
+      const partialRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--rule", "no-other", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(partialRes.termination.kind === "applicationResult");
+      assert.equal(partialRes.termination.exitCode, 0, partialRes.stderr);
+      assert.ok(partialRes.termination.result.kind === "data");
+      assert.ok(partialRes.termination.result.command === "check");
+      assert.deepEqual(partialRes.termination.result.data.diagnostics, []);
+      assert.equal(
+        partialRes.termination.result.data.inlineIgnores?.[0]?.status,
+        "undetermined",
       );
-      assert.equal(partialRes.status, 0, partialRes.stderr);
-      const partialEnv = JSON.parse(partialRes.stdout) as {
-        data: {
-          diagnostics: unknown[];
-          inlineIgnores?: { status: string; ruleId?: string }[];
-        };
-      };
-      assert.deepEqual(partialEnv.data.diagnostics, []);
-      assert.equal(partialEnv.data.inlineIgnores?.[0]?.status, "undetermined");
     },
   );
 });
@@ -153,20 +128,21 @@ void test("coexists with oxlint line directives and preserves JSDoc types and do
 
       // 1. Verule check passes cleanly: formatDocumented suppressed, JSDoc @param type read as '"alpha" | "beta"',
       //    and withOxlintDirective suppressed across stacked oxlint-disable-next-line.
-      const veruleRes = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
+      const veruleRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(veruleRes.termination.kind === "applicationResult");
+      assert.equal(
+        veruleRes.termination.exitCode,
+        0,
+        veruleRes.stdout + veruleRes.stderr,
       );
-      assert.equal(veruleRes.status, 0, veruleRes.stdout + veruleRes.stderr);
-      const veruleEnv = JSON.parse(veruleRes.stdout) as {
-        data: {
-          diagnostics: unknown[];
-          inlineIgnores?: { status: string; ruleId?: string }[];
-        };
-      };
-      assert.deepEqual(veruleEnv.data.diagnostics, []);
+      assert.ok(veruleRes.termination.result.kind === "data");
+      assert.ok(veruleRes.termination.result.command === "check");
+      assert.deepEqual(veruleRes.termination.result.data.diagnostics, []);
       assert.deepEqual(
-        veruleEnv.data.inlineIgnores?.map((item) => ({
+        veruleRes.termination.result.data.inlineIgnores?.map((item) => ({
           status: item.status,
           ruleId: item.ruleId,
         })),
@@ -276,23 +252,23 @@ void test("oxfmt 80-column formatting triggers ambiguity when merging calls onto
       );
 
       // 1. Before oxfmt: directive targets line 4 (`register("old")`), so only `register("new")` on line 5 is reported.
-      const beforeFmt = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
+      const beforeFmt = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(beforeFmt.termination.kind === "applicationResult");
+      assert.equal(beforeFmt.termination.exitCode, 1, beforeFmt.stderr);
+      assert.ok(beforeFmt.termination.result.kind === "data");
+      assert.ok(beforeFmt.termination.result.command === "check");
+      assert.equal(beforeFmt.termination.result.data.diagnostics.length, 1);
+      assert.equal(
+        beforeFmt.termination.result.data.diagnostics[0]?.ruleId,
+        "no-legacy-register",
       );
-      assert.equal(beforeFmt.status, 1, beforeFmt.stderr);
-      const beforeEnv = JSON.parse(beforeFmt.stdout) as {
-        data: {
-          diagnostics: {
-            ruleId: string;
-            at: { line: number };
-            message: string;
-          }[];
-        };
-      };
-      assert.equal(beforeEnv.data.diagnostics.length, 1);
-      assert.equal(beforeEnv.data.diagnostics[0]?.ruleId, "no-legacy-register");
-      assert.equal(beforeEnv.data.diagnostics[0]?.at.line, 5);
+      assert.equal(
+        beforeFmt.termination.result.data.diagnostics[0]?.at.line,
+        5,
+      );
 
       // 2. Run oxfmt with 80-column printWidth: merges both calls onto line 4.
       execFileSync(oxfmtBin, ["-c", oxfmtConfig, "--write", targetFile], {
@@ -304,25 +280,19 @@ void test("oxfmt 80-column formatting triggers ambiguity when merging calls onto
         /export const list = \[register\("old"\), register\("new"\)\];/u,
       );
 
-      const afterMerge = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(afterMerge.status, 1, afterMerge.stderr);
-      const afterMergeEnv = JSON.parse(afterMerge.stdout) as {
-        data: {
-          diagnostics: {
-            ruleId: string;
-            at: { line: number };
-            message: string;
-            evidence: { at?: { line: number; start: number } }[];
-          }[];
-        };
-      };
-      const ambiguous = afterMergeEnv.data.diagnostics.find(
+      const afterMerge = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(afterMerge.termination.kind === "applicationResult");
+      assert.equal(afterMerge.termination.exitCode, 1, afterMerge.stderr);
+      assert.ok(afterMerge.termination.result.kind === "data");
+      assert.ok(afterMerge.termination.result.command === "check");
+      const afterMergeDiags = afterMerge.termination.result.data.diagnostics;
+      const ambiguous = afterMergeDiags.find(
         (d) => d.ruleId === INLINE_IGNORE_RULE_ID,
       );
-      const originals = afterMergeEnv.data.diagnostics.filter(
+      const originals = afterMergeDiags.filter(
         (d) => d.ruleId === "no-legacy-register",
       );
       assert.ok(ambiguous, "merged calls must trigger ambiguity diagnostic");
@@ -348,30 +318,24 @@ void test("oxfmt 80-column formatting triggers ambiguity when merging calls onto
         encoding: "utf8",
       });
 
-      const afterLocalFix = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(afterLocalFix.status, 1, afterLocalFix.stderr);
-      const afterLocalEnv = JSON.parse(afterLocalFix.stdout) as {
-        data: {
-          diagnostics: {
-            ruleId: string;
-            at: { line: number };
-            message: string;
-          }[];
-          inlineIgnores?: { status: string; ruleId?: string }[];
-        };
-      };
+      const afterLocalFix = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(afterLocalFix.termination.kind === "applicationResult");
+      assert.equal(afterLocalFix.termination.exitCode, 1, afterLocalFix.stderr);
+      assert.ok(afterLocalFix.termination.result.kind === "data");
+      assert.ok(afterLocalFix.termination.result.command === "check");
+      const afterLocalData = afterLocalFix.termination.result.data;
       assert.equal(
-        afterLocalEnv.data.diagnostics.some(
+        afterLocalData.diagnostics.some(
           (d) => d.ruleId === INLINE_IGNORE_RULE_ID,
         ),
         false,
       );
-      assert.equal(afterLocalEnv.data.diagnostics.length, 1);
-      assert.match(afterLocalEnv.data.diagnostics[0]!.message, /"new"/u);
-      assert.equal(afterLocalEnv.data.inlineIgnores?.[0]?.status, "suppressed");
+      assert.equal(afterLocalData.diagnostics.length, 1);
+      assert.match(afterLocalData.diagnostics[0]!.message, /"new"/u);
+      assert.equal(afterLocalData.inlineIgnores?.[0]?.status, "suppressed");
     },
   );
 });

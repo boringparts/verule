@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkReportSchema } from "../../src/report-wire.ts";
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { resolveCliHostDir, withCliTempHost } from "../helpers/cli-hosts.ts";
-import { captureCli } from "./cli-test-helpers.ts";
+import { testCliContract } from "./cli-test-helpers.ts";
 
 void test("verule check distinguishes resource instances across factories/summaries, emits summary evidence, and surfaces missing-behavior-summary gaps", async () => {
   await withCliTempHost(
@@ -20,18 +21,16 @@ void test("verule check distinguishes resource instances across factories/summar
     async (host) => {
       await host.typecheck();
 
-      const jsonRun = await captureCli(
-        ["check", "--config", "verule.config.ts", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(jsonRun.status, 1, jsonRun.stderr);
-
-      const envelope = JSON.parse(jsonRun.stdout) as {
-        readonly variant: string;
-        readonly data: unknown;
-      };
-      assert.equal(envelope.variant, "findings");
-      const parsedReport = checkReportSchema.parse(envelope.data);
+      const jsonRun = await runCliScenario(testCliContract, {
+        argv: ["check", "--config", "verule.config.ts", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(jsonRun.termination.kind === "applicationResult");
+      assert.equal(jsonRun.termination.exitCode, 1, jsonRun.stderr);
+      assert.ok(jsonRun.termination.result.kind === "data");
+      assert.ok(jsonRun.termination.result.command === "check");
+      assert.equal(jsonRun.termination.result.variant, "findings");
+      const parsedReport = jsonRun.termination.result.data;
       assert.equal(parsedReport.status, "findings");
       assert.equal(parsedReport.diagnostics.length, 1);
 
@@ -66,11 +65,11 @@ void test("verule check distinguishes resource instances across factories/summar
         `Expected missing-behavior-summary gap, got ${JSON.stringify(parsedReport.gaps)}`,
       );
 
-      const textRun = await captureCli(
-        ["check", "--config", "verule.config.ts"],
-        host.rootDir,
-      );
-      assert.equal(textRun.status, 1, textRun.stderr);
+      const textRun = await runCliScenario(testCliContract, {
+        argv: ["check", "--config", "verule.config.ts"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(textRun.termination.exitCode, 1, textRun.stderr);
       assert.match(textRun.stdout, /evidence \(source\):/u);
       assert.match(
         textRun.stdout,

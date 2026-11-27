@@ -3,8 +3,10 @@ import { existsSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
-import { captureCli } from "./cli-test-helpers.ts";
+import { testCliContract } from "./cli-test-helpers.ts";
 
 void test("verule check --rule and --at explain why a source location did not report", async () => {
   await withCliTempHost(
@@ -13,8 +15,8 @@ void test("verule check --rule and --at explain why a source location did not re
       await host.typecheck();
 
       // Line 8 is `return sink(input);` where `input` is narrowed to `number`, so rule-no-string-sink excludes it
-      const jsonRes = await captureCli(
-        [
+      const jsonRes = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--rule",
           "rule-no-string-sink",
@@ -23,50 +25,35 @@ void test("verule check --rule and --at explain why a source location did not re
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
-      assert.equal(jsonRes.status, 1, jsonRes.stderr);
-      const envelope = JSON.parse(jsonRes.stdout) as {
-        kind: string;
-        variant: string;
-        data: {
-          status: string;
-          diagnostics: unknown[];
-          explanation: {
-            ruleId: string;
-            status: string;
-            inCandidates: boolean;
-            excludedByCheckpoint?: {
-              name: string;
-              detail?: { actualType: string };
-            };
-            queries: {
-              op: string;
-              candidateCount: number;
-              cacheStatus: string;
-            }[];
-          };
-        };
-      };
-      assert.equal(envelope.kind, "data");
-      assert.equal(envelope.data.explanation.ruleId, "rule-no-string-sink");
-      assert.equal(envelope.data.explanation.inCandidates, true);
-      assert.equal(envelope.data.explanation.status, "excluded_by_checkpoint");
-      assert.equal(
-        envelope.data.explanation.excludedByCheckpoint?.name,
-        "require-string",
-      );
-      assert.equal(
-        envelope.data.explanation.excludedByCheckpoint?.detail?.actualType,
-        "number",
-      );
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(jsonRes.termination.kind === "applicationResult");
+      assert.equal(jsonRes.termination.exitCode, 1, jsonRes.stderr);
+      assert.ok(jsonRes.termination.result.kind === "data");
+      assert.ok(jsonRes.termination.result.command === "check");
+
+      const explanation = jsonRes.termination.result.data.explanation;
+      assert.ok(explanation);
+      assert.equal(explanation.ruleId, "rule-no-string-sink");
+      assert.equal(explanation.inCandidates, true);
+      assert.equal(explanation.status, "excluded_by_checkpoint");
+      assert.equal(explanation.excludedByCheckpoint?.name, "require-string");
+      assert.partialDeepStrictEqual(explanation.excludedByCheckpoint?.detail, {
+        actualType: "number",
+      });
 
       // Text output also prints the explanation
-      const textRes = await captureCli(
-        ["check", "--rule", "rule-no-string-sink", "--at", "src/app.ts:1:1"],
-        host.rootDir,
-      );
-      assert.equal(textRes.status, 1, textRes.stderr);
+      const textRes = await runCliScenario(testCliContract, {
+        argv: [
+          "check",
+          "--rule",
+          "rule-no-string-sink",
+          "--at",
+          "src/app.ts:1:1",
+        ],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(textRes.termination.exitCode, 1, textRes.stderr);
       assert.match(textRes.stdout, /Explanation \[rule-no-string-sink\]/u);
       assert.match(textRes.stdout, /not_in_candidates/u);
     },
@@ -80,26 +67,22 @@ void test("verule check --observe and --observe-limit report overhead, truncatio
       const evalLogPath = host.resolvePath("lazy-eval-count.txt");
 
       const offStart = performance.now();
-      const offRes = await captureCli(
-        ["check", "--output", "json"],
-        host.rootDir,
-      );
+      const offRes = await runCliScenario(testCliContract, {
+        argv: ["check", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
       const offWallMs = performance.now() - offStart;
-      assert.equal(offRes.status, 1, offRes.stderr);
-      const offEnvelope = JSON.parse(offRes.stdout) as {
-        data: {
-          status: string;
-          diagnostics: unknown[];
-          gaps: unknown[];
-          observation?: unknown;
-        };
-      };
-      assert.equal("observation" in offEnvelope.data, false);
+      assert.ok(offRes.termination.kind === "applicationResult");
+      assert.equal(offRes.termination.exitCode, 1, offRes.stderr);
+      assert.ok(offRes.termination.result.kind === "data");
+      assert.ok(offRes.termination.result.command === "check");
+      const offData = offRes.termination.result.data;
+      assert.equal("observation" in offData, false);
       assert.equal(existsSync(evalLogPath), false);
 
       const detailStart = performance.now();
-      const detailRes = await captureCli(
-        [
+      const detailRes = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--observe",
           "detail",
@@ -108,59 +91,37 @@ void test("verule check --observe and --observe-limit report overhead, truncatio
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
+        dependencies: { cwd: host.rootDir },
+      });
       const detailWallMs = performance.now() - detailStart;
-      assert.equal(detailRes.status, 1, detailRes.stderr);
+      assert.ok(detailRes.termination.kind === "applicationResult");
+      assert.equal(detailRes.termination.exitCode, 1, detailRes.stderr);
+      assert.ok(detailRes.termination.result.kind === "data");
+      assert.ok(detailRes.termination.result.command === "check");
       assert.ok(offWallMs >= 0 && detailWallMs >= 0);
 
-      const detailEnvelope = JSON.parse(detailRes.stdout) as {
-        data: {
-          status: string;
-          diagnostics: unknown[];
-          gaps: unknown[];
-          observation: {
-            mode: string;
-            truncated: boolean;
-            droppedCount: number;
-            details: unknown[];
-            phases: {
-              configAndOpenMs: number;
-              engineQueryMs: number;
-              ruleExecutionMs: number;
-            };
-            rpc: { batches: number; bytesSent: number; bytesReceived: number };
-            overhead: {
-              checkpointMs: number;
-              encodeMs: number;
-              writeMs: number;
-            };
-          };
-        };
-      };
-      assert.equal(detailEnvelope.data.status, offEnvelope.data.status);
-      assert.deepEqual(
-        detailEnvelope.data.diagnostics,
-        offEnvelope.data.diagnostics,
-      );
-      assert.deepEqual(detailEnvelope.data.gaps, offEnvelope.data.gaps);
-      assert.equal(detailEnvelope.data.observation.mode, "detail");
-      assert.equal(detailEnvelope.data.observation.truncated, true);
-      assert.ok(detailEnvelope.data.observation.droppedCount >= 1);
-      assert.equal(detailEnvelope.data.observation.details.length, 2);
-      assert.ok(detailEnvelope.data.observation.rpc.batches >= 2);
-      assert.ok(detailEnvelope.data.observation.rpc.bytesSent > 0);
-      assert.ok(detailEnvelope.data.observation.rpc.bytesReceived > 0);
-      assert.ok(detailEnvelope.data.observation.overhead.checkpointMs >= 0);
-      assert.ok(detailEnvelope.data.observation.overhead.encodeMs >= 0);
-      assert.ok(detailEnvelope.data.observation.overhead.writeMs >= 0);
+      const detailData = detailRes.termination.result.data;
+      assert.equal(detailData.status, offData.status);
+      assert.deepEqual(detailData.diagnostics, offData.diagnostics);
+      assert.deepEqual(detailData.gaps, offData.gaps);
+      assert.ok(detailData.observation);
+      assert.equal(detailData.observation.mode, "detail");
+      assert.equal(detailData.observation.truncated, true);
+      assert.ok(detailData.observation.droppedCount >= 1);
+      assert.equal(detailData.observation.details?.length, 2);
+      assert.ok(detailData.observation.rpc.batches >= 2);
+      assert.ok(detailData.observation.rpc.bytesSent > 0);
+      assert.ok(detailData.observation.rpc.bytesReceived > 0);
+      assert.ok(detailData.observation.overhead.checkpointMs >= 0);
+      assert.ok(detailData.observation.overhead.encodeMs >= 0);
+      assert.ok(detailData.observation.overhead.writeMs >= 0);
 
       // Without limit, lazy detail callbacks are evaluated
-      const unlimitedDetail = await captureCli(
-        ["check", "--observe", "detail", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(unlimitedDetail.status, 1);
+      const unlimitedDetail = await runCliScenario(testCliContract, {
+        argv: ["check", "--observe", "detail", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(unlimitedDetail.termination.exitCode, 1);
       assert.equal(existsSync(evalLogPath), true);
       assert.ok(
         host.readText("lazy-eval-count.txt").trim().split("\n").length >= 2,
@@ -173,22 +134,28 @@ void test("verule check rejects unknown --rule, invalid --at, and invalid --obse
   await withCliTempHost(
     { host: "integration/explain-checkpoints" },
     async (host) => {
-      const badRule = await captureCli(
-        ["check", "--rule", "does-not-exist", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(badRule.status, 2);
-      assert.equal(JSON.parse(badRule.stderr).data.code, "INVALID_CONFIG");
+      const badRule = await runCliScenario(testCliContract, {
+        argv: ["check", "--rule", "does-not-exist", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(badRule.termination.kind === "applicationResult");
+      assert.equal(badRule.termination.exitCode, 2);
+      assert.ok(badRule.termination.result.kind === "failure");
+      assert.ok(badRule.termination.result.command === "check");
+      assert.equal(badRule.termination.result.data.code, "INVALID_CONFIG");
 
-      const badAt = await captureCli(
-        ["check", "--at", "src/app.ts:0", "--output", "json"],
-        host.rootDir,
-      );
-      assert.equal(badAt.status, 2);
-      assert.equal(JSON.parse(badAt.stderr).data.code, "INVALID_CONFIG");
+      const badAt = await runCliScenario(testCliContract, {
+        argv: ["check", "--at", "src/app.ts:0", "--output", "json"],
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(badAt.termination.kind === "applicationResult");
+      assert.equal(badAt.termination.exitCode, 2);
+      assert.ok(badAt.termination.result.kind === "failure");
+      assert.ok(badAt.termination.result.command === "check");
+      assert.equal(badAt.termination.result.data.code, "INVALID_CONFIG");
 
-      const badLimit = await captureCli(
-        [
+      const badLimit = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--observe",
           "detail",
@@ -197,10 +164,13 @@ void test("verule check rejects unknown --rule, invalid --at, and invalid --obse
           "--output",
           "json",
         ],
-        host.rootDir,
-      );
-      assert.equal(badLimit.status, 2);
-      assert.equal(JSON.parse(badLimit.stderr).data.code, "INVALID_CONFIG");
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.ok(badLimit.termination.kind === "applicationResult");
+      assert.equal(badLimit.termination.exitCode, 2);
+      assert.ok(badLimit.termination.result.kind === "failure");
+      assert.ok(badLimit.termination.result.command === "check");
+      assert.equal(badLimit.termination.result.data.code, "INVALID_CONFIG");
     },
   );
 });
@@ -211,8 +181,8 @@ void test("verule check --observe and --at surface engine metrics, ruleId, candi
     async (host) => {
       await host.typecheck();
 
-      const textRes = await captureCli(
-        [
+      const textRes = await runCliScenario(testCliContract, {
+        argv: [
           "check",
           "--config",
           "verule.observe-reuse.config.ts",
@@ -221,9 +191,9 @@ void test("verule check --observe and --at surface engine metrics, ruleId, candi
           "--at",
           "src/app.ts:2:1",
         ],
-        host.rootDir,
-      );
-      assert.equal(textRes.status, 0, textRes.stderr);
+        dependencies: { cwd: host.rootDir },
+      });
+      assert.equal(textRes.termination.exitCode, 0, textRes.stderr);
       assert.match(textRes.stdout, /lowering:/u);
       assert.match(textRes.stdout, /irCache:/u);
       assert.match(textRes.stdout, /summaryLookup:/u);
@@ -239,24 +209,16 @@ void test("verule check --at --output json strips undefined properties from chec
   await withCliTempHost({ host: "integration/explain-undef" }, async (host) => {
     await host.typecheck();
 
-    const res = await captureCli(
-      ["check", "--at", "src/app.ts:1", "--output", "json"],
-      host.rootDir,
-    );
-    assert.equal(res.status, 0, res.stderr);
-    const parsed = JSON.parse(res.stdout) as {
-      readonly kind: string;
-      readonly data: {
-        readonly explanation: {
-          readonly checkpoints: readonly {
-            readonly name: string;
-            readonly detail?: Record<string, unknown>;
-          }[];
-        };
-      };
-    };
-    assert.equal(parsed.kind, "data");
-    const cp = parsed.data.explanation.checkpoints.find(
+    const res = await runCliScenario(testCliContract, {
+      argv: ["check", "--at", "src/app.ts:1", "--output", "json"],
+      dependencies: { cwd: host.rootDir },
+    });
+    assert.ok(res.termination.kind === "applicationResult");
+    assert.equal(res.termination.exitCode, 0, res.stderr);
+    assert.ok(res.termination.result.kind === "data");
+    assert.ok(res.termination.result.command === "check");
+
+    const cp = res.termination.result.data.explanation?.checkpoints.find(
       (item) => item.name === "checked-decl",
     );
     assert.ok(cp);
