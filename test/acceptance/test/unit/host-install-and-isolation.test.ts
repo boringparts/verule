@@ -25,6 +25,7 @@ import {
 function createFakeVeruleTarballs(
   dir: string,
   engineVersion = "0.0.0-test",
+  options: { readonly veruleEngines?: Readonly<Record<string, string>> } = {},
 ): {
   readonly artifacts: readonly PackedArtifact[];
   readonly binarySha256: string;
@@ -104,6 +105,9 @@ function createFakeVeruleTarballs(
       exports: { ".": "./dist/index.js" },
       bin: { verule: "./dist/cli.js" },
       dependencies: { tssae: "0.1.0" },
+      ...(options.veruleEngines === undefined
+        ? {}
+        : { engines: options.veruleEngines }),
     },
     {
       "dist/index.js": "export { getEngineVersion } from 'tssae';\n",
@@ -405,4 +409,48 @@ void test("spawns an isolated bare verule child with sharedReadWritePaths outsid
     readFileSync(join(sharedDir, "probe-run.txt"), "utf8"),
     "shared-ok",
   );
+});
+
+void test("rejects packages requiring Node ^26.13.1 under strict engine checking on Node 24.0.0", async () => {
+  using fixture = mkdtempDisposableSync(
+    join(tmpdir(), "verule-engine-strict-"),
+  );
+  const bundleDir = join(fixture.path, "bundle");
+  mkdirSync(bundleDir, { recursive: true });
+  const { artifacts } = createFakeVeruleTarballs(bundleDir, "0.0.0-engine", {
+    veruleEngines: { node: "^26.13.1" },
+  });
+
+  for (const packageManager of ["pnpm", "npm"] as const) {
+    const hostDir = join(fixture.path, `host-${packageManager}`);
+    const storeDir = join(fixture.path, `store-${packageManager}`);
+    mkdirSync(hostDir, { recursive: true });
+    mkdirSync(storeDir, { recursive: true });
+    writeFileSync(
+      join(hostDir, "package.json"),
+      JSON.stringify({
+        name: `strict-${packageManager}-host`,
+        private: true,
+        type: "module",
+      }),
+    );
+
+    const outcome = await installArtifactPackages({
+      checkoutDir: hostDir,
+      packageManager,
+      artifacts,
+      storeDir,
+    });
+    assert.equal(
+      outcome.status,
+      "install-failed",
+      `Expected ${packageManager} strict engine check to reject ^26.13.1 under Node 24.0.0`,
+    );
+    assert.match(
+      outcome.stderr,
+      /ERR_PNPM_UNSUPPORTED_ENGINE|EBADENGINE/u,
+      outcome.stderr,
+    );
+    assert.match(outcome.stderr, /24\.0\.0/u, outcome.stderr);
+  }
 });

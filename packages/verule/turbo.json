@@ -44,6 +44,12 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
+    "test:dist": {
+      "dependsOn": ["^build", "build"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:heavy"]
+    },
     "test:e2e": {
       "dependsOn": ["^build", "build"],
       "passThroughEnv": [

@@ -10,6 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PackedArtifact } from "./artifacts.ts";
+import {
+  ensureControlledNode24Runtime,
+  prependBinDirsToEnvPath,
+} from "./node-runtime.ts";
 import { startArtifactRegistry } from "./registry.ts";
 import type { PackageManager } from "./types.ts";
 
@@ -29,6 +33,8 @@ export type InstallArtifactPackagesOptions = {
   readonly artifacts: readonly PackedArtifact[];
   readonly directPackages?: readonly string[];
   readonly storeDir?: string;
+  readonly engineStrict?: boolean;
+  readonly runtimeBinDir?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
 };
 
@@ -128,12 +134,15 @@ export async function installArtifactPackages(
       `${previousNpmrc}${separator}${npmrcLines.join("\n")}\n`,
     );
 
+    const engineStrict = options.engineStrict ?? true;
+    const nodeRuntime = ensureControlledNode24Runtime(options.runtimeBinDir);
     const commandArgs =
       options.packageManager === "npm"
         ? [
             "npm",
             "install",
             "--save-dev",
+            ...(engineStrict ? ["--engine-strict"] : []),
             "--ignore-scripts",
             "--no-audit",
             "--no-fund",
@@ -146,6 +155,7 @@ export async function installArtifactPackages(
               : ["--store-dir", options.storeDir]),
             "add",
             "--save-dev",
+            ...(engineStrict ? ["--config.engine-strict=true"] : []),
             ...(existsSync(join(options.checkoutDir, "pnpm-workspace.yaml"))
               ? ["--workspace-root"]
               : []),
@@ -153,14 +163,16 @@ export async function installArtifactPackages(
             ...specs,
           ];
     const [command, ...args] = commandArgs;
-    const env = options.env ?? process.env;
+    const envWithRuntime = prependBinDirsToEnvPath(options.env ?? process.env, [
+      nodeRuntime.binDir,
+    ]);
     const commandResult = await runAsyncCommand(
       command!,
       args,
       options.checkoutDir,
       isolatedCacheHome === undefined
-        ? env
-        : { ...env, XDG_CACHE_HOME: isolatedCacheHome },
+        ? envWithRuntime
+        : { ...envWithRuntime, XDG_CACHE_HOME: isolatedCacheHome },
     );
     if (commandResult.status !== 0) {
       return {

@@ -14,6 +14,7 @@ import type {
 } from "@tssae/zod";
 import {
   copyAcceptanceHostMaterial,
+  EXPECTED_ACCEPTANCE_NODE_VERSION,
   withAcceptanceHost,
 } from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
@@ -105,6 +106,36 @@ void test("loads @tssae/drizzle and @tssae/zod from the neutral static host and 
       });
       assert.deepEqual(
         semanticReport(sdkInitial),
+        semanticReport(coldInitial.report),
+      );
+
+      host.writeText(
+        "node24-drizzle-zod-probe.ts",
+        `import assert from "node:assert/strict";
+import { runCheck } from "@boringparts/verule";
+import { extractDrizzleZodSchemas } from "@tssae/drizzle";
+import { zodValidator } from "@tssae/zod";
+import config from "./packages/app/verule.drizzle-zod.config.ts";
+
+assert.equal(process.versions.node, ${JSON.stringify(EXPECTED_ACCEPTANCE_NODE_VERSION)});
+assert.equal(typeof extractDrizzleZodSchemas, "function");
+assert.equal(typeof zodValidator.extractInputFields, "function");
+const report = await runCheck({ cwd: process.cwd(), config });
+process.stdout.write(
+  JSON.stringify({ nodeVersion: process.versions.node, report }),
+);
+`,
+      );
+      const node24Probe = await host.runNode(["node24-drizzle-zod-probe.ts"]);
+      assert.equal(node24Probe.status, 0, node24Probe.stderr);
+      assert.equal(node24Probe.isolation?.controlProbeBlocked, true);
+      const node24Payload = JSON.parse(node24Probe.stdout) as {
+        readonly nodeVersion: string;
+        readonly report: CheckReport;
+      };
+      assert.equal(node24Payload.nodeVersion, EXPECTED_ACCEPTANCE_NODE_VERSION);
+      assert.deepEqual(
+        semanticReport(node24Payload.report),
         semanticReport(coldInitial.report),
       );
       assert.ok(

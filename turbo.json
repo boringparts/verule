@@ -1,5 +1,4 @@
 {
-  "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME"],
   "globalDependencies": [
     "oxfmt.config.ts",
     "oxlint.config.ts",
@@ -48,10 +47,6 @@
     "//#typecheck": {
       "outputs": [],
       "tags": ["quality:light"]
-    },
-    "//#toolchain:prepare": {
-      "cache": false,
-      "tags": ["work:preparation"]
     },
     "//#publication:pack": {
       "tags": ["work:release"],

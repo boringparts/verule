@@ -39,19 +39,3 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
-
-ARG RUST_TOOLCHAIN
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain none \
-    && "${CARGO_HOME}/bin/rustup" toolchain install ${RUST_TOOLCHAIN} --profile minimal --component rustfmt --component clippy \
-    && "${CARGO_HOME}/bin/rustup" default ${RUST_TOOLCHAIN} \
-    && chmod -R a+w ${RUSTUP_HOME} ${CARGO_HOME}
-
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
