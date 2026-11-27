@@ -279,7 +279,7 @@ importers:
         version: 0.7.0
       tssae:
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -329,10 +329,10 @@ importers:
         version: link:../../packages/verule
       '@tssae/drizzle':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
       '@tssae/zod':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.6
@@ -350,7 +350,7 @@ importers:
         version: 1.94.0
       tssae:
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
@@ -380,10 +380,10 @@ importers:
         version: link:../../../../../packages/verule
       '@tssae/drizzle':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
       '@tssae/zod':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
       '@verule/acceptance-host-drizzle-zod-data':
         specifier: workspace:*
         version: link:../data
@@ -451,10 +451,10 @@ importers:
         version: link:../../packages/verule
       '@tssae/drizzle':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz
       '@tssae/zod':
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
-        version: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
+        version: file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -874,12 +874,12 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@tssae/drizzle@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz':
-    resolution: {integrity: sha512-UnjpGP3aTAswtpLk+z9AfTYVDBa5+7WNxLxbc/fgx4ps2Zn9jtY0bYhEODNFxMUK0gHpcSZU58G8UfWKX+ssow==, tarball: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz}
+  '@tssae/drizzle@file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz':
+    resolution: {integrity: sha512-UnjpGP3aTAswtpLk+z9AfTYVDBa5+7WNxLxbc/fgx4ps2Zn9jtY0bYhEODNFxMUK0gHpcSZU58G8UfWKX+ssow==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz}
     version: 0.1.0
 
-  '@tssae/zod@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz':
-    resolution: {integrity: sha512-oF/PibY0ePVLlzWoQ/LPDHzk4FdcIkIMjVRFc0Do7ZsuxDvMbD75ijeEP19wqR2mwaKEB2LAnYgbAPxK8ylFGw==, tarball: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz}
+  '@tssae/zod@file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz':
+    resolution: {integrity: sha512-oF/PibY0ePVLlzWoQ/LPDHzk4FdcIkIMjVRFc0Do7ZsuxDvMbD75ijeEP19wqR2mwaKEB2LAnYgbAPxK8ylFGw==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz}
     version: 0.1.0
 
   '@turbo/darwin-64@2.11.13':
@@ -1488,8 +1488,8 @@ packages:
     engines: {node: '>=16.20.0'}
     hasBin: true
 
-  tssae@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz:
-    resolution: {integrity: sha512-Fc35QROtmtjhU9PyG3es3sUjjmE1EzGM0AhUynOo9F5geNsM59xZaD9oMIZEXiNf6SI62yREhBBabnz+r3NJiQ==, tarball: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
+  tssae@file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz:
+    resolution: {integrity: sha512-Fc35QROtmtjhU9PyG3es3sUjjmE1EzGM0AhUynOo9F5geNsM59xZaD9oMIZEXiNf6SI62yREhBBabnz+r3NJiQ==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
     version: 0.1.0
     engines: {node: '>=24.0.0'}
 
@@ -1796,14 +1796,14 @@ snapshots:
   '@tsrs/win32-x64@7.1.0-beta.tsrs4':
     optional: true
 
-  '@tssae/drizzle@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz':
+  '@tssae/drizzle@file:../../.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz':
     dependencies:
-      '@tssae/zod': file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
-      tssae: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
+      '@tssae/zod': file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz
+      tssae: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
 
-  '@tssae/zod@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz':
+  '@tssae/zod@file:../../.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz':
     dependencies:
-      tssae: file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
+      tssae: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
 
   '@turbo/darwin-64@2.11.13':
     optional: true
@@ -2009,7 +2009,7 @@ snapshots:
       '@tsrs/win32-arm64': 7.1.0-beta.tsrs4
       '@tsrs/win32-x64': 7.1.0-beta.tsrs4
 
-  tssae@file:../../../workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz: {}
+  tssae@file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz: {}
 
   turbo@2.11.13:
     optionalDependencies:
