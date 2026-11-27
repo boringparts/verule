@@ -255,33 +255,6 @@ void describe("@boringparts/verule external TypeScript consumer contract", () =>
           expectedPattern: /TS2339/u,
         },
         {
-          name: "BranchCoverageItem.status rejects legacy 'covered' state",
-          body: `
-            declare const synRef: SyntaxRef;
-            const [item] = await ctx.branchCoverage({ branches: [], targets: [synRef] });
-            if (item?.status === "covered") {
-              void item;
-            }
-          `,
-          expectedPattern: /TS2367/u,
-        },
-        {
-          name: "AdditionalInputSource rejects legacy 'adapter' kind",
-          body: `
-            const src: AdditionalInputSource = { kind: "adapter", id: "legacy" };
-            void src;
-          `,
-          expectedPattern: /TS2322/u,
-        },
-        {
-          name: "projectInstances rejects removed modelId selector",
-          body: `
-            const instRef = undefined as unknown as InstanceRef;
-            await ctx.projectInstances([instRef], { select: { modelId: true } });
-          `,
-          expectedPattern: /TS2353|TS2322/u,
-        },
-        {
           name: "SyntaxRef passed to projectInstances",
           body: `
             const syntaxRef = undefined as unknown as SyntaxRef;
@@ -409,7 +382,7 @@ void describe("@boringparts/verule external TypeScript consumer contract", () =>
 
       for (const testCase of negativeCases) {
         const snippet = [
-          'import type { AdditionalInputSource, CallRef, DeclarationRef, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@boringparts/verule";',
+          'import type { CallRef, DeclarationRef, InstanceRef, RuleContext, SignatureRef, SyntaxRef, TypeRef } from "@boringparts/verule";',
           "",
           "export async function checkContract(ctx: RuleContext): Promise<void> {",
           testCase.body,

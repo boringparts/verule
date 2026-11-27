@@ -464,15 +464,9 @@ export function materializePoolOwnershipHost(
     recursive: true,
     force: true,
   });
-  for (const staleConfig of [
-    `${appSubdir}/verule.config.ts`,
-    `${appSubdir}/verule.native.config.ts`,
-    `${appSubdir}/verule.missing-adapter.config.ts`,
-  ]) {
-    const stalePath = host.resolvePath(staleConfig);
-    if (existsSync(stalePath)) {
-      rmSync(stalePath, { force: true });
-    }
+  const staleConfigPath = host.resolvePath(`${appSubdir}/verule.config.ts`);
+  if (existsSync(staleConfigPath)) {
+    rmSync(staleConfigPath, { force: true });
   }
 
   for (const [relPath, content] of Object.entries(generated.files)) {

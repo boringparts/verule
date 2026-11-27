@@ -182,7 +182,7 @@ void describe("@boringparts/verule additional inputs", () => {
             err.code === "INVALID_CONFIG",
         );
 
-        // runCheck without adapter registration still preserves config + rule sources
+        // runCheck preserves config + rule sources
         const coldReport = await runCheck({ cwd: host.rootDir, config });
         assert.equal(coldReport.additionalInputs.length, 1);
         assert.deepEqual(coldReport.additionalInputs[0]?.sources, [

@@ -140,7 +140,6 @@ function copyNeutralHost(hostDir: string): {
     appDir,
     (relativePath) =>
       !relativePath.startsWith("host-root/") &&
-      !relativePath.startsWith("provider-session-overlay/") &&
       !relativePath.startsWith("scenarios/") &&
       !relativePath.startsWith("variants/") &&
       relativePath !== "package.json" &&
