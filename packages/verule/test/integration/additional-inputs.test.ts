@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { runCliScenario } from "@boringparts/cli-contract/testing";
+
 import { runCli } from "../../src/main.ts";
 import { withCliTempHost } from "../helpers/cli-hosts.ts";
 import {
   TEST_CLI_IDENTITY,
-  captureCli,
-  captureCliJson,
   createNdjsonStreamHarness,
+  testCliContract,
 } from "./cli-test-helpers.ts";
 
 type StreamRecord =
@@ -30,14 +31,22 @@ type StreamRecord =
   | {
       readonly kind: "record";
       readonly variant: "report";
-      readonly data: CheckData & {
+      readonly data: {
+        readonly reportVersion: string;
+        readonly status: "clean" | "findings";
+        readonly projects: readonly {
+          readonly projectId: string;
+          readonly sourceFiles: readonly string[];
+        }[];
+        readonly diagnostics: readonly {
+          readonly id: string;
+          readonly ruleId: string;
+          readonly at: { readonly file: string; readonly line: number };
+          readonly message: string;
+          readonly evidence: readonly unknown[];
+          readonly projects: readonly string[];
+        }[];
         readonly sequence: number;
-        readonly trigger: "initial" | "change";
-        readonly recomputation: {
-          readonly recomputedProjects: readonly string[];
-          readonly reusedProjects: readonly string[];
-          readonly invalidatedBy: readonly string[];
-        };
       };
     }
   | {
@@ -53,42 +62,21 @@ type StreamRecord =
       readonly kind: "streamSuccess";
     };
 
-type CheckData = {
-  readonly reportVersion: string;
-  readonly status: "clean" | "findings";
-  readonly projects: readonly {
-    readonly projectId: string;
-    readonly sourceFiles: readonly string[];
-  }[];
-  readonly fileOrigins: readonly {
-    readonly file: string;
-  }[];
-  readonly additionalInputs: readonly {
-    readonly file: string;
-    readonly exists: boolean;
-    readonly digest?: string;
-    readonly sources: readonly (
-      | { readonly kind: "config" }
-      | { readonly kind: "rule"; readonly id: string }
-    )[];
-  }[];
-  readonly diagnostics: readonly {
-    readonly id: string;
-    readonly ruleId: string;
-    readonly at: { readonly file: string; readonly line: number };
-    readonly message: string;
-    readonly evidence: readonly unknown[];
-    readonly projects: readonly string[];
-  }[];
-  readonly gaps: readonly unknown[];
-  readonly identity: unknown;
-};
-
-type CheckEnvelope = {
-  readonly kind: "data" | "failure";
-  readonly variant: string;
-  readonly data: CheckData;
-};
+async function runCheckScenarioData(
+  argv: readonly string[],
+  cwd: string,
+  expectedStatus: 0 | 1,
+) {
+  const obs = await runCliScenario(testCliContract, {
+    argv,
+    dependencies: { cwd },
+  });
+  assert.ok(obs.termination.kind === "applicationResult", obs.stderr);
+  assert.equal(obs.termination.exitCode, expectedStatus, obs.stderr);
+  assert.ok(obs.termination.result.kind === "data", obs.stderr);
+  assert.ok(obs.termination.result.command === "check");
+  return obs.termination.result.data;
+}
 
 void test("verule session, check --session, and watch update diagnostics immediately when only allowed-packages.json changes", async () => {
   await withCliTempHost(
@@ -109,39 +97,34 @@ void test("verule session, check --session, and watch update diagnostics immedia
       });
 
       async function queryAndCompare(expectedStatus: 0 | 1) {
-        const sharedRes = await captureCliJson<CheckEnvelope>(
+        const sharedData = await runCheckScenarioData(
           ["check", "--session", socketPath, "--output", "json"],
           tmpdir(),
+          expectedStatus,
         );
-        assert.equal(sharedRes.status, expectedStatus, sharedRes.stderr);
-        assert.equal(sharedRes.envelope.kind, "data");
-
-        const coldRes = await captureCliJson<CheckEnvelope>(
+        const coldData = await runCheckScenarioData(
           ["check", "--config", configPath, "--output", "json"],
           host.rootDir,
+          expectedStatus,
         );
-        assert.equal(coldRes.status, expectedStatus, coldRes.stderr);
-        assert.equal(coldRes.envelope.kind, "data");
 
-        assert.deepEqual(sharedRes.envelope.data, coldRes.envelope.data);
-        assert.deepEqual(sharedRes.envelope.data.projects[0]?.sourceFiles, [
-          "src/app.ts",
-        ]);
+        assert.deepEqual(sharedData, coldData);
+        assert.deepEqual(sharedData.projects[0]?.sourceFiles, ["src/app.ts"]);
         assert.deepEqual(
-          sharedRes.envelope.data.fileOrigins.map((o) => o.file),
+          sharedData.fileOrigins.map((o) => o.file),
           ["src/app.ts"],
         );
-        assert.equal(sharedRes.envelope.data.additionalInputs.length, 1);
+        assert.equal(sharedData.additionalInputs.length, 1);
         assert.equal(
-          sharedRes.envelope.data.additionalInputs[0]?.file,
+          sharedData.additionalInputs[0]?.file,
           "allowed-packages.json",
         );
-        assert.deepEqual(sharedRes.envelope.data.additionalInputs[0]?.sources, [
+        assert.deepEqual(sharedData.additionalInputs[0]?.sources, [
           { kind: "config" },
           { kind: "rule", id: "allowed-package-auditor" },
           { kind: "rule", id: "allowed-package-check" },
         ]);
-        return sharedRes.envelope.data;
+        return sharedData;
       }
 
       // 1. Start explicit shared session
@@ -173,11 +156,11 @@ void test("verule session, check --session, and watch update diagnostics immedia
       await queryAndCompare(0);
 
       // Text output displays merged additional input and all sources
-      const textCheck = await captureCli(
-        ["check", "--session", socketPath],
-        tmpdir(),
-      );
-      assert.equal(textCheck.status, 0, textCheck.stderr);
+      const textCheck = await runCliScenario(testCliContract, {
+        argv: ["check", "--session", socketPath],
+        dependencies: { cwd: tmpdir() },
+      });
+      assert.equal(textCheck.termination.exitCode, 0, textCheck.stderr);
       assert.match(textCheck.stdout, /Additional inputs \(1\):/u);
       assert.match(
         textCheck.stdout,

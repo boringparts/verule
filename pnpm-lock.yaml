@@ -173,6 +173,9 @@ settings:
 
 catalogs:
   default:
+    '@boringparts/cli-contract':
+      specifier: 0.7.0
+      version: 0.7.0
     '@boringparts/verule':
       specifier: workspace:*
       version: workspace:*
@@ -185,9 +188,6 @@ catalogs:
     '@verule/rules-reference':
       specifier: workspace:*
       version: workspace:*
-    '@ykdz/cli-contract':
-      specifier: 0.5.0
-      version: 0.5.0
     drizzle-orm:
       specifier: 0.45.3
       version: 0.45.3
@@ -267,9 +267,9 @@ importers:
 
   packages/verule:
     dependencies:
-      '@ykdz/cli-contract':
+      '@boringparts/cli-contract':
         specifier: 'catalog:'
-        version: 0.5.0
+        version: 0.7.0
       tssae:
         specifier: file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
         version: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz
@@ -475,6 +475,10 @@ importers:
         version: 4.6.7
 
 packages:
+
+  '@boringparts/cli-contract@0.7.0':
+    resolution: {integrity: sha512-ZOvdqHGKY0DHIigEOhqswWxma+Fz7fowsIg4ci4mF1Ier6NmWbVpGDATtPfPbMs75wQukejml/zCCX2ujxhFRg==}
+    engines: {node: '>=24.0.0'}
 
   '@changesets/apply-release-plan@8.1.1':
     resolution: {integrity: sha512-nk2Hbq3M9NeHMdaIRBDvawKrQJzXB9sGyBUE5yWnIKtvdcNCPj75zBekJYr0gTT2ecJH3eFeTrc8eisPImcv0Q==}
@@ -1023,11 +1027,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@ykdz/cli-contract@0.5.0':
-    resolution: {integrity: sha512-KD37wse4HGdLB5zLgDR49MdIv02sqprI5pnM/l4Vf3SgfpmGmSjqrl1e7NSqMttqoeGm76lz7L8Y3kRwz5+bQA==}
-    engines: {node: ^26.13.0}
-    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
-
   cac@7.1.1:
     resolution: {integrity: sha512-8zc+h51HxpodKsA7L4PpBNd+9qlrfuUcyUDE5a793BJfN4NZgwk7v9NmrY3ptZ+Sk0+ToigxSzkb47AsEgyizw==}
     engines: {node: '>=20.19.0'}
@@ -1237,7 +1236,7 @@ packages:
     hasBin: true
 
   tssae@file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz:
-    resolution: {integrity: sha512-uCUjGWsqX5ex4oKBjaukL9DyzgcpJaylVbwk3D+T1kl4Uo35+P5kQDgUaQeuYemuUjGhuCExuOKNdpnQytXx1w==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
+    resolution: {integrity: sha512-LqDT4YNTLLhxwYXiNy046+sTtS4MPKIKcUdIidxEFPG/YYq0C6h0klvCPEbgNaZ8py8z4o8Vjj7zJ1AXfoRyyA==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
     version: 0.1.0
     engines: {node: ^26.13.1}
 
@@ -1262,6 +1261,10 @@ packages:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
+
+  '@boringparts/cli-contract@0.7.0':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
 
   '@changesets/apply-release-plan@8.1.1':
     dependencies:
@@ -1627,11 +1630,6 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
-
-  '@ykdz/cli-contract@0.5.0':
-    dependencies:
-      '@standard-schema/spec': 1.1.0
-      '@types/node': 26.6.6
 
   cac@7.1.1: {}
 

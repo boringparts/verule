@@ -114,6 +114,53 @@ void describe("deployed CLI e2e", () => {
     assert.equal(invalid.status, 2);
     assert.equal(invalid.stdout, "");
     assert.match(invalid.stderr, /--unknown/u);
+
+    const checkHelp = invoke(tmpdir(), "check", "--help");
+    assert.equal(checkHelp.status, 0, checkHelp.stderr);
+    assert.match(checkHelp.stdout, /Constraints/u);
+    assert.match(checkHelp.stdout, /Cannot combine --session with --config\./u);
+    assert.match(checkHelp.stdout, /\(choices: "off", "summary", "detail"\)/u);
+
+    const checkSchema = invoke(tmpdir(), "check", "--schema");
+    assert.equal(checkSchema.status, 0, checkSchema.stderr);
+    assert.partialDeepStrictEqual(JSON.parse(checkSchema.stdout), {
+      kind: "summary",
+      command: "check",
+      usageConstraints: [
+        {
+          kind: "forbiddenCombination",
+          all: [
+            { kind: "present", field: "session" },
+            { kind: "present", field: "config" },
+          ],
+        },
+      ],
+    });
+
+    const forbiddenCombo = invoke(
+      tmpdir(),
+      "check",
+      "--session",
+      "demo.sock",
+      "--config",
+      "verule.config.ts",
+    );
+    assert.equal(forbiddenCombo.status, 2);
+    assert.equal(forbiddenCombo.stdout, "");
+    assert.partialDeepStrictEqual(JSON.parse(forbiddenCombo.stderr), {
+      schemaVersion: "3",
+      command: "check",
+      kind: "usageFailure",
+      issues: [
+        {
+          code: "forbiddenCombinationViolation",
+          facts: [
+            { kind: "present", field: "session" },
+            { kind: "present", field: "config" },
+          ],
+        },
+      ],
+    });
   });
 
   void it("runs check, rules, SDK parity, UTF-16/UTF-8 locations, explain, observation truncation, and failure modes", async (t) => {
