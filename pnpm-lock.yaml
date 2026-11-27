@@ -1237,7 +1237,7 @@ packages:
     hasBin: true
 
   tssae@file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz:
-    resolution: {integrity: sha512-p6vPrZNlfmSQBh9s4lFeRkRetP6dDrQ5sBJMuEJ/EytCZi44Bd8m8edtlL+7gQS9Pf9Yui+0bHTJH7Uv2vyKVg==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
+    resolution: {integrity: sha512-xp9d4Mic5HvuhdTVaf850KaVDAkj7gVHYGshWVjvm3UvCYhHpqQ8fuTknrqg9Ivgu31Ohel21rGAxT8XZAuBbw==, tarball: file:../../.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz}
     version: 0.1.0
     engines: {node: ^26.13.1}
 
