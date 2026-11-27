@@ -1,49 +1,72 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
+import { linkNodeModulesPackage } from "@verule/test-hosts";
+
 import { checkReportSchema } from "../../src/report-wire.ts";
-import { resolveCliHostDir, withCliTempHost } from "../helpers/cli-hosts.ts";
+import { withCliTempHost } from "../helpers/cli-hosts.ts";
 import { captureCli } from "./cli-test-helpers.ts";
 
-void test("verule check traces ESM import vs CJS require conditional exports and preserves signatures, model evidence, and gaps after removing implementations", async () => {
-  const hostSourceDir = resolveCliHostDir("integration/package-behavior");
-  const dualPkgManifest = JSON.parse(
-    readFileSync(join(hostSourceDir, "vendor/dual-pkg/package.json"), "utf8"),
-  ) as Record<string, unknown>;
+const require = createRequire(import.meta.url);
+const tscScriptPath = join(
+  dirname(require.resolve("typescript-7/package.json")),
+  "bin",
+  "tsc",
+);
 
+void test("verule check traces first-party workspace packages via declarationMap and surfaces missing-source-file and missing-behavior-summary gaps", async () => {
   await withCliTempHost(
     {
       host: "integration/package-behavior",
       syntheticPackages: {
-        "dual-pkg": {
-          packageJson: dualPkgManifest,
+        "ext-pkg": {
+          packageJson: {
+            name: "ext-pkg",
+            version: "1.0.0",
+            type: "module",
+            exports: {
+              ".": {
+                types: "./dist/index.d.ts",
+                default: "./dist/index.js",
+              },
+            },
+          },
           files: {
-            "dist/index.d.ts": readFileSync(
-              join(hostSourceDir, "vendor/dual-pkg/pkg-files/index.d.ts"),
-              "utf8",
-            ),
-            "dist/index.mjs": readFileSync(
-              join(hostSourceDir, "vendor/dual-pkg/pkg-files/index.mjs"),
-              "utf8",
-            ),
-            "dist/index.cjs": readFileSync(
-              join(hostSourceDir, "vendor/dual-pkg/pkg-files/index.cjs"),
-              "utf8",
-            ),
+            "dist/index.d.ts":
+              "export declare function opaqueExternal<T>(value: T): T;\n",
+            "dist/index.js":
+              "export function opaqueExternal(value) {\n  return value;\n}\n",
           },
         },
       },
       setup: (host) => {
         host.removePath("vendor");
+        execFileSync(
+          process.execPath,
+          [
+            tscScriptPath,
+            "-p",
+            host.resolvePath("packages/shared-pkg/tsconfig.json"),
+            "--pretty",
+            "false",
+          ],
+          { cwd: host.rootDir, encoding: "utf8" },
+        );
+        linkNodeModulesPackage(
+          host.rootDir,
+          "@ws/shared-pkg",
+          host.resolvePath("packages/shared-pkg"),
+        );
       },
     },
     async (host) => {
       await host.typecheck("packages/esm/tsconfig.json");
       await host.typecheck("packages/cjs/tsconfig.json");
 
-      // Phase 1: with implementations present -> ESM forwards (clean), CJS clones (finding with .cjs evidence)
+      // Phase 1: with declarationMap present -> traces into packages/shared-pkg/src/index.ts, reports clone in CJS, and marks ext-pkg external
       const json1 = await captureCli(
         ["check", "--config", "verule.config.ts", "--output", "json"],
         host.rootDir,
@@ -60,9 +83,13 @@ void test("verule check traces ESM import vs CJS require conditional exports and
       assert.equal(diag.at.file, "packages/cjs/src/app.ts");
       assert.ok(
         diag.evidence.some(
-          (e) => e.at?.file === "node_modules/dual-pkg/dist/index.cjs",
+          (e) => e.at?.file === "packages/shared-pkg/src/index.ts",
         ),
-        `Expected evidence inside dist/index.cjs, got ${JSON.stringify(diag.evidence)}`,
+        `Expected evidence inside packages/shared-pkg/src/index.ts, got ${JSON.stringify(diag.evidence)}`,
+      );
+      assert.ok(
+        report1.gaps.some((g) => g.kind === "missing-behavior-summary"),
+        `Expected missing-behavior-summary gap for ext-pkg, got ${JSON.stringify(report1.gaps)}`,
       );
       for (const proj of report1.projects) {
         assert.ok(proj.sourceFiles.every((f) => !f.includes("node_modules/")));
@@ -71,9 +98,8 @@ void test("verule check traces ESM import vs CJS require conditional exports and
         report1.fileOrigins.every((o) => !o.file.includes("node_modules/")),
       );
 
-      // Phase 2: remove `.mjs` and `.cjs` implementations, leaving only `.d.ts`
-      host.removePath("node_modules/dual-pkg/dist/index.mjs");
-      host.removePath("node_modules/dual-pkg/dist/index.cjs");
+      // Phase 2: remove `.d.ts.map`, leaving first-party package as `.d.ts`-only -> reports missing-source-file with TS config hints
+      host.removePath("packages/shared-pkg/dist/index.d.ts.map");
 
       const json2 = await captureCli(
         ["check", "--config", "verule.config.ts", "--output", "json"],
@@ -88,12 +114,12 @@ void test("verule check traces ESM import vs CJS require conditional exports and
       const report2 = checkReportSchema.parse(env2.data);
       assert.equal(report2.diagnostics.length, 0);
       assert.ok(
-        report2.gaps.some((g) => g.kind === "missing-instance-model"),
-        `Expected missing-instance-model gap, got ${JSON.stringify(report2.gaps)}`,
+        report2.gaps.some((g) => g.kind === "missing-source-file"),
+        `Expected missing-source-file gap, got ${JSON.stringify(report2.gaps)}`,
       );
       assert.ok(
-        report2.gaps.some((g) => g.kind === "missing-package-implementation"),
-        `Expected missing-package-implementation gap, got ${JSON.stringify(report2.gaps)}`,
+        report2.gaps.some((g) => g.kind === "missing-behavior-summary"),
+        `Expected missing-behavior-summary gap, got ${JSON.stringify(report2.gaps)}`,
       );
 
       const text2 = await captureCli(
@@ -101,8 +127,8 @@ void test("verule check traces ESM import vs CJS require conditional exports and
         host.rootDir,
       );
       assert.equal(text2.status, 0, text2.stderr);
-      assert.match(text2.stdout, /gap \[missing-instance-model\]:/u);
-      assert.match(text2.stdout, /gap \[missing-package-implementation\]:/u);
+      assert.match(text2.stdout, /gap \[missing-source-file\]:/u);
+      assert.match(text2.stdout, /gap \[missing-behavior-summary\]:/u);
     },
   );
 });

@@ -1,23 +1,4 @@
 export {
-  buildExternalRustAdapter,
-  packAdapterApiCrate,
-  packExternalAdapterPackage,
-  renderExternalRustCargoToml,
-  resolveCargoBuildArgs,
-  tryPackAdapterApiCrate,
-  type BuildExternalRustAdapterOptions,
-  type BuiltExternalRustAdapter,
-  type ExternalRustAdapterVariant,
-  type PackAdapterApiCrateOptions,
-  type PackedAdapterApiCrate,
-  type PackedExternalAdapterPackage,
-  type PackExternalAdapterPackageOptions,
-} from "./external-rust-adapter.ts";
-export {
-  buildFixtureAdapterArtifacts,
-  type BuiltFixtureAdapters,
-} from "./fixture-adapters.ts";
-export {
   CORE_VERULE_PACKAGES,
   packWorkspaceArtifacts,
   resolveInstalledPackageVersion,
@@ -135,9 +116,6 @@ export {
 export type { PackageManager } from "./types.ts";
 export {
   verifyHostArtifactResolution,
-  verifyInstalledNativeLibrary,
   type HostResolutionAudit,
-  type VerifiedNativeLibrary,
   type VerifyHostResolutionOptions,
-  type VerifyInstalledNativeLibraryOptions,
 } from "./verify.ts";

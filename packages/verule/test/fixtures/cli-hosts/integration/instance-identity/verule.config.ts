@@ -1,32 +1,7 @@
-import { defineConfig, defineModel, defineRule } from "@boringparts/verule";
+import { defineConfig, defineRule } from "@boringparts/verule";
 
 export default defineConfig({
   tsconfig: "tsconfig.json",
-  models: [
-    defineModel({
-      id: "acme-lifecycle",
-      version: "1.0.0",
-      instanceBehaviors: [
-        {
-          kind: "forwards-argument",
-          match: {
-            module: "@acme/lifecycle",
-            container: "Disposable",
-            member: "_register",
-          },
-          argumentIndex: 0,
-        },
-        {
-          kind: "allocates-fresh-instance",
-          match: {
-            module: "@acme/lifecycle",
-            container: "IMenuService",
-            member: "createMenu",
-          },
-        },
-      ],
-    }),
-  ],
   rules: [
     defineRule({
       id: "check-instance-cleanup-match",
@@ -48,7 +23,7 @@ export default defineConfig({
           kinds: ["VariableDeclaration"],
         });
 
-        // Inspect unmodeled external call to confirm missing-instance-model gap is surfaced.
+        // Inspect unsummarized external call to confirm missing-behavior-summary gap is surfaced.
         const untrackedDecl = varDecls.find((d) =>
           d.text.startsWith("untracked ="),
         );
@@ -86,8 +61,8 @@ export default defineConfig({
             releaseCall.arguments[0],
           ]);
           if (
-            expectedRes?.instance &&
-            releasedRes?.instance &&
+            expectedRes?.status === "proved" &&
+            releasedRes?.status === "proved" &&
             expectedRes.instanceKey !== releasedRes.instanceKey
           ) {
             ctx.report({

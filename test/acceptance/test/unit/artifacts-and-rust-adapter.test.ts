@@ -14,12 +14,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  packAdapterApiCrate,
   packWorkspaceArtifacts,
-  renderExternalRustCargoToml,
-  resolveCargoBuildArgs,
   resolveInstalledPackageVersion,
-  tryPackAdapterApiCrate,
 } from "../../src/index.ts";
 
 function writeTarball(
@@ -46,46 +42,13 @@ function writeTarball(
   return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 }
 
-void test("renders Cargo.toml and cargo args for both local .crate and public crates.io modes", () => {
-  const cratesIoToml = renderExternalRustCargoToml({
-    crateName: "acme_external_valid",
-    apiCrateName: "tssae-adapter-api",
-    apiCrateVersion: "0.1.0",
-  });
-  assert.match(
-    cratesIoToml,
-    /tssae-adapter-api = \{ version = "0\.1\.0", default-features = false \}/u,
-  );
-  assert.equal(cratesIoToml.includes("[patch.crates-io]"), false);
-
-  const localCrateToml = renderExternalRustCargoToml({
-    crateName: "acme_external_valid",
-    apiCrateName: "tssae-adapter-api",
-    apiCrateVersion: "0.1.0",
-    extractedCrateDir: "/tmp/extracted-crate",
-  });
-  assert.match(localCrateToml, /\[patch\.crates-io\]/u);
-  assert.match(
-    localCrateToml,
-    /tssae-adapter-api = \{ path = "\/tmp\/extracted-crate" \}/u,
-  );
-
-  assert.deepEqual(resolveCargoBuildArgs({}), ["build", "--release"]);
-  assert.deepEqual(resolveCargoBuildArgs({ CARGO_NET_OFFLINE: "false" }), [
-    "build",
-    "--release",
-  ]);
-  assert.deepEqual(resolveCargoBuildArgs({ CARGO_NET_OFFLINE: "true" }), [
-    "build",
-    "--release",
-    "--offline",
-  ]);
-
+void test("resolves installed package versions for tssae and domain packages", () => {
   assert.match(resolveInstalledPackageVersion("tssae"), /^\d+\.\d+\.\d+/u);
   assert.match(
-    resolveInstalledPackageVersion("@tssae/adapters"),
+    resolveInstalledPackageVersion("@tssae/drizzle"),
     /^\d+\.\d+\.\d+/u,
   );
+  assert.match(resolveInstalledPackageVersion("@tssae/zod"), /^\d+\.\d+\.\d+/u);
   assert.match(
     resolveInstalledPackageVersion("tssae", import.meta.url),
     /^\d+\.\d+\.\d+/u,
@@ -96,21 +59,90 @@ void test("renders Cargo.toml and cargo args for both local .crate and public cr
   );
 });
 
-void test("tryPackAdapterApiCrate returns undefined without local env overrides while packAdapterApiCrate throws", async () => {
-  const prevCrate = process.env.TSSAE_ACCEPTANCE_CRATE_PATH;
+void test("uses pnpm-workspace.yaml tarball overrides as fallback when TSSAE_ACCEPTANCE_PACK_DIR is unset", async () => {
+  using fixture = mkdtempDisposableSync(
+    join(tmpdir(), "verule-artifacts-overrides-"),
+  );
+  const workspaceDir = join(fixture.path, "workspace");
+  const verulePackDir = join(fixture.path, "verule-packed");
+  const tssaeLocalDir = join(fixture.path, "tssae-local");
+  const publicPkgDir = join(workspaceDir, "packages", "verule-core");
+  for (const dir of [
+    workspaceDir,
+    verulePackDir,
+    tssaeLocalDir,
+    publicPkgDir,
+  ]) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  const tssaeTgz = join(tssaeLocalDir, "tssae-0.1.0.tgz");
+  writeTarball(
+    join(fixture.path, "stage-tssae-override"),
+    tssaeTgz,
+    { name: "tssae", version: "0.1.0", type: "module" },
+    {
+      "dist/index.js": "export const tssae = true;\n",
+      "dist/bin/tssae-engine": "binary",
+      "dist/bin/tssae-engine.exe": "binary",
+    },
+  );
+  const veruleTgz = join(verulePackDir, "boringparts-verule-0.1.0.tgz");
+  const veruleIntegrity = writeTarball(
+    join(fixture.path, "stage-verule-override"),
+    veruleTgz,
+    { name: "@boringparts/verule", version: "0.1.0", type: "module" },
+    { "dist/index.js": "export const verule = true;\n" },
+  );
+  writeFileSync(
+    join(verulePackDir, "publish-plan.json"),
+    JSON.stringify({
+      plan: [
+        [
+          {
+            kind: "publish",
+            name: "@boringparts/verule",
+            tarball: {
+              path: "boringparts-verule-0.1.0.tgz",
+              integrity: veruleIntegrity,
+            },
+          },
+        ],
+      ],
+    }),
+  );
+  writeFileSync(
+    join(workspaceDir, "package.json"),
+    '{"name":"fake-ws","private":true}\n',
+  );
+  writeFileSync(
+    join(workspaceDir, "pnpm-workspace.yaml"),
+    `packages:\n  - 'packages/*'\noverrides:\n  tssae: "file:${tssaeTgz}"\n`,
+  );
+  writeFileSync(
+    join(publicPkgDir, "package.json"),
+    JSON.stringify(
+      { name: "@boringparts/verule", version: "0.1.0", type: "module" },
+      null,
+      2,
+    ) + "\n",
+  );
+  writeFileSync(join(publicPkgDir, "index.js"), "export const core = true;\n");
+
   const prevPackDir = process.env.TSSAE_ACCEPTANCE_PACK_DIR;
-  delete process.env.TSSAE_ACCEPTANCE_CRATE_PATH;
   delete process.env.TSSAE_ACCEPTANCE_PACK_DIR;
   try {
-    assert.equal(await tryPackAdapterApiCrate(), undefined);
-    await assert.rejects(
-      () => packAdapterApiCrate(),
-      /Missing tssae-adapter-api/u,
+    const bundle = await packWorkspaceArtifacts({
+      fromPackDir: verulePackDir,
+      cwd: workspaceDir,
+    });
+    const tssaeArtifact = bundle.artifacts.find(
+      (item) => item.name === "tssae",
     );
+    assert.ok(tssaeArtifact);
+    assert.equal(tssaeArtifact.filename, tssaeTgz);
+    bundle.dispose();
   } finally {
-    if (prevCrate !== undefined) {
-      process.env.TSSAE_ACCEPTANCE_CRATE_PATH = prevCrate;
-    }
     if (prevPackDir !== undefined) {
       process.env.TSSAE_ACCEPTANCE_PACK_DIR = prevPackDir;
     }

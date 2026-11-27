@@ -27,7 +27,6 @@ async function runInstalledSdk(
 ): Promise<CheckReport> {
   const sdk = await host.loadSdk();
   const config = await host.loadConfig<VeruleConfig>(configPath);
-  assert.deepEqual(config.adapters, []);
   const checkReport = await sdk.runCheck({ cwd: host.hostDir, config });
   const session = await sdk.openSession({ cwd: host.hostDir, config });
   try {

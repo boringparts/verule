@@ -32,7 +32,8 @@
   },
   "dependencies": {
     "@boringparts/verule": "workspace:*",
-    "@tssae/adapters": "0.1.0"
+    "@tssae/drizzle": "catalog:",
+    "@tssae/zod": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",

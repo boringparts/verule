@@ -15,7 +15,7 @@ export default defineConfig({
         const [dynRes] = await ctx.resolveCalls([dynCall.ref]);
         if (!dynRes?.call) return;
         const [calleeRes] = await ctx.calleesOf([dynRes.call]);
-        if (!calleeRes) return;
+        if (calleeRes?.completeness !== "incomplete") return;
         for (const gap of calleeRes.gaps) {
           ctx.report({
             at: gap.at ?? dynCall.location,

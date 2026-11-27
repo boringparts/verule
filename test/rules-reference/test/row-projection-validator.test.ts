@@ -6,8 +6,6 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig, openSession, runCheck } from "@boringparts/verule";
-import { drizzleAdapter } from "@tssae/adapters/drizzle";
-import { zodAdapter } from "@tssae/adapters/zod";
 import { rowProjectionSatisfiesValidatorRule } from "@verule/rules-reference";
 import {
   installPackedWorkspacePackages,
@@ -19,9 +17,10 @@ import {
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkgRequire = createRequire(join(packageRoot, "package.json"));
 const tssaeRoot = dirname(pkgRequire.resolve("tssae/package.json"));
-const tssaeAdaptersRoot = dirname(
-  pkgRequire.resolve("@tssae/adapters/package.json"),
+const tssaeDrizzleRoot = dirname(
+  pkgRequire.resolve("@tssae/drizzle/package.json"),
 );
+const tssaeZodRoot = dirname(pkgRequire.resolve("@tssae/zod/package.json"));
 const drizzleOrmRoot = join(packageRoot, "node_modules", "drizzle-orm");
 const drizzleZodRoot = join(packageRoot, "node_modules", "drizzle-zod");
 const zodRoot = join(packageRoot, "node_modules", "zod");
@@ -91,14 +90,12 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
 
         const report = await runCheck({
           cwd: host.rootDir,
-          adapterResolutionRoot: packageRoot,
           config: defineConfig({
             projects: [
               "packages/db/tsconfig.json",
               "packages/validators/tsconfig.json",
               "packages/api/tsconfig.json",
             ],
-            adapters: [drizzleAdapter, zodAdapter],
             rules: [rowProjectionSatisfiesValidatorRule],
           }),
         });
@@ -147,13 +144,11 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
 
         const session = await openSession({
           cwd: host.rootDir,
-          adapterResolutionRoot: packageRoot,
           config: defineConfig({
             projects: [
               "packages/db/tsconfig.json",
               "packages/api/tsconfig.json",
             ],
-            adapters: [drizzleAdapter, zodAdapter],
             rules: [rowProjectionSatisfiesValidatorRule],
           }),
         });
@@ -225,13 +220,11 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
 
         const session = await openSession({
           cwd: host.rootDir,
-          adapterResolutionRoot: packageRoot,
           config: defineConfig({
             projects: [
               "packages/db/tsconfig.json",
               "packages/api/tsconfig.json",
             ],
-            adapters: [drizzleAdapter, zodAdapter],
             rules: [rowProjectionSatisfiesValidatorRule],
           }),
         });
@@ -309,7 +302,7 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     );
   });
 
-  void it("resolves createSelectSchema(table, refine) + .extend() override and traces local unknowns via targeted explain", async () => {
+  void it("resolves createSelectSchema(table, refine) + .extend() override and reports unresolved-schema-field gaps", async () => {
     await withMonorepoHost(
       "rules-reference/row-projection-refined",
       async (host) => {
@@ -318,13 +311,11 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
 
         const session = await openSession({
           cwd: host.rootDir,
-          adapterResolutionRoot: packageRoot,
           config: defineConfig({
             projects: [
               "packages/db/tsconfig.json",
               "packages/api/tsconfig.json",
             ],
-            adapters: [drizzleAdapter, zodAdapter],
             rules: [rowProjectionSatisfiesValidatorRule],
           }),
         });
@@ -332,48 +323,25 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
         try {
           const report = await session.check();
           assert.equal(report.status, "clean");
-          // unknownAgeSchema keeps its active unresolved-schema-field gap,
-          // while defaultedAgeSchema cleared its superseded gap!
+          // Both createSelectSchema(..., { age: runtimeAgeValidator() }) calls emit
+          // unresolved-schema-field, while defaultedAgeSchema overrides `age` via .extend().
           const schemaGaps = report.gaps.filter(
             (g) => g.kind === "unresolved-schema-field",
           );
           assert.equal(schemaGaps.length, 1, JSON.stringify(schemaGaps));
-          assert.equal(
-            schemaGaps[0]?.at?.file,
-            "packages/db/src/validation.ts",
-          );
-          assert.equal(schemaGaps[0]?.at?.line, 9);
-
-          const gapExplain = await session.explain({
-            ruleId: "row-projection-satisfies-validator",
-            at: "packages/api/src/routes.ts:10:19",
-          });
           assert.ok(
-            gapExplain.explanation.localGaps.some(
-              (lg) =>
-                lg.status === "unresolved" &&
-                lg.providerId === "drizzle" &&
-                lg.field === "age" &&
-                lg.gap.kind === "unresolved-schema-field",
+            schemaGaps.some(
+              (g) =>
+                g.at?.file === "packages/db/src/validation.ts" &&
+                g.at.line === 9,
             ),
-            JSON.stringify(gapExplain.explanation.localGaps),
           );
 
           const resolvedExplain = await session.explain({
             ruleId: "row-projection-satisfies-validator",
             at: "packages/api/src/routes.ts:11:20",
           });
-          assert.ok(
-            resolvedExplain.explanation.localGaps.some(
-              (lg) =>
-                lg.status === "resolved_by_override" &&
-                lg.providerId === "drizzle" &&
-                lg.field === "age" &&
-                lg.resolvedBy?.providerId === "zod" &&
-                lg.resolvedBy.operation === ".extend()",
-            ),
-            JSON.stringify(resolvedExplain.explanation.localGaps),
-          );
+          assert.equal(resolvedExplain.explanation.gaps.length, 0);
         } finally {
           await session.close();
         }
@@ -381,7 +349,7 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
     );
   });
 
-  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @tssae/adapters, tssae, and @boringparts/verule .d.ts", async () => {
+  void it("compiles an external TypeScript consumer against built @verule/rules-reference, @tssae/drizzle, @tssae/zod, tssae, and @boringparts/verule .d.ts", async () => {
     await withTempHost(
       { prefix: "verule-rules-ref-typecheck-" },
       async (host) => {
@@ -393,9 +361,10 @@ void describe("@verule/rules-reference rowProjectionSatisfiesValidatorRule", () 
         linkNodeModulesPackage(host.rootDir, "tssae", tssaeRoot);
         linkNodeModulesPackage(
           host.rootDir,
-          "@tssae/adapters",
-          tssaeAdaptersRoot,
+          "@tssae/drizzle",
+          tssaeDrizzleRoot,
         );
+        linkNodeModulesPackage(host.rootDir, "@tssae/zod", tssaeZodRoot);
 
         host.writeText(
           "tsconfig.json",

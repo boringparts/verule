@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { text } from "@ykdz/cli-contract";
 import { z } from "zod";
@@ -71,7 +71,6 @@ export async function* streamSharedSession<
       cwd: workingDirectory,
       endpoint: socketOption,
       config: initial.config,
-      adapterResolutionRoot: dirname(initial.configPath),
       watchFiles: [...watchFiles],
       ...(signal !== undefined ? { signal } : {}),
       loadConfig: async () => {
@@ -82,7 +81,6 @@ export async function* streamSharedSession<
         return {
           config: loaded.config,
           watchFiles: loaded.watchFiles,
-          adapterResolutionRoot: dirname(loaded.configPath),
         };
       },
     });

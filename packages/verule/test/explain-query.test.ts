@@ -20,8 +20,16 @@ void describe("@boringparts/verule explain and observation", () => {
       const ruleWithCheckpoint = defineRule({
         id: "rule-sink-string",
         run: async (ctx) => {
+          const fns = await ctx.findSyntax({ kinds: ["FunctionDeclaration"] });
           const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
           const sinks = calls.filter((c) => c.text.startsWith("sink("));
+          if (fns[0] && sinks[0]) {
+            await ctx.branchCoverage({
+              function: fns[0].ref,
+              branches: [],
+              targets: [sinks[0].ref],
+            });
+          }
           const args = sinks
             .map((c) => c.arguments?.[1])
             .filter((arg): arg is SyntaxRef => arg !== undefined);
@@ -83,6 +91,19 @@ void describe("@boringparts/verule explain and observation", () => {
       assert.ok(summaryReport.observation.overhead.checkpointMs >= 0);
       assert.ok(summaryReport.observation.overhead.encodeMs >= 0);
       assert.ok(summaryReport.observation.overhead.writeMs >= 0);
+      assert.ok(summaryReport.observation.lowering.functionsLowered >= 1);
+      assert.ok(summaryReport.observation.lowering.verticesCreated >= 1);
+      assert.ok(summaryReport.observation.lowering.durationMs >= 0);
+      assert.ok(summaryReport.observation.irCache.functionHits >= 0);
+      assert.ok(summaryReport.observation.irCache.functionMisses >= 0);
+      assert.ok(summaryReport.observation.irCache.filesReused >= 0);
+      assert.ok(summaryReport.observation.irCache.filesInvalidated >= 0);
+      assert.ok(summaryReport.observation.summaryLookup.lookups >= 0);
+      assert.ok(summaryReport.observation.summaryLookup.hits >= 0);
+      assert.ok(summaryReport.observation.summaryLookup.misses >= 0);
+      assert.ok(
+        summaryReport.observation.summaryLookup.hitsBySource.builtin >= 0,
+      );
 
       // 3. observe = "detail": evaluates lazy callbacks, business report remains identical
       const detailStart = performance.now();
@@ -267,6 +288,20 @@ void describe("@boringparts/verule explain and observation", () => {
     await withTempHost(
       { host: "sdk-projects/explain-parser" },
       async (host) => {
+        host.writeText(
+          "src/handlers.ts",
+          [
+            "declare function makeInput(): { id: number };",
+            "declare function sink(value: unknown): void;",
+            "",
+            "export function runFlow(cb: (v: unknown) => unknown) {",
+            "  const row = makeInput();",
+            "  const out = cb(row);",
+            "  sink(out);",
+            "}",
+            "",
+          ].join("\n"),
+        );
         await host.typecheck();
 
         const propRule = defineRule({
@@ -277,11 +312,9 @@ void describe("@boringparts/verule explain and observation", () => {
               kinds: ["CallExpression"],
             });
             const makeCall = calls.find((c) => c.text === "makeInput()");
-            const parseCall = calls.find((c) =>
-              c.text.startsWith("parser.parse("),
-            );
-            const argRef = parseCall?.arguments?.[0];
-            if (!makeCall || !parseCall || !argRef) return;
+            const sinkCall = calls.find((c) => c.text.startsWith("sink("));
+            const argRef = sinkCall?.arguments?.[0];
+            if (!makeCall || !sinkCall || !argRef) return;
             await ctx.valuePropagation({
               propagation: "value",
               from: makeCall.ref,
@@ -306,7 +339,7 @@ void describe("@boringparts/verule explain and observation", () => {
           );
 
           // Reusing cached valuePropagation on the same snapshot MUST preserve report.gaps and explain.gaps.
-          const second = await session.check({ at: "src/handlers.ts:9:10" });
+          const second = await session.check({ at: "src/handlers.ts:6:15" });
           assert.equal(
             second.identity.snapshotDigest,
             first.identity.snapshotDigest,
@@ -327,5 +360,66 @@ void describe("@boringparts/verule explain and observation", () => {
         }
       },
     );
+  });
+
+  void it("collects rule-recorded domain gaps via ctx.recordGaps and tracks irCache reuse on session.update()", async () => {
+    await withTempHost({ host: "sdk-projects/explain-basic" }, async (host) => {
+      await host.typecheck();
+
+      const gapRule = defineRule({
+        id: "rule-record-domain-gap",
+        run: async (ctx) => {
+          const fns = await ctx.findSyntax({ kinds: ["FunctionDeclaration"] });
+          const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
+          const firstCall = calls[0];
+          if (fns[0] && firstCall) {
+            await ctx.branchCoverage({
+              function: fns[0].ref,
+              branches: [],
+              targets: [firstCall.ref],
+            });
+          }
+          if (firstCall) {
+            ctx.recordGaps([
+              {
+                kind: "dynamic-schema-spread",
+                message: "Dynamic spread in validation schema",
+                at: firstCall.location,
+              },
+            ]);
+          }
+        },
+      });
+
+      const session = await openSession({
+        cwd: host.rootDir,
+        observe: "summary",
+        config: defineConfig({
+          tsconfig: "tsconfig.json",
+          rules: [gapRule],
+        }),
+      });
+      try {
+        const first = await session.check({ observe: "summary" });
+        assert.ok(
+          first.gaps.some((g) => g.kind === "dynamic-schema-spread"),
+          JSON.stringify(first.gaps),
+        );
+        assert.ok((first.observation?.lowering.functionsLowered ?? 0) >= 1);
+
+        host.writeText("src/extra.ts", "export const extra = 1;\n");
+        await session.update({ created: ["src/extra.ts"] });
+
+        const afterUpdate = await session.check({ observe: "summary" });
+        assert.ok(afterUpdate.observation);
+        assert.ok(
+          afterUpdate.observation.irCache.functionHits >= 1 ||
+            afterUpdate.observation.irCache.filesReused >= 1,
+          JSON.stringify(afterUpdate.observation.irCache),
+        );
+      } finally {
+        await session.close();
+      }
+    });
   });
 });

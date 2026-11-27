@@ -6,7 +6,7 @@ import { checkReportSchema } from "../../src/report-wire.ts";
 import { resolveCliHostDir, withCliTempHost } from "../helpers/cli-hosts.ts";
 import { captureCli } from "./cli-test-helpers.ts";
 
-void test("verule check distinguishes resource instances across factories/models, emits model evidence, and surfaces missing-model gaps", async () => {
+void test("verule check distinguishes resource instances across factories/summaries, emits summary evidence, and surfaces missing-behavior-summary gaps", async () => {
   await withCliTempHost(
     {
       host: "integration/instance-identity",
@@ -46,24 +46,24 @@ void test("verule check distinguishes resource instances across factories/models
       assert.ok(
         diag.evidence.some(
           (e) =>
-            e.kind === "model" &&
-            e.modelId === "acme-lifecycle" &&
+            e.kind === "summary" &&
+            e.summaryId === "acme-lifecycle" &&
             e.declaration?.includes("_register"),
         ),
-        "Expected model evidence for Disposable._register",
+        `Expected summary evidence for Disposable._register, got ${JSON.stringify(diag.evidence)}`,
       );
       assert.ok(
         diag.evidence.some(
           (e) =>
-            e.kind === "model" &&
-            e.modelId === "acme-lifecycle" &&
+            e.kind === "summary" &&
+            e.summaryId === "acme-lifecycle" &&
             e.declaration?.includes("createMenu"),
         ),
-        "Expected model evidence for IMenuService.createMenu",
+        `Expected summary evidence for IMenuService.createMenu, got ${JSON.stringify(diag.evidence)}`,
       );
       assert.ok(
-        parsedReport.gaps.some((g) => g.kind === "missing-instance-model"),
-        `Expected missing-instance-model gap, got ${JSON.stringify(parsedReport.gaps)}`,
+        parsedReport.gaps.some((g) => g.kind === "missing-behavior-summary"),
+        `Expected missing-behavior-summary gap, got ${JSON.stringify(parsedReport.gaps)}`,
       );
 
       const textRun = await captureCli(
@@ -74,9 +74,9 @@ void test("verule check distinguishes resource instances across factories/models
       assert.match(textRun.stdout, /evidence \(source\):/u);
       assert.match(
         textRun.stdout,
-        /evidence \(model\): .*\[model=acme-lifecycle:/u,
+        /evidence \(summary\): .*\[summary=acme-lifecycle@local:/u,
       );
-      assert.match(textRun.stdout, /gap \[missing-instance-model\]:/u);
+      assert.match(textRun.stdout, /gap \[missing-behavior-summary\]:/u);
     },
   );
 });

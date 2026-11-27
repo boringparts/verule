@@ -1,4 +1,4 @@
-import { z } from "./zod.js";
+import { z } from "zod";
 
 export const userAgeSchema = z.object({
   id: z.number(),

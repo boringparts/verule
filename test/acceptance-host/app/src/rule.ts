@@ -78,7 +78,9 @@ export const neutralProductReviewRule = defineRule({
         from: call.ref,
         to: priceExpressions.map((entry) => entry.expression),
       });
-      const matchedFlow = propagation.results.find((flow) => flow.reachable);
+      const matchedFlow = propagation.results.find(
+        (flow) => flow.status === "proved",
+      );
       if (matchedFlow === undefined) {
         ctx.checkpoint(
           "price-validation-reachability",

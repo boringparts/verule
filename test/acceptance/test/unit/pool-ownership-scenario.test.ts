@@ -33,9 +33,13 @@ void test("generatePoolOwnershipProject deterministically builds all five scale 
     );
 
     const configSource = first.files["verule.config.ts"] ?? "";
-    assert.match(configSource, /poolResourceOwnershipModel/u);
+    assert.equal(configSource.includes("poolResourceOwnershipModel"), false);
     assert.match(configSource, /poolResourceOwnershipRule/u);
     assert.equal(configSource.includes("collapsible-list-pool"), false);
+    const summariesJson = JSON.parse(
+      first.files["tssae.summaries.json"] ?? "{}",
+    ) as { readonly id?: string };
+    assert.equal(summariesJson.id, "pool-resource-ownership");
   }
 });
 

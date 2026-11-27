@@ -1,14 +1,15 @@
 import { defineRule, type Rule } from "@boringparts/verule";
 
-export function createRules(): readonly Rule[] {
+export function createRules(policy?: {
+  readonly version: string;
+  readonly disallowedMode: string;
+}): readonly Rule[] {
   return [
     defineRule({
       id: "disallow-mode",
+      description: `Disallow mode "${policy?.disallowedMode ?? "fast"}" (v${policy?.version ?? "0"})`,
       run: async (ctx) => {
-        const model = ctx.getModel("mode-policy");
-        const rawForbidden = model?.facts?.disallowedMode;
-        const forbidden =
-          typeof rawForbidden === "string" ? rawForbidden : "fast";
+        const forbidden = policy?.disallowedMode ?? "fast";
         const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
         const sinks = calls.filter((c) => c.text.startsWith("sink("));
         const args = sinks
@@ -21,7 +22,7 @@ export function createRules(): readonly Rule[] {
           if (ty.isLiteral && ty.literalValue === forbidden && sinkCall) {
             ctx.report({
               at: sinkCall.location,
-              message: `Disallowed mode ${forbidden} (v${model?.version ?? "0"})`,
+              message: `Disallowed mode ${forbidden} (v${policy?.version ?? "0"})`,
               findingKey: `mode:${forbidden}`,
               basis: [
                 {

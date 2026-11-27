@@ -2,15 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { defineConfig, openSession, runCheck } from "@boringparts/verule";
-import {
-  defineReentrantQueueModel,
-  reentrantQueueFlagRule,
-} from "@verule/rules-reference";
+import { createReentrantQueueFlagRule } from "@verule/rules-reference";
 import { withTempHost } from "@verule/test-hosts";
 
-const schedulerQueueModel = defineReentrantQueueModel({
-  id: "test-scheduler-queue",
-  description: "Model for the scheduler queue behavior exercised in this test.",
+const schedulerQueueRule = createReentrantQueueFlagRule({
   contracts: [
     {
       id: "scheduler-queue",
@@ -38,8 +33,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [schedulerQueueModel],
-            rules: [reentrantQueueFlagRule],
+            rules: [schedulerQueueRule],
           }),
         });
 
@@ -60,7 +54,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
         assert.ok(directDiag.message.includes("directly"));
         assert.ok(
           directDiag.evidence.some(
-            (e) => e.kind === "model" && e.modelId === "test-scheduler-queue",
+            (e) => e.kind === "note" && e.declaration === "scheduler-queue",
           ),
           JSON.stringify(directDiag.evidence),
         );
@@ -128,7 +122,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
         );
         assert.ok(
           indirectDiag.evidence.some(
-            (e) => e.kind === "model" && e.modelId === "test-scheduler-queue",
+            (e) => e.kind === "note" && e.declaration === "scheduler-queue",
           ),
           JSON.stringify(indirectDiag.evidence),
         );
@@ -178,8 +172,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [schedulerQueueModel],
-            rules: [reentrantQueueFlagRule],
+            rules: [schedulerQueueRule],
           }),
         });
         try {
@@ -254,8 +247,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [schedulerQueueModel],
-            rules: [reentrantQueueFlagRule],
+            rules: [schedulerQueueRule],
           }),
         });
 
@@ -266,8 +258,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [schedulerQueueModel],
-            rules: [reentrantQueueFlagRule],
+            rules: [schedulerQueueRule],
           }),
         });
         try {
@@ -291,8 +282,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
   });
 
   void it("supports custom ReentrantQueueContract names and early-continue guards", async () => {
-    const customModel = defineReentrantQueueModel({
-      id: "custom-task-queue",
+    const customRule = createReentrantQueueFlagRule({
       contracts: [
         {
           queueName: "render-queue",
@@ -317,8 +307,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [customModel],
-            rules: [reentrantQueueFlagRule],
+            rules: [customRule],
           }),
         });
 
@@ -330,8 +319,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
   });
 
   void it("handles === 0 / == 0 / false guard polarities and early-exiting inner callback invocations", async () => {
-    const model = defineReentrantQueueModel({
-      id: "polarity-and-inner-queue",
+    const polarityRule = createReentrantQueueFlagRule({
       contracts: [
         {
           queueName: "job-queue",
@@ -356,8 +344,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [model],
-            rules: [reentrantQueueFlagRule],
+            rules: [polarityRule],
           }),
         });
 
@@ -372,8 +359,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
   });
 
   void it("handles !== 0, != 0, !== false, != false, == 0, 0 ===, 0 !==, and > 0 guard polarities without inverting branches", async () => {
-    const model = defineReentrantQueueModel({
-      id: "inequality-polarity-queue",
+    const ineqRule = createReentrantQueueFlagRule({
       contracts: [
         {
           queueName: "job-queue",
@@ -398,8 +384,7 @@ void describe("@verule/rules-reference reentrantQueueFlagRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [model],
-            rules: [reentrantQueueFlagRule],
+            rules: [ineqRule],
           }),
         });
 

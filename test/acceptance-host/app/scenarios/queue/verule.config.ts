@@ -1,13 +1,9 @@
 import { defineConfig } from "@boringparts/verule";
-import {
-  defineReentrantQueueModel,
-  reentrantQueueFlagRule,
-} from "@verule/rules-reference";
+import { createReentrantQueueFlagRule } from "@verule/rules-reference";
 
-export const schedulerQueueModel = defineReentrantQueueModel({
-  id: "acceptance-scheduler-queue",
+const acceptanceQueueRule = createReentrantQueueFlagRule({
   description:
-    "Scheduler queue model requiring post-callback QUEUED flag clears to preserve ALLOW_RECURSE re-enqueues.",
+    "Verify that post-callback QUEUED flag clears on scheduler-queue preserve ALLOW_RECURSE re-enqueues.",
   contracts: [
     {
       id: "scheduler-queue",
@@ -23,6 +19,5 @@ export const schedulerQueueModel = defineReentrantQueueModel({
 
 export default defineConfig({
   tsconfig: "tsconfig.json",
-  models: [schedulerQueueModel],
-  rules: [reentrantQueueFlagRule],
+  rules: [acceptanceQueueRule],
 });

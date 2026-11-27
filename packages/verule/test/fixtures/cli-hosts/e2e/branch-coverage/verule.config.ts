@@ -34,19 +34,19 @@ const guardRule = defineRule({
 
       for (const [targetIdx, item] of coverage.entries()) {
         const targetCall = actionCalls[targetIdx]!;
-        if (item.status === "bypass") {
-          ctx.report({
-            at: targetCall.location,
-            message: "runAction() can bypass required authorization branch.",
-            findingKey: "branch-bypass",
-            basis: [item],
-          });
-        } else if (item.status === "unreachable") {
+        if (!item.targetReachable) {
           ctx.report({
             at: targetCall.location,
             message:
               "runAction() is unreachable from function entry and cannot be verified as covered.",
             findingKey: "branch-unreachable",
+            basis: [item],
+          });
+        } else if (item.status === "disproved") {
+          ctx.report({
+            at: targetCall.location,
+            message: "runAction() can bypass required authorization branch.",
+            findingKey: "branch-bypass",
             basis: [item],
           });
         }

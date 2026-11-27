@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
-  defineAdapter as tssaeDefineAdapter,
-  defineModel as tssaeDefineModel,
   extractBasisEvidence,
   openProject,
   syntaxLocationOf,
@@ -13,8 +11,6 @@ import {
   type AdditionalInputRegistrar,
   type AdditionalInputSource,
   type DiagnosticLocation,
-  type LibraryAdapter,
-  type Model,
   type ProjectContext,
   type ProjectSession,
   type QueryObserver,
@@ -55,7 +51,6 @@ import {
   type ExplainOptions,
   type ExplainReport,
   type Gap,
-  type ModelIdentitySummary,
   type NormalizedVeruleConfig,
   type OpenSessionOptions,
   type ReportIdentity,
@@ -142,72 +137,6 @@ function validateRules(rules: readonly Rule[]): readonly Rule[] {
   return [...rules];
 }
 
-/** Validates a project model definition and attaches provenance metadata. */
-export function defineModel(model: Model): Model {
-  return invokeProjectSync(() => tssaeDefineModel(model));
-}
-
-function validateModels(models: readonly Model[]): readonly Model[] {
-  const seen = new Set<string>();
-  const validated: Model[] = [];
-  for (const model of models) {
-    const normalized = defineModel(model);
-    if (seen.has(normalized.id)) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Duplicate model id: "${normalized.id}".`,
-      );
-    }
-    seen.add(normalized.id);
-    validated.push(normalized);
-  }
-  return validated;
-}
-
-function validateAdapters(
-  adapters: readonly LibraryAdapter[],
-): readonly LibraryAdapter[] {
-  const seen = new Set<string>();
-  const validated: LibraryAdapter[] = [];
-  for (const adapter of adapters) {
-    const normalized = invokeProjectSync(() => tssaeDefineAdapter(adapter));
-    if (seen.has(normalized.id)) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Duplicate adapter id: "${normalized.id}".`,
-      );
-    }
-    seen.add(normalized.id);
-    validated.push(normalized);
-  }
-  return validated;
-}
-
-function validateAdapterPackageNames(
-  packageNames: readonly string[],
-): readonly string[] {
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const rawName of packageNames) {
-    if (typeof rawName !== "string" || rawName.trim() === "") {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        "Adapter package names must be non-empty strings.",
-      );
-    }
-    const packageName = rawName.trim();
-    if (seen.has(packageName)) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Duplicate adapter package name: "${packageName}".`,
-      );
-    }
-    seen.add(packageName);
-    normalized.push(packageName);
-  }
-  return normalized;
-}
-
 function selectRules(
   baseRules: readonly Rule[],
   ruleIds?: readonly string[],
@@ -268,19 +197,6 @@ export function defineConfig(
     );
   }
   const rules = validateRules(config.rules ?? []);
-  const models = validateModels(config.models ?? []);
-  const configuredAdapters = config.adapters ?? [];
-  const adapters = validateAdapters(
-    configuredAdapters.filter(
-      (adapter): adapter is LibraryAdapter => typeof adapter !== "string",
-    ),
-  );
-  const adapterPackages = validateAdapterPackageNames([
-    ...("adapterPackages" in config ? config.adapterPackages : []),
-    ...configuredAdapters.filter(
-      (adapter): adapter is string => typeof adapter === "string",
-    ),
-  ]);
   const additionalInputs = validateAdditionalInputPaths(
     config.additionalInputs,
   );
@@ -290,9 +206,6 @@ export function defineConfig(
       ? { projects: [...config.projects] }
       : {}),
     rules,
-    models,
-    adapters,
-    adapterPackages,
     additionalInputs,
   };
 }
@@ -329,69 +242,24 @@ function summarizeRule(rule: Rule): RuleIdentitySummary {
   };
 }
 
-function summarizeModel(model: Model): ModelIdentitySummary {
-  return {
-    id: model.id,
-    ...(model.version !== undefined ? { version: model.version } : {}),
-    digest: sha256Prefix(
-      stableSerialize({
-        id: model.id,
-        version: model.version ?? null,
-        description: model.description ?? null,
-        facts: model.facts ?? null,
-        ...(model.instanceBehaviors !== undefined
-          ? { instanceBehaviors: model.instanceBehaviors }
-          : {}),
-        ...(model.cleanupOperations !== undefined
-          ? { cleanupOperations: model.cleanupOperations }
-          : {}),
-        ...(model.lifecycleEvents !== undefined
-          ? { lifecycleEvents: model.lifecycleEvents }
-          : {}),
-      }),
-    ),
-  };
-}
-
-function summarizeAdapter(adapter: LibraryAdapter) {
-  return {
-    id: adapter.id,
-    version: adapter.version ?? null,
-    provides: adapter.provides
-      .map((provider) => provider.factType.id)
-      .toSorted(),
-  };
-}
-
 function computeReportIdentity(
   snapshotDigest: string,
   entries: readonly string[],
   rules: readonly Rule[],
-  models: readonly Model[],
   additionalInputs: readonly string[] = [],
-  adapters: readonly LibraryAdapter[] = [],
-  adapterPackages: readonly string[] = [],
 ): ReportIdentity {
   const ruleSummaries = rules.map(summarizeRule);
-  const modelSummaries = models.map(summarizeModel);
-  const adapterSummaries = adapters
-    .map(summarizeAdapter)
-    .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const configDigest = sha256Prefix(
     stableSerialize({
       entries,
       rules: ruleSummaries,
-      models: modelSummaries,
       ...(additionalInputs.length > 0 ? { additionalInputs } : {}),
-      ...(adapterSummaries.length > 0 ? { adapters: adapterSummaries } : {}),
-      ...(adapterPackages.length > 0 ? { adapterPackages } : {}),
     }),
   );
   return {
     snapshotDigest,
     configDigest,
     rules: ruleSummaries,
-    models: modelSummaries,
   };
 }
 
@@ -415,23 +283,6 @@ function resolveNextConfig(
     return defineConfig(options.config);
   }
   const rules = options?.rules ? validateRules(options.rules) : current.rules;
-  const models = options?.models
-    ? validateModels(options.models)
-    : current.models;
-  const adapters = options?.adapters
-    ? validateAdapters(
-        options.adapters.filter(
-          (adapter): adapter is LibraryAdapter => typeof adapter !== "string",
-        ),
-      )
-    : current.adapters;
-  const adapterPackages = options?.adapters
-    ? validateAdapterPackageNames(
-        options.adapters.filter(
-          (adapter): adapter is string => typeof adapter === "string",
-        ),
-      )
-    : current.adapterPackages;
   const additionalInputs =
     options?.additionalInputs !== undefined
       ? validateAdditionalInputPaths(options.additionalInputs)
@@ -446,9 +297,6 @@ function resolveNextConfig(
     return {
       projects: [...options.entries],
       rules,
-      models,
-      adapters,
-      adapterPackages,
       additionalInputs,
     };
   }
@@ -456,9 +304,6 @@ function resolveNextConfig(
     ...(current.tsconfig !== undefined ? { tsconfig: current.tsconfig } : {}),
     ...(current.projects !== undefined ? { projects: current.projects } : {}),
     rules,
-    models,
-    adapters,
-    adapterPackages,
     additionalInputs,
   };
 }
@@ -482,7 +327,6 @@ export async function openSession(
     : defineConfig({});
   const absCwd = resolve(options.cwd);
   const canonicalCwd = canonicalizeDir(absCwd);
-  let adapterResolutionRoot = resolve(options.adapterResolutionRoot ?? absCwd);
   const sessionObserve = normalizeObserveConfig(
     options.observe,
     options.observeLimit,
@@ -499,13 +343,7 @@ export async function openSession(
       ...(normalizedConfig.projects !== undefined
         ? { projects: normalizedConfig.projects }
         : {}),
-      models: normalizedConfig.models,
-      adapters: [
-        ...normalizedConfig.adapters,
-        ...normalizedConfig.adapterPackages,
-      ],
       additionalInputs: normalizedConfig.additionalInputs,
-      adapterResolutionRoot,
       ...(sessionObserve.mode !== "off"
         ? {
             observe: sessionObserve,
@@ -523,6 +361,7 @@ export async function openSession(
   };
   let closed = false;
   let pendingOpenIoMetrics = openIoMetrics;
+  const pendingUpdateIoMetrics: EngineCallIoMetrics[] = [];
   let pendingOpenDurationMs = openDurationMs;
   let pendingConfigLoadMs = options.configLoadMs ?? 0;
 
@@ -616,8 +455,6 @@ export async function openSession(
 
     return {
       project: projectCtx.project,
-      models: projectCtx.models,
-      getModel: (id) => projectCtx.getModel(id),
       findSyntax: (query) =>
         invokeProjectQuery(() => projectCtx.findSyntax(query)),
       typeAt: (targets) => invokeProjectQuery(() => projectCtx.typeAt(targets)),
@@ -657,8 +494,6 @@ export async function openSession(
         invokeProjectQuery(() => projectCtx.callEffects(opts)),
       instanceCleanup: (opts) =>
         invokeProjectQuery(() => projectCtx.instanceCleanup(opts)),
-      facts: (factType, opts) =>
-        invokeProjectQuery(() => projectCtx.facts(factType, opts)),
       registerAdditionalInput: (filePath: string) => {
         assertActiveSnapshot();
         return scopedAdditionalInputs.registerAdditionalInput(filePath);
@@ -666,6 +501,16 @@ export async function openSession(
       readAdditionalInput: (filePath: string) => {
         assertActiveSnapshot();
         return scopedAdditionalInputs.readAdditionalInput(filePath);
+      },
+      recordGaps: (
+        gaps: readonly Gap[],
+        gapOptions?: { readonly relatedLocation?: DiagnosticLocation },
+      ) => {
+        assertActiveSnapshot();
+        projectCtx.recordGaps(gaps);
+        if (gapOptions?.relatedLocation !== undefined && gaps.length > 0) {
+          collector.recordRuleGaps(ruleId, gaps, gapOptions.relatedLocation);
+        }
       },
       report: (input: DiagnosticInput) => {
         assertActiveSnapshot();
@@ -735,32 +580,11 @@ export async function openSession(
     const openMs = pendingOpenDurationMs;
     pendingOpenDurationMs = 0;
 
-    const configuredAdaptersById = new Map<
-      string,
-      { readonly id: string; readonly factTypeIds: readonly string[] }
-    >();
-    for (const adapter of normalizedConfig.adapters) {
-      configuredAdaptersById.set(adapter.id, {
-        id: adapter.id,
-        factTypeIds: adapter.provides.map((provider) => provider.factType.id),
-      });
-    }
-    for (const native of tssaeSession.nativeAdapters) {
-      if (!configuredAdaptersById.has(native.providerId)) {
-        configuredAdaptersById.set(native.providerId, {
-          id: native.providerId,
-          factTypeIds: [],
-        });
-      }
-    }
-
     const collector = new ObservationCollector({
       mode: effectiveObserve.mode,
       ...(effectiveObserve.limit !== undefined
         ? { limit: effectiveObserve.limit }
         : {}),
-      nativeAdapters: tssaeSession.nativeAdapters,
-      configuredAdapters: [...configuredAdaptersById.values()],
       ...(explainTarget !== undefined ? { explainTarget } : {}),
       configAndOpenMs: configLoadMs + openMs,
     });
@@ -768,6 +592,12 @@ export async function openSession(
     if (pendingOpenIoMetrics) {
       collector.recordRpcCall(pendingOpenIoMetrics);
       pendingOpenIoMetrics = undefined;
+    }
+    if (pendingUpdateIoMetrics.length > 0) {
+      for (const io of pendingUpdateIoMetrics) {
+        collector.recordRpcCall(io);
+      }
+      pendingUpdateIoMetrics.length = 0;
     }
 
     const collected: CollectedDiagnostic[] = [];
@@ -846,22 +676,6 @@ export async function openSession(
             : {}),
           ...(collector.isExplainEnabled()
             ? {
-                onFactExplain: (event) => {
-                  collector.recordFactExplain({
-                    ruleId: rule.id,
-                    ...(event.subjectLocation !== undefined
-                      ? { subjectLocation: event.subjectLocation }
-                      : {}),
-                    gaps: event.gaps,
-                    localGaps: event.localGaps,
-                  });
-                },
-                onProviderEvaluation: (evaluation) => {
-                  collector.recordProviderEvaluation({
-                    ruleId: rule.id,
-                    evaluation,
-                  });
-                },
                 onCleanupCovered: (event) => {
                   collector.recordCleanupPaths({
                     ruleId: rule.id,
@@ -978,10 +792,7 @@ export async function openSession(
         tssaeSession.snapshotDigest,
         resolveProjectEntries(normalizedConfig),
         rules,
-        normalizedConfig.models,
         normalizedConfig.additionalInputs,
-        normalizedConfig.adapters,
-        normalizedConfig.adapterPackages,
       ),
       ...(settlement.entries.length > 0
         ? { inlineIgnores: settlement.entries }
@@ -1037,27 +848,18 @@ export async function openSession(
       assertOpen();
       const changedAdditionalFiles = sessionRegistry.refresh();
       const nextConfig = resolveNextConfig(normalizedConfig, updateOptions);
-      const nextAdapterResolutionRoot = resolve(
-        updateOptions?.adapterResolutionRoot ?? adapterResolutionRoot,
-      );
       const nextEntries = resolveProjectEntries(nextConfig);
       const prevIdentity = computeReportIdentity(
         "",
         resolveProjectEntries(normalizedConfig),
         normalizedConfig.rules,
-        normalizedConfig.models,
         normalizedConfig.additionalInputs,
-        normalizedConfig.adapters,
-        normalizedConfig.adapterPackages,
       );
       const nextIdentity = computeReportIdentity(
         "",
         nextEntries,
         nextConfig.rules,
-        nextConfig.models,
         nextConfig.additionalInputs,
-        nextConfig.adapters,
-        nextConfig.adapterPackages,
       );
 
       const tssaeUpdate = await invokeProjectQuery(() =>
@@ -1071,11 +873,16 @@ export async function openSession(
           ...(updateOptions?.deleted !== undefined
             ? { deleted: updateOptions.deleted }
             : {}),
-          adapterResolutionRoot: nextAdapterResolutionRoot,
           entries: nextEntries,
-          models: nextConfig.models,
-          adapters: [...nextConfig.adapters, ...nextConfig.adapterPackages],
           additionalInputs: nextConfig.additionalInputs,
+          ...(sessionObserve.mode !== "off"
+            ? {
+                observe: sessionObserve,
+                onRpcMetrics: (io: EngineCallIoMetrics) => {
+                  pendingUpdateIoMetrics.push(io);
+                },
+              }
+            : {}),
         }),
       );
 
@@ -1105,7 +912,6 @@ export async function openSession(
       }
 
       normalizedConfig = nextConfig;
-      adapterResolutionRoot = nextAdapterResolutionRoot;
       workspaceFileState.files = tssaeUpdate.workspaceSourceFiles;
       sessionRegistry = buildSessionRegistry(
         nextConfig.additionalInputs,

@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -225,6 +225,84 @@ async function discoverPrepackedTarballs(
   return entries;
 }
 
+function unquoteYamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function findWorkspaceRootWithOverrides(startDir: string): string | undefined {
+  let current = resolve(startDir);
+  while (true) {
+    if (existsSync(join(current, "pnpm-workspace.yaml"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+function discoverWorkspaceTarballOverrides(
+  cwd: string,
+): ReadonlyMap<string, PrepackedEntry> {
+  const entries = new Map<string, PrepackedEntry>();
+  const workspaceRoot = findWorkspaceRootWithOverrides(cwd);
+  if (workspaceRoot === undefined) {
+    return entries;
+  }
+  const workspaceYaml = readFileSync(
+    join(workspaceRoot, "pnpm-workspace.yaml"),
+    "utf8",
+  );
+  let inOverrides = false;
+  let overridesIndent = -1;
+  for (const rawLine of workspaceYaml.split(/\r?\n/u)) {
+    const commentStripped = rawLine.replace(/#.*$/u, "");
+    if (commentStripped.trim().length === 0) {
+      continue;
+    }
+    const indent = commentStripped.length - commentStripped.trimStart().length;
+    const trimmed = commentStripped.trim();
+    if (!inOverrides) {
+      if (/^overrides\s*:/u.test(trimmed) && indent === 0) {
+        if (trimmed === "overrides: {}") {
+          return entries;
+        }
+        inOverrides = true;
+      }
+      continue;
+    }
+    if (indent === 0) {
+      break;
+    }
+    if (overridesIndent === -1) {
+      overridesIndent = indent;
+    } else if (indent < overridesIndent) {
+      break;
+    }
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+    const pkgName = unquoteYamlScalar(trimmed.slice(0, colonIdx));
+    const value = unquoteYamlScalar(trimmed.slice(colonIdx + 1));
+    if (!value.startsWith("file:")) continue;
+    const rawPath = value.slice("file:".length);
+    if (!rawPath.endsWith(".tgz")) continue;
+    const tarballPath = resolve(workspaceRoot, rawPath);
+    if (existsSync(tarballPath)) {
+      entries.set(pkgName, { tarballPath });
+    }
+  }
+  return entries;
+}
+
 /**
  * Resolves the actually installed `version` of `packageName` from the
  * acceptance package's own dependency graph (or `resolveFromUrl`) so upstream
@@ -296,18 +374,23 @@ async function discoverWorkspacePackages(
 export async function packWorkspaceArtifacts(
   options: PackWorkspaceArtifactsOptions = {},
 ): Promise<PackedArtifactBundle> {
+  const requested = options.additionalPackages ?? [];
   const packages = [
     ...new Set([
       ...CORE_VERULE_PACKAGES,
-      ...(options.additionalPackages ?? []),
+      ...requested,
+      ...(requested.includes("@verule/rules-reference")
+        ? ["@tssae/drizzle", "@tssae/zod"]
+        : []),
     ]),
   ];
 
+  const cwd = options.cwd ?? process.cwd();
   const envTssaePackDir = process.env.TSSAE_ACCEPTANCE_PACK_DIR?.trim();
   const tssaePrepacked =
     envTssaePackDir !== undefined && envTssaePackDir.length > 0
       ? await discoverPrepackedTarballs(resolve(envTssaePackDir))
-      : undefined;
+      : discoverWorkspaceTarballOverrides(cwd);
 
   const envPackDir = process.env.VERULE_ACCEPTANCE_PACK_DIR?.trim();
   const explicitFromPackDir =
@@ -328,7 +411,6 @@ export async function packWorkspaceArtifacts(
     discovered = await discoverPrepackedTarballs(resolvedFromPackDir);
   }
 
-  const cwd = options.cwd ?? process.cwd();
   const ownsFallbackPackDir = options.packDir === undefined;
   let fallbackPackDir: string | undefined =
     resolvedFromPackDir === undefined

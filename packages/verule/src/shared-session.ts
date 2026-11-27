@@ -10,7 +10,6 @@ import { dirname, resolve } from "node:path";
 import {
   VeruleExecutionError,
   type CheckReport,
-  type FactConflictDetails,
   type ObserveLimitInput,
   type ObserveMode,
   type ObserveOptions,
@@ -49,7 +48,6 @@ type SharedSessionResponse =
       readonly error: {
         readonly code: VeruleErrorCode;
         readonly message: string;
-        readonly conflict?: FactConflictDetails;
       };
     };
 
@@ -191,9 +189,6 @@ export async function startSharedSession(
 
   const controller = createWorkspaceController({
     cwd: absCwd,
-    ...(options.adapterResolutionRoot !== undefined
-      ? { adapterResolutionRoot: options.adapterResolutionRoot }
-      : {}),
     ...(options.config !== undefined ? { config: options.config } : {}),
     ...(options.loadConfig !== undefined
       ? { loadConfig: options.loadConfig }
@@ -433,13 +428,7 @@ export async function requestSharedReport(
 
       if (!parsed.ok) {
         finishError(
-          new VeruleExecutionError(
-            parsed.error.code,
-            parsed.error.message,
-            parsed.error.conflict !== undefined
-              ? { conflict: parsed.error.conflict }
-              : undefined,
-          ),
+          new VeruleExecutionError(parsed.error.code, parsed.error.message),
         );
         return;
       }

@@ -30,12 +30,12 @@
     "@verule/acceptance-host-data": "workspace:*",
     "@verule/acceptance-host-drizzle-zod-app": "workspace:*",
     "@verule/acceptance-host-drizzle-zod-data": "workspace:*",
-    "@verule/acceptance-host-provider-session-data": "workspace:*",
     "@verule/test-hosts": "workspace:*"
   },
   "devDependencies": {
     "@boringparts/verule": "workspace:*",
-    "@tssae/adapters": "0.1.0",
+    "@tssae/drizzle": "catalog:",
+    "@tssae/zod": "catalog:",
     "@types/node": "catalog:",
     "@verule/rules-reference": "workspace:*",
     "@verule/tooling-config": "workspace:*",

@@ -2,19 +2,15 @@ import {
   TssaeError,
   type AdditionalInputEntry,
   type AdditionalInputSource,
-  type ConfiguredAdapter,
+  type DiagnosticBasis,
   type DiagnosticLocation,
-  type EngineProviderExtractionStats,
+  type EngineIrCacheMetrics,
+  type EngineLoweringMetrics,
+  type EngineSummaryLookupMetrics,
   type Evidence,
   type ExplainCleanupPath,
-  type ExplainLocalGap,
-  type ExplainProviderEvaluation,
-  type FactConflictDetails,
   type Gap,
-  type LibraryAdapter,
   type MemoryStats,
-  type Model,
-  type NativeAdapterObservation,
   type ObserveLimit,
   type ObserveLimitInput,
   type ObserveMode,
@@ -24,27 +20,22 @@ import {
   type RecomputationScope,
   type SourceFileOrigin,
   type SourceTarget,
+  type SummaryConflictDetails,
   type SyntaxRef,
   type TssaeErrorCode,
 } from "tssae";
-import type { DiagnosticBasis } from "tssae";
 
 export type {
   AdditionalInputEntry,
   AdditionalInputSource,
-  ConfiguredAdapter,
   DiagnosticLocation,
-  EngineProviderExtractionStats,
+  EngineIrCacheMetrics,
+  EngineLoweringMetrics,
+  EngineSummaryLookupMetrics,
   Evidence,
   ExplainCleanupPath,
-  ExplainLocalGap,
-  ExplainProviderEvaluation,
-  FactConflictDetails,
   Gap,
-  LibraryAdapter,
   MemoryStats,
-  Model,
-  NativeAdapterObservation,
   ObserveLimit,
   ObserveLimitInput,
   ObserveMode,
@@ -54,6 +45,7 @@ export type {
   RecomputationScope,
   SourceFileOrigin,
   SourceTarget,
+  SummaryConflictDetails,
   SyntaxRef,
   TssaeErrorCode,
 } from "tssae";
@@ -65,18 +57,20 @@ export type VeruleErrorCode = TssaeErrorCode | "RULE_EXECUTION_ERROR";
 /** Execution failure raised when analysis configuration, loading, queries, or rules fail. */
 export class VeruleExecutionError extends Error {
   readonly code: VeruleErrorCode;
-  readonly conflict?: FactConflictDetails;
+  readonly summaryConflict?: SummaryConflictDetails;
 
   constructor(
     code: VeruleErrorCode,
     message: string,
-    options?: ErrorOptions & { readonly conflict?: FactConflictDetails },
+    options?: ErrorOptions & {
+      readonly summaryConflict?: SummaryConflictDetails;
+    },
   ) {
     super(message, options);
     this.name = "VeruleExecutionError";
     this.code = code;
-    if (options?.conflict !== undefined) {
-      this.conflict = options.conflict;
+    if (options?.summaryConflict !== undefined) {
+      this.summaryConflict = options.summaryConflict;
     }
   }
 }
@@ -92,7 +86,9 @@ export function toVeruleError(
   if (error instanceof TssaeError) {
     return new VeruleExecutionError(error.code, error.message, {
       cause: error,
-      ...(error.conflict !== undefined ? { conflict: error.conflict } : {}),
+      ...(error.summaryConflict !== undefined
+        ? { summaryConflict: error.summaryConflict }
+        : {}),
     });
   }
   if (
@@ -101,16 +97,16 @@ export function toVeruleError(
     "code" in error &&
     typeof error.code === "string"
   ) {
-    const conflict =
-      "conflict" in error && error.conflict !== undefined
-        ? (error.conflict as FactConflictDetails)
+    const summaryConflict =
+      "summaryConflict" in error && error.summaryConflict !== undefined
+        ? (error.summaryConflict as SummaryConflictDetails)
         : undefined;
     return new VeruleExecutionError(
       error.code as VeruleErrorCode,
       error.message,
       {
         cause: error,
-        ...(conflict !== undefined ? { conflict } : {}),
+        ...(summaryConflict !== undefined ? { summaryConflict } : {}),
       },
     );
   }
@@ -147,17 +143,10 @@ export type RuleIdentitySummary = {
   readonly digest: string;
 };
 
-export type ModelIdentitySummary = {
-  readonly id: string;
-  readonly version?: string;
-  readonly digest: string;
-};
-
 export type ReportIdentity = {
   readonly snapshotDigest: string;
   readonly configDigest: string;
   readonly rules: readonly RuleIdentitySummary[];
-  readonly models: readonly ModelIdentitySummary[];
 };
 
 export type ObservationPhases = {
@@ -206,13 +195,12 @@ export type ObservationReport = {
   readonly candidateCount: number;
   readonly checkpointCount: number;
   readonly providers: readonly string[];
-  readonly nativeAdapters: readonly NativeAdapterObservation[];
+  readonly lowering: EngineLoweringMetrics;
+  readonly irCache: EngineIrCacheMetrics;
+  readonly summaryLookup: EngineSummaryLookupMetrics;
   readonly limit?: ObserveLimit;
   readonly truncated: boolean;
   readonly droppedCount: number;
-  readonly engineExtractions: Readonly<
-    Record<string, EngineProviderExtractionStats>
-  >;
   readonly details?: readonly ObservationDetailEntry[];
 };
 
@@ -262,8 +250,6 @@ export type ExplainResult = {
   readonly queries: readonly ExplainQueryStep[];
   readonly checkpoints: readonly ExplainCheckpointTrace[];
   readonly gaps: readonly Gap[];
-  readonly localGaps: readonly ExplainLocalGap[];
-  readonly providerEvaluations: readonly ExplainProviderEvaluation[];
   readonly providers: readonly string[];
   readonly cleanupPaths: readonly ExplainCleanupPath[];
   readonly inlineIgnore?: {
@@ -324,6 +310,10 @@ export type RuleContext = ProjectContext & {
     outcome: CheckpointOutcome,
     detail?: () => unknown,
   ) => void;
+  recordGaps: (
+    gaps: readonly Gap[],
+    options?: { readonly relatedLocation?: DiagnosticLocation },
+  ) => void;
 };
 
 export type Rule = {
@@ -336,8 +326,6 @@ export type VeruleConfig = {
   readonly tsconfig?: string;
   readonly projects?: readonly string[];
   readonly rules?: readonly Rule[];
-  readonly models?: readonly Model[];
-  readonly adapters?: readonly ConfiguredAdapter[];
   readonly additionalInputs?: readonly string[];
 };
 
@@ -345,9 +333,6 @@ export type NormalizedVeruleConfig = {
   readonly tsconfig?: string;
   readonly projects?: readonly string[];
   readonly rules: readonly Rule[];
-  readonly models: readonly Model[];
-  readonly adapters: readonly LibraryAdapter[];
-  readonly adapterPackages: readonly string[];
   readonly additionalInputs: readonly string[];
 };
 
@@ -371,8 +356,6 @@ export type ExplainOptions = {
 export type OpenSessionOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig | NormalizedVeruleConfig;
-  /** Directory used to resolve adapter package names; defaults to `cwd`. */
-  readonly adapterResolutionRoot?: string;
   readonly observe?: ObserveMode | ObserveOptions;
   readonly observeLimit?: ObserveLimitInput;
   readonly configLoadMs?: number;
@@ -388,10 +371,7 @@ export type SessionUpdateOptions = {
   readonly created?: readonly string[];
   readonly deleted?: readonly string[];
   readonly config?: VeruleConfig | NormalizedVeruleConfig;
-  readonly adapterResolutionRoot?: string;
   readonly rules?: readonly Rule[];
-  readonly models?: readonly Model[];
-  readonly adapters?: readonly ConfiguredAdapter[];
   readonly entries?: readonly string[];
   readonly additionalInputs?: readonly string[];
 };
@@ -428,15 +408,12 @@ export type WatchTrigger = "initial" | "change";
 
 export type WatchConfigLoadResult = {
   readonly config: VeruleConfig | NormalizedVeruleConfig;
-  readonly adapterResolutionRoot?: string;
   readonly watchFiles?: readonly string[];
 };
 
 export type WatchProjectOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig | NormalizedVeruleConfig;
-  /** Directory used to resolve adapter package names; defaults to `cwd`. */
-  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;
@@ -461,7 +438,6 @@ export type WatchFailureEvent = {
   readonly trigger: WatchTrigger;
   readonly code: VeruleErrorCode;
   readonly message: string;
-  readonly conflict?: FactConflictDetails;
 };
 
 export type WatchEvent = WatchReportEvent | WatchFailureEvent;
@@ -470,8 +446,6 @@ export type SharedSessionOptions = {
   readonly cwd: string;
   readonly endpoint: string;
   readonly config?: VeruleConfig | NormalizedVeruleConfig;
-  /** Directory used to resolve adapter package names; defaults to `cwd`. */
-  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;

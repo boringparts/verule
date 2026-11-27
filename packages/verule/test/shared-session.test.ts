@@ -6,7 +6,6 @@ import { describe, it } from "node:test";
 import {
   VeruleExecutionError,
   defineConfig,
-  defineModel,
   defineRule,
   requestSharedReport,
   runCheck,
@@ -18,19 +17,11 @@ import {
 import { withTempHost } from "@verule/test-hosts";
 
 function createModeConfig(disallowedMode: string, version = "1") {
-  const model = defineModel({
-    id: "mode-policy",
-    version,
-    facts: { disallowedMode },
-  });
   const rule: Rule = defineRule({
     id: "disallow-mode",
+    description: `Disallow mode "${disallowedMode}" (v${version})`,
     run: async (ctx) => {
-      const policy = ctx.getModel("mode-policy");
-      const forbidden =
-        typeof policy?.facts?.disallowedMode === "string"
-          ? policy.facts.disallowedMode
-          : "fast";
+      const forbidden = disallowedMode;
       const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
       const sinks = calls.filter((call) => call.text.startsWith("sink("));
       const args = sinks
@@ -47,7 +38,7 @@ function createModeConfig(disallowedMode: string, version = "1") {
           const targetCall = args[index]!.call;
           ctx.report({
             at: targetCall.location,
-            message: `Disallowed mode "${forbidden}" (v${policy?.version ?? "0"})`,
+            message: `Disallowed mode "${forbidden}" (v${version})`,
             findingKey: `mode:${forbidden}`,
             basis: [
               {
@@ -57,7 +48,7 @@ function createModeConfig(disallowedMode: string, version = "1") {
               },
               {
                 kind: "note",
-                message: `Model ${policy?.id ?? "default"}@${policy?.version ?? "0"}`,
+                message: `Policy mode-policy@${version}`,
               },
             ],
           });
@@ -67,7 +58,6 @@ function createModeConfig(disallowedMode: string, version = "1") {
   });
   return defineConfig({
     tsconfig: "tsconfig.json",
-    models: [model],
     rules: [rule],
   });
 }
@@ -268,7 +258,10 @@ void describe("@boringparts/verule shared session", () => {
                 endpoint: socketPath,
               });
               assert.equal(report5.status, "clean");
-              assert.equal(report5.identity.models[0]?.version, "2");
+              assert.notEqual(
+                report5.identity.configDigest,
+                report4.identity.configDigest,
+              );
               assertReportMatchesCold(
                 report5,
                 await runCheck({ cwd: host.rootDir, config: currentConfig }),

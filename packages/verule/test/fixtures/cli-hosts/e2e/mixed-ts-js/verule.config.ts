@@ -39,7 +39,7 @@ const rule = defineRule({
           from: originInit,
           to: [outRes.declaration],
         });
-        if (prop.results[0]?.reachable) {
+        if (prop.results[0]?.status === "proved") {
           ctx.report({
             at: outDecl.location,
             message: "Origin propagates through JS bridge to TS sink",

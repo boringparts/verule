@@ -1,11 +1,9 @@
 import {
-  defineModel,
   defineRule,
   type BranchEdgeInfo,
   type DeclarationRef,
   type DiagnosticBasis,
   type FieldEffect,
-  type Model,
   type Rule,
   type RuleContext,
   type SyntaxNodeResult,
@@ -29,13 +27,6 @@ export type ReentrantQueueContract = {
   readonly reentrantFlagName: string;
 };
 
-export type ReentrantQueueModelOptions = {
-  readonly id: string;
-  readonly version?: string;
-  readonly description?: string;
-  readonly contracts: readonly ReentrantQueueContract[];
-};
-
 export type ReentrantQueueFlagRuleOptions = {
   readonly id?: string;
   readonly description?: string;
@@ -44,7 +35,6 @@ export type ReentrantQueueFlagRuleOptions = {
 
 type ResolvedContract = ReentrantQueueContract & {
   readonly contractId: string;
-  readonly modelId: string;
 };
 
 type QueueEnqueueState = {
@@ -58,56 +48,19 @@ type FlagClearCandidate = {
   readonly queueReadBasis: DiagnosticBasis | null;
 };
 
-function hasNonEmptyStringProperty(obj: object, key: string): boolean {
-  if (!(key in obj)) return false;
-  const val: unknown = Reflect.get(obj, key);
-  return typeof val === "string" && val.length > 0;
-}
-
-function isReentrantQueueContract(
-  value: unknown,
-): value is ReentrantQueueContract {
-  if (typeof value !== "object" || value === null) return false;
-  return (
-    hasNonEmptyStringProperty(value, "queueName") &&
-    hasNonEmptyStringProperty(value, "enqueueFunctionName") &&
-    hasNonEmptyStringProperty(value, "queueIdentifier") &&
-    hasNonEmptyStringProperty(value, "flagProperty") &&
-    hasNonEmptyStringProperty(value, "queuedFlagName") &&
-    hasNonEmptyStringProperty(value, "reentrantFlagName")
-  );
-}
-
-function extractContracts(
-  ctx: RuleContext,
+function normalizeContracts(
   optionContracts: readonly ReentrantQueueContract[] | undefined,
 ): readonly ResolvedContract[] {
   const out: ResolvedContract[] = [];
   const seen = new Set<string>();
-
-  for (const model of ctx.models) {
-    const raw = model.facts?.reentrantQueueContracts;
-    if (!Array.isArray(raw)) continue;
-    for (const item of raw) {
-      if (!isReentrantQueueContract(item)) continue;
-      const contractId = item.id ?? item.queueName;
-      const key = `${model.id}:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push({ ...item, contractId, modelId: model.id });
-      }
-    }
-  }
-
   for (const item of optionContracts ?? []) {
     const contractId = item.id ?? item.queueName;
-    const key = `rule-options:${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
+    const key = `${contractId}:${item.enqueueFunctionName}:${item.queueIdentifier}`;
     if (!seen.has(key)) {
       seen.add(key);
-      out.push({ ...item, contractId, modelId: "rule-options" });
+      out.push({ ...item, contractId });
     }
   }
-
   return out;
 }
 
@@ -363,7 +316,7 @@ async function resolveQueueItemCandidates(
         to: [write.receiverSyntax],
       });
       const targetResult = prop.results[0];
-      if (targetResult?.reachable && targetResult.paths.length > 0) {
+      if (targetResult?.status === "proved") {
         candidates.push({
           write,
           receiverDeclId,
@@ -430,7 +383,6 @@ async function analyzeCandidateFunction(
   );
   if (candidates.length === 0) return;
 
-  const model = ctx.getModel(contract.modelId);
   for (const candidate of candidates) {
     const priorInvocations = eff.callbackInvocations.filter(
       (inv) =>
@@ -500,10 +452,7 @@ async function analyzeCandidateFunction(
             targets: [candidate.write.syntax],
           }),
         ]);
-        if (
-          oppToInv?.status === "covered" &&
-          safeToWrite?.status === "covered"
-        ) {
+        if (oppToInv?.status === "proved" && safeToWrite?.status === "proved") {
           return true;
         }
       }
@@ -513,7 +462,7 @@ async function analyzeCandidateFunction(
     let reportCoverage = overallCoverage;
     let offendingInvocation: (typeof orderedInvocations)[number] | undefined;
 
-    if (overallCoverage.status === "covered") {
+    if (overallCoverage.status === "proved") {
       for (const inv of orderedInvocations) {
         const postSafeBranches = allSafeBranches.filter(
           (b) => b.location.start >= inv.outerCallLocation.end,
@@ -524,7 +473,7 @@ async function analyzeCandidateFunction(
             branches: postSafeBranches.map((b) => b.ref),
             targets: [candidate.write.syntax],
           });
-          if (postCoverage?.status === "covered") {
+          if (postCoverage?.status === "proved") {
             continue;
           }
           if (await isConfinedToOppositeGuardBranch(inv)) {
@@ -558,7 +507,8 @@ async function analyzeCandidateFunction(
         contractId: contract.contractId,
         status: reportCoverage.status,
         guardBranches: allSafeBranches.map((b) => b.conditionText),
-        gaps: reportCoverage.gaps,
+        gaps:
+          reportCoverage.status === "inconclusive" ? reportCoverage.gaps : [],
       }),
     );
 
@@ -577,16 +527,11 @@ async function analyzeCandidateFunction(
     );
 
     const basis: DiagnosticBasis[] = [
-      ...(model !== undefined
-        ? [model]
-        : [
-            {
-              kind: "model" as const,
-              modelId: contract.modelId,
-              declaration: contract.queueName,
-              message: `Contract '${contract.contractId}' requires post-callback '.${contract.flagProperty}' '${contract.queuedFlagName}' clears on '${contract.queueName}' to preserve '${contract.reentrantFlagName}' re-enqueues.`,
-            },
-          ]),
+      {
+        kind: "note",
+        declaration: contract.queueName,
+        message: `Contract '${contract.contractId}' requires post-callback '.${contract.flagProperty}' '${contract.queuedFlagName}' clears on '${contract.queueName}' to preserve '${contract.reentrantFlagName}' re-enqueues.`,
+      },
       ...enqueueState.enqueueWrites,
       ...(candidate.queueReadBasis !== null ? [candidate.queueReadBasis] : []),
       ...preClears.map((pre) => pre.write),
@@ -610,25 +555,6 @@ async function analyzeCandidateFunction(
 }
 
 /**
- * Declares a model describing a reentrant task queue whose `QUEUED` bitflag must
- * not be unconditionally cleared after invoking a reentrant callback.
- */
-export function defineReentrantQueueModel(
-  options: ReentrantQueueModelOptions,
-): Model {
-  return defineModel({
-    id: options.id,
-    ...(options.version !== undefined ? { version: options.version } : {}),
-    ...(options.description !== undefined
-      ? { description: options.description }
-      : {}),
-    facts: {
-      reentrantQueueContracts: options.contracts,
-    },
-  });
-}
-
-/**
  * Creates a rule verifying that post-callback bitflag clears on reentrant queue
  * items are guarded so re-enqueued items do not lose their `QUEUED` state.
  */
@@ -641,7 +567,7 @@ export function createReentrantQueueFlagRule(
       options.description ??
       "Require post-callback queued flag clears on reentrant queue items to be guarded against re-enqueue flags.",
     run: async (ctx) => {
-      const contracts = extractContracts(ctx, options.contracts);
+      const contracts = normalizeContracts(options.contracts);
       if (contracts.length === 0) return;
 
       const candidateFns = await ctx.findSyntax({

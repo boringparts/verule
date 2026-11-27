@@ -39,7 +39,12 @@
     },
     "perf": {
       "dependsOn": ["build"],
-      "passThroughEnv": ["INIT_CWD", "VERULE_PERF_CWD"],
+      "passThroughEnv": [
+        "INIT_CWD",
+        "VERULE_PERF_CWD",
+        "VERULE_ACCEPTANCE_PACK_DIR",
+        "TSSAE_ACCEPTANCE_PACK_DIR"
+      ],
       "inputs": [],
       "outputs": [],
       "cache": false,
@@ -63,7 +68,6 @@
         "XDG_CACHE_HOME",
         "VERULE_ACCEPTANCE_PACK_DIR",
         "TSSAE_ACCEPTANCE_PACK_DIR",
-        "TSSAE_ACCEPTANCE_CRATE_PATH",
         "CARGO_NET_OFFLINE"
       ],
       "inputs": ["$TURBO_DEFAULT$"],
