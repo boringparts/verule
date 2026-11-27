@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import {
   locationMatchesTarget,
   locationsOverlap,
+  normalizeObserveConfig as normalizeEngineObserveConfig,
   type DiagnosticLocation,
   type EngineCallIoMetrics,
   type EngineIrCacheMetrics,
@@ -11,6 +12,7 @@ import {
   type EngineSummaryLookupMetrics,
   type ExplainCleanupPath,
   type Gap,
+  type NormalizedObserveConfig,
   type ObserveLimit,
   type ObserveLimitInput,
   type ObserveMode,
@@ -20,6 +22,7 @@ import {
 } from "tssae";
 
 import {
+  toVeruleError,
   VeruleExecutionError,
   type CheckpointOutcome,
   type Diagnostic,
@@ -31,12 +34,7 @@ import {
   type ObservationReport,
 } from "./types.ts";
 
-export { type EngineCallIoMetrics };
-
-export type NormalizedObserveConfig = {
-  readonly mode: ObserveMode;
-  readonly limit?: ObserveLimit;
-};
+export { type EngineCallIoMetrics, type NormalizedObserveConfig };
 
 export type QueryTraceRecord = {
   readonly ruleId: string;
@@ -201,16 +199,6 @@ export function normalizeTargetSpec(
   };
 }
 
-function validateNonNegativeInt(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new VeruleExecutionError(
-      "INVALID_CONFIG",
-      `Invalid ${label} ${String(value)}: must be a non-negative integer.`,
-    );
-  }
-  return value;
-}
-
 function parseNonNegativeInt(raw: string, source: string): number {
   if (!/^\d+$/u.test(raw)) {
     throw new VeruleExecutionError(
@@ -218,25 +206,28 @@ function parseNonNegativeInt(raw: string, source: string): number {
       `Invalid observe limit "${source}": expected a non-negative integer.`,
     );
   }
-  return validateNonNegativeInt(Number(raw), `observe limit "${source}"`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      `Invalid observe limit "${source}" ${String(value)}: must be a non-negative integer.`,
+    );
+  }
+  return value;
 }
 
 /** Parses `--observe-limit` strings (e.g. `20`, `4096b`, `4kb`, `10items`) or SDK limit objects. */
 export function parseObserveLimit(
   input: string | ObserveLimitInput,
 ): ObserveLimit {
-  if (typeof input === "number") {
-    return { maxItems: validateNonNegativeInt(input, "observe limit") };
-  }
-  if (typeof input === "object") {
-    return {
-      ...(input.maxItems !== undefined
-        ? { maxItems: validateNonNegativeInt(input.maxItems, "maxItems") }
-        : {}),
-      ...(input.maxBytes !== undefined
-        ? { maxBytes: validateNonNegativeInt(input.maxBytes, "maxBytes") }
-        : {}),
-    };
+  if (typeof input !== "string") {
+    try {
+      return (
+        normalizeEngineObserveConfig({ mode: "off", limit: input }).limit ?? {}
+      );
+    } catch (err) {
+      throw toVeruleError(err, "INVALID_CONFIG");
+    }
   }
 
   const normalized = input.trim().toLowerCase();
@@ -285,11 +276,15 @@ export function normalizeObserveConfig(
       ? observe.limit
       : observeLimit;
   const limit =
-    rawLimit !== undefined ? parseObserveLimit(rawLimit) : undefined;
-  return {
-    mode,
-    ...(limit !== undefined ? { limit } : {}),
-  };
+    typeof rawLimit === "string" ? parseObserveLimit(rawLimit) : rawLimit;
+  try {
+    return normalizeEngineObserveConfig({
+      mode,
+      ...(limit !== undefined ? { limit } : {}),
+    });
+  } catch (err) {
+    throw toVeruleError(err, "INVALID_CONFIG");
+  }
 }
 
 /** Collects observation metrics, bounded detail entries, and explain traces for a check run. */
