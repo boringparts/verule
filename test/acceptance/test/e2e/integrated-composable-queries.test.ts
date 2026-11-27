@@ -9,7 +9,7 @@ import {
 } from "@verule/acceptance";
 import { runTscTypecheck } from "@verule/test-hosts";
 
-const drizzleZodConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
+const drizzleZodConfigPath = "packages/app/verule.drizzle-zod.config.ts";
 const integratedExplainConfigPath =
   "packages/app/verule.integrated-explain.config.ts";
 const schemaRelPath = "packages/data/src/drizzle-schema.ts";

@@ -17,7 +17,7 @@
     "variants/fake-select.ts",
     "variants/integrated/verule.integrated-explain.config.ts",
     "variants/integrated/verule.integrated-output-explain.config.ts",
-    "verule.drizzle-zod.native.config.ts",
+    "verule.drizzle-zod.config.ts",
     "verule.multiple-sources.config.ts"
   ]
 }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { withAcceptanceHost } from "@verule/acceptance";
 
-const configPath = "packages/app/verule.drizzle-zod.native.config.ts";
+const configPath = "packages/app/verule.drizzle-zod.config.ts";
 const schemaPath = "packages/data/src/drizzle-schema.ts";
 
 void test("edits schema in an isolated host, waits for watch report, and verifies diagnostic retraction", async () => {

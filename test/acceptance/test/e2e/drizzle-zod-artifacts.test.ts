@@ -24,7 +24,7 @@ const packageNames = [
   "@verule/rules-reference",
 ] as const;
 const directPackageNames = ["@boringparts/verule", ...packageNames] as const;
-const mainConfigPath = "packages/app/verule.drizzle-zod.native.config.ts";
+const mainConfigPath = "packages/app/verule.drizzle-zod.config.ts";
 const multiSourceConfigPath = "packages/app/verule.multiple-sources.config.ts";
 const projectionsRelPath = "packages/data/src/drizzle-projections.ts";
 const schemaRelPath = "packages/data/src/drizzle-schema.ts";
