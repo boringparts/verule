@@ -59,11 +59,6 @@ type CheckEnvelope =
             readonly id: string;
             readonly digest: string;
           }[];
-          readonly models: readonly {
-            readonly id: string;
-            readonly version?: string;
-            readonly digest: string;
-          }[];
         };
         readonly observation?: unknown;
         readonly explanation?: {
@@ -240,7 +235,7 @@ void test("verule session and verule check --session align every round with stan
       host.writeText("src/unrelated.ts", "export const note = 2;\n");
       await queryAndCompare("unrelated-file-change", 1);
 
-      // 5. Config/model reload & single-round failure recovery
+      // 5. Config/policy reload & single-round failure recovery
       const savedConfig = host.readText("verule.config.ts");
       host.writeText("verule.config.ts", "export default { broken(");
 
@@ -252,15 +247,18 @@ void test("verule session and verule check --session align every round with stan
       assert.equal(brokenRes.envelope.kind, "failure");
       assert.equal(brokenRes.envelope.data.code, "INVALID_CONFIG");
 
-      // Restore config and update model -> recovers immediately
+      // Restore config and update policy module -> recovers immediately
       host.writeText("verule.config.ts", savedConfig);
       host.replaceText(
-        "verule.model.ts",
-        'version: "1",\n  facts: { disallowedMode: "fast" },',
-        'version: "2",\n  facts: { disallowedMode: "safe" },',
+        "verule.policy.ts",
+        'version: "1",\n  disallowedMode: "fast",',
+        'version: "2",\n  disallowedMode: "safe",',
       );
-      const recovered = await queryAndCompare("recover-and-model-reload", 0);
-      assert.equal(recovered.identity.models[0]?.version, "2");
+      const recovered = await queryAndCompare("recover-and-policy-reload", 0);
+      assert.notEqual(
+        recovered.identity.configDigest,
+        findingsData.identity.configDigest,
+      );
 
       // 6. Shut down shared session -> socket cleaned up, standalone check still works
       abortController.abort();

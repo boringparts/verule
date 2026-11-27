@@ -30,7 +30,7 @@ export async function checkDynamicAndStripped() {
     .from(page)
     .get();
   const maybeOk = dynRow ? userAgeSchema.parse(dynRow) : null;
-  const { age: _strippedAge, ...withoutAge } = dynRow ?? {};
+  const { age: _strippedAge, ...withoutAge } = (dynRow ?? {}) as { age?: 0 };
   const definitelyMissing = userAgeSchema.parse(withoutAge);
   return { maybeOk, definitelyMissing };
 }

@@ -18,7 +18,6 @@ import {
   VeruleExecutionError,
   type AnalysisSession,
   type CheckReport,
-  type FactConflictDetails,
   type MemoryStats,
   type NormalizedVeruleConfig,
   type ObserveLimitInput,
@@ -38,13 +37,11 @@ import {
 export type WorkspaceFailureInfo = {
   readonly code: VeruleErrorCode;
   readonly message: string;
-  readonly conflict?: FactConflictDetails;
 };
 
 export type WorkspaceControllerOptions = {
   readonly cwd: string;
   readonly config?: VeruleConfig;
-  readonly adapterResolutionRoot?: string;
   readonly loadConfig?: () => Promise<WatchConfigLoadResult>;
   readonly watchFiles?: readonly string[];
   readonly observe?: ObserveMode;
@@ -88,7 +85,6 @@ export function toExecutionErrorInfo(err: unknown): WorkspaceFailureInfo {
     return {
       code: err.code,
       message: err.message,
-      ...(err.conflict !== undefined ? { conflict: err.conflict } : {}),
     };
   }
   return {
@@ -241,7 +237,6 @@ export type WorkspaceApplyResult =
  */
 export function createWorkspaceController(options: WorkspaceControllerOptions) {
   const absCwd = resolve(options.cwd);
-  let adapterResolutionRoot = resolve(options.adapterResolutionRoot ?? absCwd);
   const debounceMs = options.debounceMs ?? 50;
 
   let session: AnalysisSession | undefined;
@@ -441,10 +436,6 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
   async function resolveCurrentConfig(): Promise<NormalizedVeruleConfig> {
     if (options.loadConfig) {
       const loaded = await options.loadConfig();
-      adapterResolutionRoot = resolve(
-        absCwd,
-        loaded.adapterResolutionRoot ?? adapterResolutionRoot,
-      );
       if (loaded.watchFiles) {
         configWatchFiles.clear();
         for (const file of loaded.watchFiles) {
@@ -590,7 +581,6 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         session = await openSession({
           cwd: absCwd,
           config: lastConfig!,
-          adapterResolutionRoot,
           ...(options.observe !== undefined
             ? { observe: options.observe }
             : {}),
@@ -634,7 +624,6 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
         changed: mergedChanged,
         created: mergedCreated,
         deleted: mergedDeleted,
-        adapterResolutionRoot,
         ...(reloadedConfig !== undefined ? { config: reloadedConfig } : {}),
       });
     } catch (err) {
@@ -712,7 +701,6 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           session = await openSession({
             cwd: absCwd,
             config: lastConfig,
-            adapterResolutionRoot,
             ...(options.observe !== undefined
               ? { observe: options.observe }
               : {}),
@@ -757,13 +745,7 @@ export function createWorkspaceController(options: WorkspaceControllerOptions) {
           await applyPathsInternal(candidates);
         }
         if (lastFailure !== undefined) {
-          throw new VeruleExecutionError(
-            lastFailure.code,
-            lastFailure.message,
-            lastFailure.conflict !== undefined
-              ? { conflict: lastFailure.conflict }
-              : undefined,
-          );
+          throw new VeruleExecutionError(lastFailure.code, lastFailure.message);
         }
         if (!session) {
           throw new VeruleExecutionError(
@@ -861,9 +843,6 @@ export async function* watchProject(
   const controller = createWorkspaceController({
     cwd: options.cwd,
     ...(options.config !== undefined ? { config: options.config } : {}),
-    ...(options.adapterResolutionRoot !== undefined
-      ? { adapterResolutionRoot: options.adapterResolutionRoot }
-      : {}),
     ...(options.loadConfig !== undefined
       ? { loadConfig: options.loadConfig }
       : {}),
@@ -938,7 +917,6 @@ export async function* watchProject(
         trigger: "initial",
         code: info.code,
         message: info.message,
-        ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
       };
     }
 
@@ -959,7 +937,6 @@ export async function* watchProject(
           trigger: "change",
           code: info.code,
           message: info.message,
-          ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
         };
         continue;
       }
@@ -993,7 +970,6 @@ export async function* watchProject(
           trigger: "change",
           code: info.code,
           message: info.message,
-          ...(info.conflict !== undefined ? { conflict: info.conflict } : {}),
         };
       }
     }

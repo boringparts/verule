@@ -2,7 +2,8 @@ packages:
   - packages/data
   - packages/app
 catalog:
-  "@tssae/adapters": "*"
+  "@tssae/drizzle": "*"
+  "@tssae/zod": "*"
   "@verule/rules-reference": "*"
   "@boringparts/verule": "*"
   drizzle-orm: 0.45.3

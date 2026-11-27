@@ -1,4 +1,3 @@
-import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import {
@@ -31,11 +30,9 @@ import {
   checkReportSchema,
   formatDiagnosticsLines,
   formatScopeLines,
-  toWireFactConflict,
   toWireReport,
   type WireCheckReport,
   type WireExplainResult,
-  type WireFactConflictDetails,
   type WireObservation,
 } from "./report-wire.ts";
 import {
@@ -94,35 +91,11 @@ function appendExplanationLines(lines: string[], exp: WireExplainResult): void {
   if (exp.providers.length > 0) {
     lines.push(`  providers: ${exp.providers.join(", ")}`);
   }
-  for (const evalEntry of exp.providerEvaluations) {
-    const factPart = evalEntry.factTypeId ? ` (${evalEntry.factTypeId})` : "";
-    const reasonPart = evalEntry.reason ? `: ${evalEntry.reason}` : "";
-    lines.push(
-      `  provider [${evalEntry.status}] ${evalEntry.providerId}${factPart}${reasonPart}`,
-    );
-  }
   for (const gap of exp.gaps) {
     const atSuffix = gap.at
       ? ` (${gap.at.file}:${gap.at.line}:${gap.at.column})`
       : "";
     lines.push(`  gap [${gap.kind}]: ${gap.message}${atSuffix}`);
-  }
-  for (const local of exp.localGaps) {
-    const fieldPart = local.field ? ` field=${local.field}` : "";
-    const gapAt = local.gap.at
-      ? ` at ${local.gap.at.file}:${local.gap.at.line}:${local.gap.at.column}`
-      : "";
-    const resolvedPart = local.resolvedBy
-      ? ` -> resolved_by ${local.resolvedBy.providerId} (${local.resolvedBy.operation}: ${local.resolvedBy.conclusion}${
-          local.resolvedBy.at
-            ? ` at ${local.resolvedBy.at.file}:${local.resolvedBy.at.line}:${local.resolvedBy.at.column}`
-            : ""
-        })`
-      : "";
-    const impactPart = local.impact ? ` [${local.impact}]` : "";
-    lines.push(
-      `  localGap [${local.status}] ${local.factTypeId} (${local.providerId})${fieldPart}: ${local.gap.message}${gapAt}${resolvedPart}${impactPart}`,
-    );
   }
   for (const cp of exp.cleanupPaths) {
     const sites = cp.cleanupLocations
@@ -153,19 +126,14 @@ function appendObservationLines(lines: string[], obs: WireObservation): void {
   if (obs.providers.length > 0) {
     lines.push(`  providers: ${obs.providers.join(", ")}`);
   }
-  const nativeAdapters = obs.nativeAdapters.map(
-    (adapter) =>
-      `${adapter.packageName} (provider=${adapter.providerId}, status=${adapter.status})`,
+  lines.push(
+    `  lowering: functions=${obs.lowering.functionsLowered}, vertices=${obs.lowering.verticesCreated}, duration=${obs.lowering.durationMs}ms`,
   );
   lines.push(
-    `  native adapters: ${nativeAdapters.length > 0 ? nativeAdapters.join(", ") : "none"}`,
-  );
-  const nativeExtractions = Object.entries(obs.engineExtractions).map(
-    ([providerId, stats]) =>
-      `${providerId} (extractions=${stats.extractions}, candidates=${stats.candidates})`,
+    `  irCache: functionHits=${obs.irCache.functionHits}, functionMisses=${obs.irCache.functionMisses}, filesReused=${obs.irCache.filesReused}, filesInvalidated=${obs.irCache.filesInvalidated}`,
   );
   lines.push(
-    `  native extractions: ${nativeExtractions.length > 0 ? nativeExtractions.join(", ") : "none"}`,
+    `  summaryLookup: lookups=${obs.summaryLookup.lookups}, hits=${obs.summaryLookup.hits}, misses=${obs.summaryLookup.misses} (local=${obs.summaryLookup.hitsBySource.local}, package=${obs.summaryLookup.hitsBySource.package}, community=${obs.summaryLookup.hitsBySource.community}, builtin=${obs.summaryLookup.hitsBySource.builtin})`,
   );
   if (obs.truncated) {
     lines.push(`  truncated: true (dropped=${obs.droppedCount})`);
@@ -274,7 +242,6 @@ function createCliContract(
           readonly reportVersion: typeof REPORT_SCHEMA_VERSION;
           readonly code: string;
           readonly message: string;
-          readonly conflict?: WireFactConflictDetails;
         };
       }
   > {
@@ -312,7 +279,6 @@ function createCliContract(
       const report = await runCheck({
         cwd: workingDirectory,
         config: loaded.config,
-        adapterResolutionRoot: dirname(loaded.configPath),
         configLoadMs,
         ...(input.rule !== undefined ? { ruleIds: [input.rule] } : {}),
         ...(input.at !== undefined ? { at: input.at } : {}),
@@ -328,9 +294,6 @@ function createCliContract(
             reportVersion: REPORT_SCHEMA_VERSION,
             code: err.code,
             message: err.message,
-            ...(err.conflict !== undefined
-              ? { conflict: toWireFactConflict(err.conflict) }
-              : {}),
           },
         };
       }
@@ -485,33 +448,8 @@ function createCliContract(
                     "Configuration, project loading, rule execution, or engine failure.",
                   schema: checkFailureSchema,
                   exitCode: 2,
-                  text: ({ code, message, conflict }) => {
-                    if (!conflict) {
-                      return text.line(`Check failed [${code}]: ${message}`);
-                    }
-                    const loc = conflict.subjectLocation
-                      ? ` (${conflict.subjectLocation.file}:${conflict.subjectLocation.line}:${conflict.subjectLocation.column})`
-                      : "";
-                    const head = `Check failed [${code}]: ${message}`;
-                    const tail = [
-                      `  factType: ${conflict.factTypeId}`,
-                      `  subject: ${conflict.subjectHandleId}${loc}`,
-                    ];
-                    for (const party of conflict.parties) {
-                      tail.push(
-                        `  provider [${party.providerId}]: ${party.conclusionSummary}`,
-                      );
-                      for (const ev of party.evidence) {
-                        const evLoc = ev.at
-                          ? ` (${ev.at.file}:${ev.at.line}:${ev.at.column})`
-                          : "";
-                        tail.push(
-                          `    evidence (${ev.kind}): ${ev.message}${evLoc}`,
-                        );
-                      }
-                    }
-                    return text.lines([head, ...tail]);
-                  },
+                  text: ({ code, message }) =>
+                    text.line(`Check failed [${code}]: ${message}`),
                 },
               },
               handler: async ({ input, outcome }) => {

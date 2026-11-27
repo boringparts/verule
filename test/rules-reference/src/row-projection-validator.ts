@@ -1,49 +1,42 @@
-import {
-  defineRule,
-  resolveRetainedObjectFields,
-  type DiagnosticBasis,
-  type DiagnosticLocation,
-  type FactResult,
-  type ObjectFieldShape,
-  type Rule,
-  type SyntaxRef,
-  type ValuePropagationPath,
+import type {
+  DiagnosticBasis,
+  DiagnosticLocation,
+  ObjectFieldShape,
+  Rule,
+  SyntaxRef,
+  ValuePropagationPath,
 } from "@boringparts/verule";
+import { defineRule, resolveRetainedObjectFields } from "@boringparts/verule";
 import {
-  QueryRowProjectionFact,
-  type QueryRowNestedRelationInfo,
-  type QueryRowProjectionFactValue,
-  type QueryRowSubjectKind,
-} from "@tssae/adapters/drizzle";
-import {
-  ValidatorInputFieldsFact,
-  type ValidatorInputFieldsFactValue,
-  type ValidatorSubjectKind,
-} from "@tssae/adapters/zod";
+  drizzleQueryProjection,
+  drizzleZodValidator,
+  type QueryRowProjectionExtractor,
+  type QueryRowProjectionResult,
+  type QueryRowRelationInfo,
+} from "@tssae/drizzle";
+import type {
+  ValidatorFieldExtractor,
+  ValidatorInputFieldsResult,
+} from "@tssae/zod";
 
 export type RowProjectionValidatorRuleOptions = {
   readonly id?: string;
   readonly description?: string;
-  readonly drizzleProviderId?: string;
+  readonly queryProjection?: QueryRowProjectionExtractor;
+  readonly validator?: ValidatorFieldExtractor;
 };
 
-type QueryFact = FactResult<QueryRowSubjectKind, QueryRowProjectionFactValue>;
-type ValidatorFact = FactResult<
-  ValidatorSubjectKind,
-  ValidatorInputFieldsFactValue
->;
-
 type ValidatorCallTarget = {
-  readonly fact: ValidatorFact;
+  readonly validation: ValidatorInputFieldsResult;
   readonly location: DiagnosticLocation;
   readonly argRef: SyntaxRef;
 };
 
 type MatchedRowSource = {
-  readonly queryFact: QueryFact;
+  readonly queryProjection: QueryRowProjectionResult;
   readonly path: ValuePropagationPath;
   readonly relationName?: string;
-  readonly relationInfo?: QueryRowNestedRelationInfo;
+  readonly relationInfo?: QueryRowRelationInfo;
   readonly availableKeys: ReadonlySet<string>;
   readonly omittedKeys: ReadonlySet<string>;
   readonly hasDynamicColumns: boolean;
@@ -55,7 +48,7 @@ function compareCodepoint(a: string, b: string): number {
   return 0;
 }
 
-function relationToShape(rel: QueryRowNestedRelationInfo): ObjectFieldShape {
+function relationToShape(rel: QueryRowRelationInfo): ObjectFieldShape {
   const nested: Record<string, ObjectFieldShape> = {};
   for (const [key, child] of Object.entries(rel.relations)) {
     nested[key] = relationToShape(child);
@@ -67,9 +60,7 @@ function relationToShape(rel: QueryRowNestedRelationInfo): ObjectFieldShape {
   };
 }
 
-function projectionToShape(
-  value: QueryRowProjectionFactValue,
-): ObjectFieldShape {
+function projectionToShape(value: QueryRowProjectionResult): ObjectFieldShape {
   const nested: Record<string, ObjectFieldShape> = {};
   for (const [key, rel] of Object.entries(value.relations)) {
     nested[key] = relationToShape(rel);
@@ -82,10 +73,10 @@ function projectionToShape(
 }
 
 function resolveNestedRelation(
-  value: QueryRowProjectionFactValue,
+  value: QueryRowProjectionResult,
   sourcePath: readonly string[],
-): QueryRowNestedRelationInfo | undefined {
-  let current: QueryRowNestedRelationInfo | undefined;
+): QueryRowRelationInfo | undefined {
+  let current: QueryRowRelationInfo | undefined;
   let map = value.relations;
   for (const segment of sourcePath) {
     current = map[segment];
@@ -104,29 +95,25 @@ function resolveNestedRelation(
 export function createRowProjectionSatisfiesValidatorRule(
   options: RowProjectionValidatorRuleOptions = {},
 ): Rule {
+  const queryExtractor = options.queryProjection ?? drizzleQueryProjection;
+  const validatorExtractor = options.validator ?? drizzleZodValidator;
+
   return defineRule({
     id: options.id ?? "row-projection-satisfies-validator",
     description:
       options.description ??
       "Verify that statically projected database query rows satisfy all required input fields of downstream validators.",
     run: async (ctx) => {
-      const [queryFacts, validatorFacts] = await Promise.all([
-        ctx.facts(
-          QueryRowProjectionFact,
-          options.drizzleProviderId !== undefined
-            ? { providerId: options.drizzleProviderId }
-            : undefined,
-        ),
-        ctx.facts(ValidatorInputFieldsFact, {
-          condition: { scope: "calls" },
-        }),
+      const [queryProjections, validatorInputs] = await Promise.all([
+        queryExtractor.extractRowProjections(ctx),
+        validatorExtractor.extractInputFields(ctx, { scope: "calls" }),
       ]);
-      if (queryFacts.length === 0 || validatorFacts.length === 0) {
+      if (queryProjections.length === 0 || validatorInputs.length === 0) {
         return;
       }
 
       const queryRows = await ctx.syntaxOf(
-        queryFacts.map((fact) => fact.subject),
+        queryProjections.map((item) => item.target),
         { select: { location: true } },
       );
       const queryLocationByHandle = new Map<string, DiagnosticLocation>();
@@ -134,24 +121,24 @@ export function createRowProjectionSatisfiesValidatorRule(
         const location = row?.location;
         if (location) {
           queryLocationByHandle.set(
-            queryFacts[index]!.subject.handleId,
+            queryProjections[index]!.target.handleId,
             location,
           );
         }
       }
 
       const callRows = await ctx.syntaxOf(
-        validatorFacts.map((f) => f.subject),
+        validatorInputs.map((item) => item.target),
         { select: { location: true, arguments: true } },
       );
 
       const validatorCalls: ValidatorCallTarget[] = [];
-      for (const [index, fact] of validatorFacts.entries()) {
+      for (const [index, validation] of validatorInputs.entries()) {
         const row = callRows[index];
         const argRef = row?.arguments?.[0];
         if (!row?.location || !argRef) continue;
         validatorCalls.push({
-          fact,
+          validation,
           location: row.location,
           argRef,
         });
@@ -161,22 +148,22 @@ export function createRowProjectionSatisfiesValidatorRule(
       }
 
       const queryByHandle = new Map(
-        queryFacts.map((qf) => [
-          qf.subject.handleId,
-          { fact: qf, shape: projectionToShape(qf.value) },
+        queryProjections.map((qp) => [
+          qp.target.handleId,
+          { queryProjection: qp, shape: projectionToShape(qp) },
         ]),
       );
 
       const prop = await ctx.valuePropagation({
         propagation: "value",
         includeMemberAccess: true,
-        from: queryFacts.map((qf) => qf.subject),
+        from: queryProjections.map((qp) => qp.target),
         to: validatorCalls.map((c) => c.argRef),
       });
 
       const matchesByArg = new Map<string, MatchedRowSource[]>();
       for (const row of prop.results) {
-        if (!row.reachable) continue;
+        if (row.status !== "proved") continue;
         const queryEntry = queryByHandle.get(row.from.handleId);
         if (!queryEntry) continue;
 
@@ -187,11 +174,14 @@ export function createRowProjectionSatisfiesValidatorRule(
             path.sourcePath.length > 0 ? path.sourcePath.join(".") : undefined;
           const relationInfo =
             path.sourcePath.length > 0
-              ? resolveNestedRelation(queryEntry.fact.value, path.sourcePath)
+              ? resolveNestedRelation(
+                  queryEntry.queryProjection,
+                  path.sourcePath,
+                )
               : undefined;
           const list = matchesByArg.get(row.to.handleId) ?? [];
           list.push({
-            queryFact: queryEntry.fact,
+            queryProjection: queryEntry.queryProjection,
             path,
             ...(relationName !== undefined ? { relationName } : {}),
             ...(relationInfo !== undefined ? { relationInfo } : {}),
@@ -211,20 +201,20 @@ export function createRowProjectionSatisfiesValidatorRule(
             call.location,
             "exclude",
             () => ({
-              ...(call.fact.value.schemaName !== undefined
-                ? { schemaName: call.fact.value.schemaName }
+              ...(call.validation.schemaName !== undefined
+                ? { schemaName: call.validation.schemaName }
                 : {}),
-              ...(call.fact.value.validatorMethod !== undefined
-                ? { validatorMethod: call.fact.value.validatorMethod }
+              ...(call.validation.validatorMethod !== undefined
+                ? { validatorMethod: call.validation.validatorMethod }
                 : {}),
             }),
           );
           continue;
         }
 
-        const requiredFields = call.fact.value.requiredFields;
-        const schemaLabel = call.fact.value.schemaName ?? "schema";
-        const methodLabel = call.fact.value.validatorMethod ?? "parse";
+        const requiredFields = call.validation.requiredFields;
+        const schemaLabel = call.validation.schemaName ?? "schema";
+        const methodLabel = call.validation.validatorMethod ?? "parse";
 
         let reportedForCall = false;
         for (const source of sources) {
@@ -233,25 +223,31 @@ export function createRowProjectionSatisfiesValidatorRule(
             .toSorted(compareCodepoint);
 
           if (missingAll.length === 0) {
-            ctx.checkpoint(
-              "row-projection-satisfied",
-              call.location,
-              "pass",
-              () => ({
-                schemaName: schemaLabel,
-                validatorMethod: methodLabel,
-                ...(source.queryFact.value.tableName !== undefined
-                  ? { tableName: source.queryFact.value.tableName }
-                  : {}),
-                ...(source.relationName !== undefined
-                  ? { relationName: source.relationName }
-                  : {}),
-                requiredFields: [...requiredFields],
-                availableColumns: [...source.availableKeys].toSorted(
-                  compareCodepoint,
-                ),
-              }),
-            );
+            if (call.validation.gaps.length > 0) {
+              ctx.recordGaps(call.validation.gaps, {
+                relatedLocation: call.location,
+              });
+            } else {
+              ctx.checkpoint(
+                "row-projection-satisfied",
+                call.location,
+                "pass",
+                () => ({
+                  schemaName: schemaLabel,
+                  validatorMethod: methodLabel,
+                  ...(source.queryProjection.tableName !== undefined
+                    ? { tableName: source.queryProjection.tableName }
+                    : {}),
+                  ...(source.relationName !== undefined
+                    ? { relationName: source.relationName }
+                    : {}),
+                  requiredFields: [...requiredFields],
+                  availableColumns: [...source.availableKeys].toSorted(
+                    compareCodepoint,
+                  ),
+                }),
+              );
+            }
             continue;
           }
 
@@ -275,36 +271,45 @@ export function createRowProjectionSatisfiesValidatorRule(
 
           reportedForCall = true;
           const fieldEvidence = definiteMissing.flatMap(
-            (field) => call.fact.value.fields[field]?.evidence ?? [],
+            (field) => call.validation.fields[field]?.evidence ?? [],
           );
           const sourceBasis: readonly DiagnosticBasis[] = source.relationInfo
             ?.evidence
             ? source.relationInfo.evidence
-            : [source.queryFact];
+            : [source.queryProjection];
           const fieldClause =
             definiteMissing.length === 1
               ? `required validator field "${definiteMissing[0]!}"`
               : `required validator fields: ${definiteMissing.join(", ")}`;
           const sourceLabel = source.relationName
-            ? `${source.queryFact.value.tableName ?? "query"}.${source.relationName}`
-            : (source.queryFact.value.tableName ?? "query");
+            ? `${source.queryProjection.tableName ?? "query"}.${source.relationName}`
+            : (source.queryProjection.tableName ?? "query");
           const queryLocation = queryLocationByHandle.get(
-            source.queryFact.subject.handleId,
+            source.queryProjection.target.handleId,
           );
-          // Fact handles change across sessions; the source span remains stable and distinguishes query origins.
+          // Handles change across sessions; the source span remains stable and distinguishes query origins.
           const queryPosition = queryLocation
             ? `${queryLocation.file}:${queryLocation.start}:${queryLocation.end}`
             : "unknown-query-position";
 
           ctx.report({
             at: call.location,
-            findingKey: `${schemaLabel}.${methodLabel}:${queryPosition}:${source.queryFact.value.tableName ?? ""}:${source.relationName ?? ""}:${definiteMissing.join(",")}`,
+            findingKey: `${schemaLabel}.${methodLabel}:${queryPosition}:${source.queryProjection.tableName ?? ""}:${source.relationName ?? ""}:${definiteMissing.join(",")}`,
             message: `Query row from "${sourceLabel}" passed to ${schemaLabel}.${methodLabel}() is missing ${fieldClause}.`,
-            basis: [...sourceBasis, source.path, call.fact, ...fieldEvidence],
+            basis: [
+              ...sourceBasis,
+              source.path,
+              call.validation,
+              ...fieldEvidence,
+            ],
           });
         }
 
-        if (!reportedForCall && requiredFields.length === 0) {
+        if (
+          !reportedForCall &&
+          requiredFields.length === 0 &&
+          call.validation.gaps.length === 0
+        ) {
           ctx.checkpoint(
             "row-projection-satisfied",
             call.location,

@@ -86,7 +86,7 @@ export function createAdditionalInputRegistry(options: {
   };
 }
 
-/** Binds an `AdditionalInputRegistrar` to a fixed rule or adapter source tag. */
+/** Binds an `AdditionalInputRegistrar` to a fixed rule or summary source tag. */
 export function createScopedAdditionalInputRegistrar(
   registrar: AdditionalInputRegistrar,
   source: AdditionalInputSource,

@@ -6,11 +6,11 @@ import {
   locationsOverlap,
   type DiagnosticLocation,
   type EngineCallIoMetrics,
+  type EngineIrCacheMetrics,
+  type EngineLoweringMetrics,
+  type EngineSummaryLookupMetrics,
   type ExplainCleanupPath,
-  type ExplainLocalGap,
-  type ExplainProviderEvaluation,
   type Gap,
-  type NativeAdapterObservation,
   type ObserveLimit,
   type ObserveLimitInput,
   type ObserveMode,
@@ -201,6 +201,16 @@ export function normalizeTargetSpec(
   };
 }
 
+function validateNonNegativeInt(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new VeruleExecutionError(
+      "INVALID_CONFIG",
+      `Invalid ${label} ${String(value)}: must be a non-negative integer.`,
+    );
+  }
+  return value;
+}
+
 function parseNonNegativeInt(raw: string, source: string): number {
   if (!/^\d+$/u.test(raw)) {
     throw new VeruleExecutionError(
@@ -208,14 +218,7 @@ function parseNonNegativeInt(raw: string, source: string): number {
       `Invalid observe limit "${source}": expected a non-negative integer.`,
     );
   }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new VeruleExecutionError(
-      "INVALID_CONFIG",
-      `Invalid observe limit "${source}": must be a non-negative integer.`,
-    );
-  }
-  return value;
+  return validateNonNegativeInt(Number(raw), `observe limit "${source}"`);
 }
 
 /** Parses `--observe-limit` strings (e.g. `20`, `4096b`, `4kb`, `10items`) or SDK limit objects. */
@@ -223,36 +226,16 @@ export function parseObserveLimit(
   input: string | ObserveLimitInput,
 ): ObserveLimit {
   if (typeof input === "number") {
-    if (!Number.isSafeInteger(input) || input < 0) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Invalid observe limit ${String(input)}: must be a non-negative integer.`,
-      );
-    }
-    return { maxItems: input };
+    return { maxItems: validateNonNegativeInt(input, "observe limit") };
   }
   if (typeof input === "object") {
-    if (
-      input.maxItems !== undefined &&
-      (!Number.isSafeInteger(input.maxItems) || input.maxItems < 0)
-    ) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Invalid maxItems ${String(input.maxItems)}: must be a non-negative integer.`,
-      );
-    }
-    if (
-      input.maxBytes !== undefined &&
-      (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0)
-    ) {
-      throw new VeruleExecutionError(
-        "INVALID_CONFIG",
-        `Invalid maxBytes ${String(input.maxBytes)}: must be a non-negative integer.`,
-      );
-    }
     return {
-      ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
-      ...(input.maxBytes !== undefined ? { maxBytes: input.maxBytes } : {}),
+      ...(input.maxItems !== undefined
+        ? { maxItems: validateNonNegativeInt(input.maxItems, "maxItems") }
+        : {}),
+      ...(input.maxBytes !== undefined
+        ? { maxBytes: validateNonNegativeInt(input.maxBytes, "maxBytes") }
+        : {}),
     };
   }
 
@@ -286,6 +269,7 @@ export function parseObserveLimit(
   return { maxItems: parseNonNegativeInt(normalized, input) };
 }
 
+/** Normalizes Verule `observe` and `observeLimit` inputs into validated `tssae` observe options. */
 export function normalizeObserveConfig(
   observe: ObserveMode | ObserveOptions | undefined,
   observeLimit: ObserveLimitInput | undefined,
@@ -313,11 +297,6 @@ export class ObservationCollector {
   readonly mode: ObserveMode;
   readonly limit: ObserveLimit | undefined;
   readonly explainTarget: SourceTarget | undefined;
-  readonly #nativeAdapters: readonly NativeAdapterObservation[];
-  readonly #configuredAdapters: readonly {
-    readonly id: string;
-    readonly factTypeIds: readonly string[];
-  }[];
   readonly #startedAt: number;
   #configAndOpenMs: number;
   #engineQueryMs = 0;
@@ -337,11 +316,39 @@ export class ObservationCollector {
   #truncated = false;
   #droppedCount = 0;
   #usedDetailBytes = 0;
+  readonly #lowering: {
+    functionsLowered: number;
+    verticesCreated: number;
+    durationMs: number;
+  } = { functionsLowered: 0, verticesCreated: 0, durationMs: 0 };
+  readonly #irCache: {
+    functionHits: number;
+    functionMisses: number;
+    filesReused: number;
+    filesInvalidated: number;
+  } = {
+    functionHits: 0,
+    functionMisses: 0,
+    filesReused: 0,
+    filesInvalidated: 0,
+  };
+  readonly #summaryLookup: {
+    lookups: number;
+    hits: number;
+    misses: number;
+    hitsBySource: {
+      local: number;
+      package: number;
+      community: number;
+      builtin: number;
+    };
+  } = {
+    lookups: 0,
+    hits: 0,
+    misses: 0,
+    hitsBySource: { local: 0, package: 0, community: 0, builtin: 0 },
+  };
   readonly #providers = new Set<string>();
-  readonly #engineExtractions = new Map<
-    string,
-    { extractions: number; candidates: number }
-  >();
   readonly #details: ObservationDetailEntry[] = [];
   readonly #queriesByRule = new Map<string, QueryTraceRecord[]>();
   readonly #checkpointsByRule = new Map<string, CheckpointTraceRecord[]>();
@@ -353,24 +360,9 @@ export class ObservationCollector {
       readonly path: ExplainCleanupPath;
     }[]
   >();
-  readonly #gapsByRule = new Map<string, Gap[]>();
-  readonly #factGapsByRule = new Map<
+  readonly #gapsByRule = new Map<
     string,
-    {
-      readonly gap: Gap;
-      readonly subjectLocation?: DiagnosticLocation;
-    }[]
-  >();
-  readonly #localGapsByRule = new Map<
-    string,
-    {
-      readonly localGap: ExplainLocalGap;
-      readonly consumerLocation?: DiagnosticLocation;
-    }[]
-  >();
-  readonly #providerEvaluationsByRule = new Map<
-    string,
-    ExplainProviderEvaluation[]
+    { readonly gap: Gap; readonly relatedLocation?: DiagnosticLocation }[]
   >();
 
   constructor(options: {
@@ -378,18 +370,11 @@ export class ObservationCollector {
     readonly limit?: ObserveLimit;
     readonly explainTarget?: SourceTarget;
     readonly configAndOpenMs?: number;
-    readonly nativeAdapters?: readonly NativeAdapterObservation[];
-    readonly configuredAdapters?: readonly {
-      readonly id: string;
-      readonly factTypeIds: readonly string[];
-    }[];
   }) {
     this.mode = options.mode;
     this.limit = options.limit;
     this.explainTarget = options.explainTarget;
     this.#configAndOpenMs = options.configAndOpenMs ?? 0;
-    this.#nativeAdapters = options.nativeAdapters ?? [];
-    this.#configuredAdapters = options.configuredAdapters ?? [];
     this.#startedAt = this.isObserveEnabled() ? performance.now() : 0;
   }
 
@@ -468,24 +453,36 @@ export class ObservationCollector {
         }
       }
     }
+    if (engineMetrics.lowering) {
+      this.#lowering.functionsLowered +=
+        engineMetrics.lowering.functionsLowered;
+      this.#lowering.verticesCreated += engineMetrics.lowering.verticesCreated;
+      this.#lowering.durationMs += engineMetrics.lowering.durationMs;
+    }
+    if (engineMetrics.irCache) {
+      this.#irCache.functionHits += engineMetrics.irCache.functionHits;
+      this.#irCache.functionMisses += engineMetrics.irCache.functionMisses;
+      this.#irCache.filesReused += engineMetrics.irCache.filesReused;
+      this.#irCache.filesInvalidated += engineMetrics.irCache.filesInvalidated;
+    }
+    if (engineMetrics.summaryLookup) {
+      this.#summaryLookup.lookups += engineMetrics.summaryLookup.lookups;
+      this.#summaryLookup.hits += engineMetrics.summaryLookup.hits;
+      this.#summaryLookup.misses += engineMetrics.summaryLookup.misses;
+      this.#summaryLookup.hitsBySource.local +=
+        engineMetrics.summaryLookup.hitsBySource.local;
+      this.#summaryLookup.hitsBySource.package +=
+        engineMetrics.summaryLookup.hitsBySource.package;
+      this.#summaryLookup.hitsBySource.community +=
+        engineMetrics.summaryLookup.hitsBySource.community;
+      this.#summaryLookup.hitsBySource.builtin +=
+        engineMetrics.summaryLookup.hitsBySource.builtin;
+    }
     if (engineMetrics.truncated) {
       this.#truncated = true;
     }
     if (engineMetrics.droppedCount > 0) {
       this.#droppedCount += engineMetrics.droppedCount;
-    }
-    if (engineMetrics.providerExtractions) {
-      for (const [providerId, stats] of Object.entries(
-        engineMetrics.providerExtractions,
-      )) {
-        const current = this.#engineExtractions.get(providerId) ?? {
-          extractions: 0,
-          candidates: 0,
-        };
-        current.extractions += stats.extractions;
-        current.candidates += stats.candidates;
-        this.#engineExtractions.set(providerId, current);
-      }
     }
   }
 
@@ -659,60 +656,22 @@ export class ObservationCollector {
     this.#cleanupPathsByRule.set(params.ruleId, list);
   }
 
-  recordRuleGaps(ruleId: string, gaps: readonly Gap[]): void {
+  recordRuleGaps(
+    ruleId: string,
+    gaps: readonly Gap[],
+    relatedLocation?: DiagnosticLocation,
+  ): void {
     if (!this.isExplainEnabled() || gaps.length === 0) {
       return;
     }
     const list = this.#gapsByRule.get(ruleId) ?? [];
-    list.push(...gaps);
+    for (const gap of gaps) {
+      list.push({
+        gap,
+        ...(relatedLocation !== undefined ? { relatedLocation } : {}),
+      });
+    }
     this.#gapsByRule.set(ruleId, list);
-  }
-
-  recordFactExplain(params: {
-    readonly ruleId: string;
-    readonly subjectLocation?: DiagnosticLocation;
-    readonly gaps: readonly Gap[];
-    readonly localGaps: readonly ExplainLocalGap[];
-  }): void {
-    if (!this.isExplainEnabled()) {
-      return;
-    }
-    if (params.gaps.length > 0) {
-      const list = this.#factGapsByRule.get(params.ruleId) ?? [];
-      for (const gap of params.gaps) {
-        list.push({
-          gap,
-          ...(params.subjectLocation !== undefined
-            ? { subjectLocation: params.subjectLocation }
-            : {}),
-        });
-      }
-      this.#factGapsByRule.set(params.ruleId, list);
-    }
-    if (params.localGaps.length > 0) {
-      const list = this.#localGapsByRule.get(params.ruleId) ?? [];
-      for (const localGap of params.localGaps) {
-        list.push({
-          localGap,
-          ...(params.subjectLocation !== undefined
-            ? { consumerLocation: params.subjectLocation }
-            : {}),
-        });
-      }
-      this.#localGapsByRule.set(params.ruleId, list);
-    }
-  }
-
-  recordProviderEvaluation(params: {
-    readonly ruleId: string;
-    readonly evaluation: ExplainProviderEvaluation;
-  }): void {
-    if (!this.isExplainEnabled()) {
-      return;
-    }
-    const list = this.#providerEvaluationsByRule.get(params.ruleId) ?? [];
-    list.push(params.evaluation);
-    this.#providerEvaluationsByRule.set(params.ruleId, list);
   }
 
   #isItemLimitReached(): boolean {
@@ -754,6 +713,18 @@ export class ObservationCollector {
     }
     const mode = this.mode === "detail" ? "detail" : "summary";
     const totalMs = Math.max(0, performance.now() - this.#startedAt);
+    const lowering: EngineLoweringMetrics = {
+      functionsLowered: this.#lowering.functionsLowered,
+      verticesCreated: this.#lowering.verticesCreated,
+      durationMs: roundMs(this.#lowering.durationMs),
+    };
+    const irCache: EngineIrCacheMetrics = { ...this.#irCache };
+    const summaryLookup: EngineSummaryLookupMetrics = {
+      lookups: this.#summaryLookup.lookups,
+      hits: this.#summaryLookup.hits,
+      misses: this.#summaryLookup.misses,
+      hitsBySource: { ...this.#summaryLookup.hitsBySource },
+    };
     return {
       mode,
       phases: {
@@ -779,15 +750,9 @@ export class ObservationCollector {
       candidateCount: this.#candidateCount,
       checkpointCount: this.#checkpointCount,
       providers: [...this.#providers].toSorted(),
-      nativeAdapters: [...this.#nativeAdapters],
-      engineExtractions: Object.fromEntries(
-        [...this.#engineExtractions.entries()]
-          .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([k, v]) => [
-            k,
-            { extractions: v.extractions, candidates: v.candidates },
-          ]),
-      ),
+      lowering,
+      irCache,
+      summaryLookup,
       ...(this.limit !== undefined ? { limit: this.limit } : {}),
       truncated: this.#truncated,
       droppedCount: this.#droppedCount,
@@ -818,7 +783,10 @@ export class ObservationCollector {
     const checkpoints = this.#checkpointsByRule.get(params.ruleId) ?? [];
     const matchingCandidates =
       this.#matchingCandidatesByRule.get(params.ruleId) ?? [];
-    const inCandidates = matchingCandidates.length > 0;
+    const hasTargetCheckpoint = checkpoints.some(
+      (cp) => cp.at !== undefined && locationMatchesTarget(cp.at, target),
+    );
+    const inCandidates = matchingCandidates.length > 0 || hasTargetCheckpoint;
 
     const relevantCheckpoints: ExplainCheckpointTrace[] = checkpoints
       .filter(
@@ -932,70 +900,13 @@ export class ObservationCollector {
         relevantGaps.push(gap);
       }
     };
-    for (const gap of this.#gapsByRule.get(params.ruleId) ?? []) {
-      if (matchesLoc(gap.at) || (gap.at === undefined && inCandidates)) {
-        pushGap(gap);
-      }
-    }
-    for (const entry of this.#factGapsByRule.get(params.ruleId) ?? []) {
-      if (matchesLoc(entry.gap.at) || matchesLoc(entry.subjectLocation)) {
+    for (const entry of this.#gapsByRule.get(params.ruleId) ?? []) {
+      if (
+        matchesLoc(entry.gap.at) ||
+        matchesLoc(entry.relatedLocation) ||
+        (entry.gap.at === undefined && inCandidates)
+      ) {
         pushGap(entry.gap);
-      }
-    }
-
-    const relevantLocalGaps: ExplainLocalGap[] = [];
-    const seenLocalGapKeys = new Set<string>();
-    for (const entry of this.#localGapsByRule.get(params.ruleId) ?? []) {
-      const lg = entry.localGap;
-      if (
-        matchesLoc(lg.gap.at) ||
-        matchesLoc(lg.subjectLocation) ||
-        matchesLoc(entry.consumerLocation) ||
-        matchesLoc(lg.resolvedBy?.at)
-      ) {
-        const key = JSON.stringify(lg);
-        if (!seenLocalGapKeys.has(key)) {
-          seenLocalGapKeys.add(key);
-          relevantLocalGaps.push(lg);
-        }
-      }
-    }
-
-    const providerEvaluations: ExplainProviderEvaluation[] = [];
-    const seenEvalKeys = new Set<string>();
-    const activeProviderIds = new Set<string>();
-    const skippedProviderIds = new Set<string>();
-    for (const evalEntry of this.#providerEvaluationsByRule.get(
-      params.ruleId,
-    ) ?? []) {
-      if (evalEntry.status === "skipped") {
-        skippedProviderIds.add(evalEntry.providerId);
-      } else {
-        activeProviderIds.add(evalEntry.providerId);
-      }
-      const key = JSON.stringify([
-        evalEntry.providerId,
-        evalEntry.factTypeId ?? null,
-        evalEntry.status,
-        evalEntry.reason ?? null,
-        evalEntry.subjectLocation?.file ?? null,
-        evalEntry.subjectLocation?.start ?? null,
-      ]);
-      if (!seenEvalKeys.has(key)) {
-        seenEvalKeys.add(key);
-        providerEvaluations.push(evalEntry);
-      }
-    }
-    for (const adapter of this.#configuredAdapters) {
-      if (
-        !activeProviderIds.has(adapter.id) &&
-        !skippedProviderIds.has(adapter.id)
-      ) {
-        providerEvaluations.push({
-          providerId: adapter.id,
-          status: "skipped",
-          reason: "Not queried during rule execution.",
-        });
       }
     }
 
@@ -1051,8 +962,6 @@ export class ObservationCollector {
       queries: querySteps,
       checkpoints: relevantCheckpoints,
       gaps: relevantGaps,
-      localGaps: relevantLocalGaps,
-      providerEvaluations,
       providers,
       cleanupPaths,
     };

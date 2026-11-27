@@ -1,4 +1,4 @@
-import { z } from "./zod.js";
+import { z } from "zod";
 
 export const pageSlugSchema = z.object({
   slug: z.string(),

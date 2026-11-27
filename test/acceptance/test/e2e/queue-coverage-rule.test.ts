@@ -31,7 +31,7 @@ void test("verifies reentrantQueueFlagRule through installed CLI and SDK across 
   await withAcceptanceHost(
     {
       overlay: "queue",
-      additionalPackages: ["@verule/rules-reference", "@tssae/adapters"],
+      additionalPackages: ["@verule/rules-reference"],
       directPackages: ["@boringparts/verule", "@verule/rules-reference"],
     },
     async (host) => {
@@ -110,8 +110,7 @@ void test("verifies reentrantQueueFlagRule through installed CLI and SDK across 
       assert.ok(directDiag.message.includes("directly"));
       assert.ok(
         directDiag.evidence.some(
-          (ev) =>
-            ev.kind === "model" && ev.modelId === "acceptance-scheduler-queue",
+          (ev) => ev.kind === "note" && ev.message.includes("scheduler-queue"),
         ),
         JSON.stringify(directDiag.evidence),
       );
@@ -170,8 +169,7 @@ void test("verifies reentrantQueueFlagRule through installed CLI and SDK across 
       );
       assert.ok(
         indirectDiag.evidence.some(
-          (ev) =>
-            ev.kind === "model" && ev.modelId === "acceptance-scheduler-queue",
+          (ev) => ev.kind === "note" && ev.message.includes("scheduler-queue"),
         ),
       );
       assert.ok(

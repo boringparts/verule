@@ -4,11 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig, openSession, runCheck } from "@boringparts/verule";
-import {
-  definePoolResourceOwnershipModel,
-  poolResourceOwnershipModel,
-  poolResourceOwnershipRule,
-} from "@verule/rules-reference";
+import { poolResourceOwnershipRule } from "@verule/rules-reference";
 import {
   copyDirectory,
   type PreparedTempHost,
@@ -22,6 +18,117 @@ const fixturesRoot = join(
   "pool-ownership",
 );
 
+const DEFAULT_POOL_SUMMARIES = {
+  id: "pool-resource-ownership",
+  version: "1",
+  entries: [
+    {
+      match: { memberPath: ["Disposable", "prototype", "_register"] },
+      instances: {
+        completeness: "complete",
+        outcome: { kind: "forwards-instance", from: { argIndex: 0 } },
+      },
+      effects: {
+        completeness: "complete",
+        resourceOps: [
+          {
+            kind: "registers-into-container",
+            item: { argIndex: 0 },
+            container: "receiver",
+          },
+        ],
+      },
+    },
+    {
+      match: { memberPath: ["DisposableStore", "prototype", "add"] },
+      instances: {
+        completeness: "complete",
+        outcome: { kind: "forwards-instance", from: { argIndex: 0 } },
+      },
+      effects: {
+        completeness: "complete",
+        resourceOps: [
+          {
+            kind: "registers-into-container",
+            item: { argIndex: 0 },
+            container: "receiver",
+          },
+        ],
+      },
+    },
+    {
+      match: { memberPath: ["DisposableStore", "prototype", "delete"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [
+          {
+            kind: "detaches-from-container",
+            item: { argIndex: 0 },
+            container: "receiver",
+          },
+        ],
+      },
+    },
+    {
+      match: { memberPath: ["DisposableStore", "prototype", "deleteAndLeak"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [
+          {
+            kind: "detaches-from-container",
+            item: { argIndex: 0 },
+            container: "receiver",
+          },
+        ],
+      },
+    },
+    {
+      match: {
+        memberPath: ["IInstantiationService", "prototype", "createInstance"],
+      },
+      instances: {
+        completeness: "complete",
+        outcome: { kind: "allocates-fresh-instance" },
+      },
+    },
+    {
+      match: { memberPath: ["dispose"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [{ kind: "disposes-target", target: "receiver" }],
+      },
+    },
+    {
+      match: { memberPath: ["IDisposable", "prototype", "dispose"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [{ kind: "disposes-target", target: "receiver" }],
+      },
+    },
+    {
+      match: { memberPath: ["Disposable", "prototype", "dispose"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [{ kind: "disposes-target", target: "receiver" }],
+      },
+    },
+    {
+      match: { memberPath: ["DisposableStore", "prototype", "dispose"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [{ kind: "disposes-target", target: "receiver" }],
+      },
+    },
+    {
+      match: { memberPath: ["ResourceLabels", "prototype", "dispose"] },
+      effects: {
+        completeness: "complete",
+        resourceOps: [{ kind: "disposes-target", target: "receiver" }],
+      },
+    },
+  ],
+};
+
 function withTempFixtureProject<T>(
   fixtureDirs: readonly string[],
   fn: (host: PreparedTempHost) => Promise<T>,
@@ -33,6 +140,10 @@ function withTempFixtureProject<T>(
         for (const dir of fixtureDirs) {
           copyDirectory(join(fixturesRoot, dir), host.resolvePath(dir));
         }
+        host.writeText(
+          "tssae.summaries.json",
+          `${JSON.stringify(DEFAULT_POOL_SUMMARIES, null, 2)}\n`,
+        );
         host.writeText(
           "tsconfig.json",
           JSON.stringify(
@@ -65,7 +176,6 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [poolResourceOwnershipModel],
             rules: [poolResourceOwnershipRule],
           }),
         });
@@ -81,11 +191,7 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
         );
         for (const diag of report.diagnostics) {
           assert.ok(
-            diag.evidence.some(
-              (e) =>
-                e.kind === "model" &&
-                e.modelId === poolResourceOwnershipModel.id,
-            ),
+            diag.evidence.some((e) => e.kind === "note"),
             JSON.stringify(diag.evidence),
           );
           assert.ok(
@@ -110,7 +216,6 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
           cwd: host.rootDir,
           config: defineConfig({
             tsconfig: "tsconfig.json",
-            models: [poolResourceOwnershipModel],
             rules: [poolResourceOwnershipRule],
           }),
         });
@@ -140,7 +245,6 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
         cwd: host.rootDir,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          models: [poolResourceOwnershipModel],
           rules: [poolResourceOwnershipRule],
         }),
       });
@@ -160,7 +264,7 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
         assert.ok(
           diag.evidence.some(
             (e) =>
-              e.kind === "model" &&
+              e.kind === "summary" &&
               e.at?.file === "sibling-leak/sibling-leak.ts" &&
               e.at.line === 35,
           ),
@@ -193,31 +297,34 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
     });
   });
 
-  void it("surfaces missing-instance-model gaps for unmodeled external cleanup without crashing", async () => {
-    const customModel = definePoolResourceOwnershipModel({
-      id: "external-handle-model",
-      instanceBehaviors: [
-        {
-          kind: "allocates-fresh-instance",
-          match: { symbol: "allocateExternalHandle" },
-        },
-      ],
-      facts: {
-        childItemScopes: [
-          {
-            id: "resource-pool",
-            kind: "factory-delegation",
-            label: "ResourcePool item factory",
-            match: { symbol: "ResourcePool" },
-            callbackArgumentIndex: 0,
-          },
-        ],
-      },
-    });
-
+  void it("surfaces missing-behavior-summary gaps for unsummarized external cleanup without crashing", async () => {
     await withTempFixtureProject(["shared", "external-gap"], async (host) => {
+      host.writeText(
+        "tssae.summaries.json",
+        `${JSON.stringify(
+          {
+            ...DEFAULT_POOL_SUMMARIES,
+            entries: [
+              ...DEFAULT_POOL_SUMMARIES.entries,
+              {
+                match: {
+                  package: "@fixture/external-gap",
+                  memberPath: ["allocateExternalHandle"],
+                },
+                instances: {
+                  completeness: "complete",
+                  outcome: { kind: "allocates-fresh-instance" },
+                },
+              },
+            ],
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
       // Materialize the checked `.d.ts` fixture as an external package in `node_modules`
-      // so `isExternal === true` triggers `missing-instance-model`.
+      // so `isExternal === true` triggers `missing-behavior-summary`.
       writeSyntheticPackage(host.rootDir, "@fixture/external-gap", {
         packageJson: {
           name: "@fixture/external-gap",
@@ -239,7 +346,6 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
         cwd: host.rootDir,
         config: defineConfig({
           tsconfig: "tsconfig.json",
-          models: [customModel],
           rules: [poolResourceOwnershipRule],
         }),
       });
@@ -247,7 +353,7 @@ void describe("@verule/rules-reference poolResourceOwnershipRule", () => {
       assert.ok(
         report.gaps.some(
           (g) =>
-            g.kind === "missing-instance-model" &&
+            g.kind === "missing-behavior-summary" &&
             g.at?.file === "external-gap/missing-model.ts",
         ),
         JSON.stringify(report.gaps),

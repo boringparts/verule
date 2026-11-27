@@ -2,23 +2,19 @@ import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type AcceptanceHostOverlay =
-  | "drizzle-zod"
-  | "provider-session"
-  | "queue";
+export type AcceptanceHostOverlay = "drizzle-zod" | "queue";
 
 export type AcceptanceHostMaterialSource =
   | "app"
   | "data"
   | "drizzle-zod-app"
-  | "drizzle-zod-data"
-  | "provider-session-data";
+  | "drizzle-zod-data";
 
 const baseAppPackage = "@verule/acceptance-host-app";
 const baseDataPackage = "@verule/acceptance-host-data";
 
 const overlayPackages: Record<
-  Exclude<AcceptanceHostOverlay, "provider-session" | "queue">,
+  Exclude<AcceptanceHostOverlay, "queue">,
   { readonly app: string; readonly data: string }
 > = {
   "drizzle-zod": {
@@ -32,7 +28,6 @@ const materialPackages: Record<AcceptanceHostMaterialSource, string> = {
   data: baseDataPackage,
   "drizzle-zod-app": overlayPackages["drizzle-zod"].app,
   "drizzle-zod-data": overlayPackages["drizzle-zod"].data,
-  "provider-session-data": "@verule/acceptance-host-provider-session-data",
 };
 
 function resolveHostMaterial(
@@ -162,7 +157,7 @@ function copyNeutralHost(hostDir: string): {
 
 function copySpecializedHost(
   hostDir: string,
-  overlay: Exclude<AcceptanceHostOverlay, "provider-session" | "queue">,
+  overlay: Exclude<AcceptanceHostOverlay, "queue">,
 ): { readonly appDir: string; readonly dataDir: string } {
   const packages = overlayPackages[overlay];
   const appDir = join(hostDir, "packages/app");
@@ -191,51 +186,6 @@ function copySpecializedHost(
     hostDir,
     (relativePath) => relativePath.startsWith("host-root/"),
     "host-root/",
-  );
-  return { appDir, dataDir };
-}
-
-function copyProviderSessionHost(hostDir: string): {
-  readonly appDir: string;
-  readonly dataDir: string;
-} {
-  const { appDir, dataDir } = copyNeutralHost(hostDir);
-  const providerDataPackage = "@verule/acceptance-host-provider-session-data";
-  const providerAppPrefix = "provider-session-overlay/app/";
-  const providerHostRootPrefix = "provider-session-overlay/host-root/";
-  const overlayAppDir = join(appDir, "provider-session-overlay/app");
-
-  copyHostMaterialFiles(
-    baseAppPackage,
-    overlayAppDir,
-    (relativePath) =>
-      relativePath.startsWith(providerAppPrefix + "src/") ||
-      relativePath.startsWith(providerAppPrefix + "verule."),
-    providerAppPrefix,
-  );
-  copyHostMaterialFile(
-    baseAppPackage,
-    providerAppPrefix + "host-tsconfig.json",
-    join(appDir, "tsconfig.json"),
-  );
-  copyHostMaterialFile(
-    baseAppPackage,
-    providerAppPrefix + "host-package.json",
-    join(appDir, "package.json"),
-  );
-  copyHostMaterialFiles(providerDataPackage, dataDir, (relativePath) =>
-    relativePath.startsWith("src/"),
-  );
-  copyHostMaterialFile(
-    providerDataPackage,
-    "host-package.json",
-    join(dataDir, "package.json"),
-  );
-  copyHostMaterialFiles(
-    baseAppPackage,
-    hostDir,
-    (relativePath) => relativePath.startsWith(providerHostRootPrefix),
-    providerHostRootPrefix,
   );
   return { appDir, dataDir };
 }
@@ -317,7 +267,6 @@ export function copyAcceptanceHost(
 ): { readonly appDir: string; readonly dataDir: string } {
   mkdirSync(hostDir, { recursive: true });
   if (overlay === undefined) return copyNeutralHost(hostDir);
-  if (overlay === "provider-session") return copyProviderSessionHost(hostDir);
   if (overlay === "queue") return copyQueueHost(hostDir);
   return copySpecializedHost(hostDir, overlay);
 }

@@ -38,7 +38,7 @@ export default defineConfig({
           to: [deliveredRes.declaration],
         });
         const firstResult = prop.results[0];
-        if (firstResult?.reachable) {
+        if (firstResult?.status === "proved") {
           ctx.report({
             at: deliveredDecl.location,
             message: "Secret reached sink across TS -> JS -> TS",

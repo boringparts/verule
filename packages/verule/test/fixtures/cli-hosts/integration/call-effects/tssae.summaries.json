@@ -1,0 +1,45 @@
+{
+  "id": "cli-lifecycle-summary",
+  "entries": [
+    {
+      "match": {
+        "package": "@acme/lifecycle",
+        "memberPath": ["createResource"]
+      },
+      "instances": {
+        "completeness": "complete",
+        "outcome": { "kind": "allocates-fresh-instance" }
+      }
+    },
+    {
+      "match": {
+        "package": "@acme/lifecycle",
+        "memberPath": ["IDisposable", "prototype", "dispose"]
+      },
+      "effects": {
+        "completeness": "complete",
+        "resourceOps": [
+          {
+            "kind": "disposes-target",
+            "target": "receiver"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "package": "@acme/lifecycle",
+        "memberPath": ["onDidClose"]
+      },
+      "calls": {
+        "completeness": "complete",
+        "invokesCallbacks": [
+          {
+            "callbackArgIndex": 0,
+            "timing": "lifecycle-end"
+          }
+        ]
+      }
+    }
+  ]
+}

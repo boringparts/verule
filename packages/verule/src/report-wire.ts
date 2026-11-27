@@ -4,7 +4,6 @@ import {
   REPORT_SCHEMA_VERSION,
   type CheckReport,
   type ExplainResult,
-  type FactConflictDetails,
   type ObservationReport,
   type ProjectSummary,
 } from "./index.ts";
@@ -19,11 +18,19 @@ export const locationSchema = z.object({
   end: z.number().int().nonnegative(),
 });
 
+export const summaryDiscoverySourceSchema = z.enum([
+  "local",
+  "package",
+  "community",
+  "builtin",
+]);
+
 export const evidenceSchema = z.object({
-  kind: z.enum(["source", "type", "note", "model"]),
+  kind: z.enum(["source", "type", "note", "summary"]),
   message: z.string(),
   at: locationSchema.optional(),
-  modelId: z.string().optional(),
+  summaryId: z.string().optional(),
+  summarySource: summaryDiscoverySourceSchema.optional(),
   declaration: z.string().optional(),
 });
 
@@ -81,7 +88,7 @@ export const sourceFileOriginSchema = z.object({
 export const additionalInputSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("config") }),
   z.object({ kind: z.literal("rule"), id: z.string() }),
-  z.object({ kind: z.literal("adapter"), id: z.string() }),
+  z.object({ kind: z.literal("summary"), id: z.string() }),
 ]);
 
 export const additionalInputEntrySchema = z.object({
@@ -96,17 +103,10 @@ export const ruleIdentitySchema = z.object({
   digest: z.string(),
 });
 
-export const modelIdentitySchema = z.object({
-  id: z.string(),
-  version: z.string().optional(),
-  digest: z.string(),
-});
-
 export const reportIdentitySchema = z.object({
   snapshotDigest: z.string(),
   configDigest: z.string(),
   rules: z.array(ruleIdentitySchema),
-  models: z.array(modelIdentitySchema),
 });
 
 export const observationDetailEntrySchema = z.object({
@@ -122,6 +122,31 @@ export const observationDetailEntrySchema = z.object({
   at: locationSchema.optional(),
   summary: z.string(),
   detail: z.unknown().optional(),
+});
+
+export const engineLoweringMetricsSchema = z.object({
+  functionsLowered: z.number().int().nonnegative(),
+  verticesCreated: z.number().int().nonnegative(),
+  durationMs: z.number().nonnegative(),
+});
+
+export const engineIrCacheMetricsSchema = z.object({
+  functionHits: z.number().int().nonnegative(),
+  functionMisses: z.number().int().nonnegative(),
+  filesReused: z.number().int().nonnegative(),
+  filesInvalidated: z.number().int().nonnegative(),
+});
+
+export const engineSummaryLookupMetricsSchema = z.object({
+  lookups: z.number().int().nonnegative(),
+  hits: z.number().int().nonnegative(),
+  misses: z.number().int().nonnegative(),
+  hitsBySource: z.object({
+    local: z.number().int().nonnegative(),
+    package: z.number().int().nonnegative(),
+    community: z.number().int().nonnegative(),
+    builtin: z.number().int().nonnegative(),
+  }),
 });
 
 export const observationSchema = z.object({
@@ -149,13 +174,9 @@ export const observationSchema = z.object({
   candidateCount: z.number().int().nonnegative(),
   checkpointCount: z.number().int().nonnegative(),
   providers: z.array(z.string()),
-  nativeAdapters: z.array(
-    z.object({
-      packageName: z.string(),
-      providerId: z.string(),
-      status: z.enum(["loaded", "reused"]),
-    }),
-  ),
+  lowering: engineLoweringMetricsSchema,
+  irCache: engineIrCacheMetricsSchema,
+  summaryLookup: engineSummaryLookupMetricsSchema,
   limit: z
     .object({
       maxItems: z.number().int().nonnegative().optional(),
@@ -164,13 +185,6 @@ export const observationSchema = z.object({
     .optional(),
   truncated: z.boolean(),
   droppedCount: z.number().int().nonnegative(),
-  engineExtractions: z.record(
-    z.string(),
-    z.object({
-      extractions: z.number().int().nonnegative(),
-      candidates: z.number().int().nonnegative(),
-    }),
-  ),
   details: z.array(observationDetailEntrySchema).optional(),
 });
 
@@ -201,35 +215,9 @@ export const explainCleanupPathSchema = z.object({
   allocationLocation: locationSchema.optional(),
   scopeLocation: locationSchema,
   cleanupLocations: z.array(locationSchema),
-  modelIds: z.array(z.string()),
+  summaryIds: z.array(z.string()),
   summary: z.string(),
   evidence: z.array(evidenceSchema),
-});
-
-export const explainGapResolutionSchema = z.object({
-  providerId: z.string(),
-  operation: z.string(),
-  conclusion: z.string(),
-  at: locationSchema.optional(),
-});
-
-export const explainLocalGapSchema = z.object({
-  status: z.enum(["unresolved", "resolved_by_override"]),
-  factTypeId: z.string(),
-  providerId: z.string(),
-  field: z.string().optional(),
-  gap: gapSchema,
-  subjectLocation: locationSchema.optional(),
-  resolvedBy: explainGapResolutionSchema.optional(),
-  impact: z.string().optional(),
-});
-
-export const explainProviderEvaluationSchema = z.object({
-  providerId: z.string(),
-  factTypeId: z.string().optional(),
-  status: z.enum(["evaluated", "reused", "skipped"]),
-  reason: z.string().optional(),
-  subjectLocation: locationSchema.optional(),
 });
 
 export const explainResultSchema = z.object({
@@ -259,8 +247,6 @@ export const explainResultSchema = z.object({
   queries: z.array(explainQueryStepSchema),
   checkpoints: z.array(explainCheckpointTraceSchema),
   gaps: z.array(gapSchema),
-  localGaps: z.array(explainLocalGapSchema),
-  providerEvaluations: z.array(explainProviderEvaluationSchema),
   providers: z.array(z.string()),
   cleanupPaths: z.array(explainCleanupPathSchema),
   inlineIgnore: z
@@ -310,32 +296,10 @@ export type WireProjectSummary = z.infer<typeof projectSummarySchema>;
 export type WireObservation = z.infer<typeof observationSchema>;
 export type WireExplainResult = z.infer<typeof explainResultSchema>;
 
-export const factConflictPartySchema = z.object({
-  providerId: z.string(),
-  providers: z.array(z.string()),
-  conclusion: z.unknown(),
-  conclusionSummary: z.string(),
-  evidence: z.array(evidenceSchema),
-});
-
-export const factConflictDetailsSchema = z.object({
-  factTypeId: z.string(),
-  projectId: z.string(),
-  snapshotId: z.number().int().positive(),
-  subjectHandleId: z.string(),
-  subjectLocation: locationSchema.optional(),
-  condition: z.unknown().optional(),
-  reason: z.string(),
-  parties: z.tuple([factConflictPartySchema, factConflictPartySchema]),
-});
-
-export type WireFactConflictDetails = z.infer<typeof factConflictDetailsSchema>;
-
 export const checkFailureSchema = z.object({
   reportVersion: z.literal(REPORT_SCHEMA_VERSION),
   code: z.string(),
   message: z.string(),
-  conflict: factConflictDetailsSchema.optional(),
 });
 
 function toWireEvidence(
@@ -345,43 +309,11 @@ function toWireEvidence(
     kind: ev.kind,
     message: ev.message,
     ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
-    ...(ev.modelId !== undefined ? { modelId: ev.modelId } : {}),
+    ...(ev.summaryId !== undefined ? { summaryId: ev.summaryId } : {}),
+    ...(ev.summarySource !== undefined
+      ? { summarySource: ev.summarySource }
+      : {}),
     ...(ev.declaration !== undefined ? { declaration: ev.declaration } : {}),
-  };
-}
-
-export function toWireFactConflict(
-  conflict: FactConflictDetails,
-): WireFactConflictDetails {
-  const [party0, party1] = conflict.parties;
-  return {
-    factTypeId: conflict.factTypeId,
-    projectId: conflict.projectId,
-    snapshotId: conflict.snapshotId,
-    subjectHandleId: conflict.subjectHandleId,
-    ...(conflict.subjectLocation !== undefined
-      ? { subjectLocation: { ...conflict.subjectLocation } }
-      : {}),
-    ...(conflict.condition !== undefined
-      ? { condition: conflict.condition }
-      : {}),
-    reason: conflict.reason,
-    parties: [
-      {
-        providerId: party0.providerId,
-        providers: [...party0.providers],
-        conclusion: party0.conclusion,
-        conclusionSummary: party0.conclusionSummary,
-        evidence: party0.evidence.map(toWireEvidence),
-      },
-      {
-        providerId: party1.providerId,
-        providers: [...party1.providers],
-        conclusion: party1.conclusion,
-        conclusionSummary: party1.conclusionSummary,
-        evidence: party1.evidence.map(toWireEvidence),
-      },
-    ],
   };
 }
 
@@ -431,13 +363,14 @@ function toWireObservation(obs: ObservationReport): WireObservation {
     candidateCount: obs.candidateCount,
     checkpointCount: obs.checkpointCount,
     providers: [...obs.providers],
-    nativeAdapters: obs.nativeAdapters.map((adapter) => ({ ...adapter })),
-    engineExtractions: Object.fromEntries(
-      Object.entries(obs.engineExtractions).map(([providerId, stats]) => [
-        providerId,
-        { ...stats },
-      ]),
-    ),
+    lowering: { ...obs.lowering },
+    irCache: { ...obs.irCache },
+    summaryLookup: {
+      lookups: obs.summaryLookup.lookups,
+      hits: obs.summaryLookup.hits,
+      misses: obs.summaryLookup.misses,
+      hitsBySource: { ...obs.summaryLookup.hitsBySource },
+    },
     ...(obs.limit !== undefined
       ? {
           limit: {
@@ -547,42 +480,6 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
       message: g.message,
       ...(g.at !== undefined ? { at: { ...g.at } } : {}),
     })),
-    localGaps: exp.localGaps.map((lg) => ({
-      status: lg.status,
-      factTypeId: lg.factTypeId,
-      providerId: lg.providerId,
-      ...(lg.field !== undefined ? { field: lg.field } : {}),
-      gap: {
-        kind: lg.gap.kind,
-        message: lg.gap.message,
-        ...(lg.gap.at !== undefined ? { at: { ...lg.gap.at } } : {}),
-      },
-      ...(lg.subjectLocation !== undefined
-        ? { subjectLocation: { ...lg.subjectLocation } }
-        : {}),
-      ...(lg.resolvedBy !== undefined
-        ? {
-            resolvedBy: {
-              providerId: lg.resolvedBy.providerId,
-              operation: lg.resolvedBy.operation,
-              conclusion: lg.resolvedBy.conclusion,
-              ...(lg.resolvedBy.at !== undefined
-                ? { at: { ...lg.resolvedBy.at } }
-                : {}),
-            },
-          }
-        : {}),
-      ...(lg.impact !== undefined ? { impact: lg.impact } : {}),
-    })),
-    providerEvaluations: exp.providerEvaluations.map((pe) => ({
-      providerId: pe.providerId,
-      ...(pe.factTypeId !== undefined ? { factTypeId: pe.factTypeId } : {}),
-      status: pe.status,
-      ...(pe.reason !== undefined ? { reason: pe.reason } : {}),
-      ...(pe.subjectLocation !== undefined
-        ? { subjectLocation: { ...pe.subjectLocation } }
-        : {}),
-    })),
     providers: [...exp.providers],
     cleanupPaths: exp.cleanupPaths.map((cp) => ({
       instanceKey: cp.instanceKey,
@@ -591,17 +488,9 @@ function toWireExplainResult(exp: ExplainResult): WireExplainResult {
         : {}),
       scopeLocation: { ...cp.scopeLocation },
       cleanupLocations: cp.cleanupLocations.map((loc) => ({ ...loc })),
-      modelIds: [...cp.modelIds],
+      summaryIds: [...cp.summaryIds],
       summary: cp.summary,
-      evidence: cp.evidence.map((ev) => ({
-        kind: ev.kind,
-        message: ev.message,
-        ...(ev.at !== undefined ? { at: { ...ev.at } } : {}),
-        ...(ev.modelId !== undefined ? { modelId: ev.modelId } : {}),
-        ...(ev.declaration !== undefined
-          ? { declaration: ev.declaration }
-          : {}),
-      })),
+      evidence: cp.evidence.map(toWireEvidence),
     })),
     ...(exp.inlineIgnore !== undefined
       ? {
@@ -690,15 +579,7 @@ export function toWireReport(report: CheckReport): WireCheckReport {
       ruleId: diag.ruleId,
       at: { ...diag.at },
       message: diag.message,
-      evidence: diag.evidence.map((item) => ({
-        kind: item.kind,
-        message: item.message,
-        ...(item.at !== undefined ? { at: { ...item.at } } : {}),
-        ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
-        ...(item.declaration !== undefined
-          ? { declaration: item.declaration }
-          : {}),
-      })),
+      evidence: diag.evidence.map(toWireEvidence),
       projects: [...diag.projects],
     })),
     gaps: report.gaps.map((gap) => ({
@@ -712,11 +593,6 @@ export function toWireReport(report: CheckReport): WireCheckReport {
       rules: report.identity.rules.map((rule) => ({
         id: rule.id,
         digest: rule.digest,
-      })),
-      models: report.identity.models.map((model) => ({
-        id: model.id,
-        ...(model.version !== undefined ? { version: model.version } : {}),
-        digest: model.digest,
       })),
     },
     ...(report.inlineIgnores !== undefined
@@ -764,12 +640,12 @@ export function formatDiagnosticsLines(report: WireCheckReport): string[] {
       const locSuffix = item.at
         ? ` (${item.at.file}:${item.at.line}:${item.at.column})`
         : "";
-      const modelSuffix =
-        item.modelId !== undefined
-          ? ` [model=${item.modelId}${item.declaration !== undefined ? `:${item.declaration}` : ""}]`
+      const summarySuffix =
+        item.summaryId !== undefined
+          ? ` [summary=${item.summaryId}${item.summarySource !== undefined ? `@${item.summarySource}` : ""}${item.declaration !== undefined ? `:${item.declaration}` : ""}]`
           : "";
       lines.push(
-        `  evidence (${item.kind}): ${item.message}${modelSuffix}${locSuffix}`,
+        `  evidence (${item.kind}): ${item.message}${summarySuffix}${locSuffix}`,
       );
     }
   }

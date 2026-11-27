@@ -36,9 +36,7 @@ import {
 import type { PackageManager } from "./types.ts";
 import {
   type HostResolutionAudit,
-  type VerifiedNativeLibrary,
   verifyHostArtifactResolution,
-  verifyInstalledNativeLibrary,
 } from "./verify.ts";
 
 export type PrepareAcceptanceHostOptions = {
@@ -46,7 +44,6 @@ export type PrepareAcceptanceHostOptions = {
   readonly additionalPackages?: readonly string[];
   readonly extraArtifacts?: readonly PackedArtifact[];
   readonly directPackages?: readonly string[];
-  readonly verifyNativeAdapters?: readonly string[];
   readonly bundle?: PackedArtifactBundle;
   readonly packageManager?: PackageManager;
   readonly blockedPaths?: readonly string[];
@@ -96,7 +93,6 @@ export type PreparedAcceptanceHost = {
   readonly runtimeDir: string;
   readonly artifacts: readonly PackedArtifact[];
   readonly audit: HostResolutionAudit;
-  readonly nativeLibraries: Readonly<Record<string, VerifiedNativeLibrary>>;
   resolvePath(relativePath: string): string;
   readText(relativePath: string): string;
   writeText(relativePath: string, content: string): void;
@@ -119,33 +115,9 @@ export type PreparedAcceptanceHost = {
   loadConfig<TConfig = NormalizedVeruleConfig>(
     relativePath: string,
   ): Promise<TConfig>;
-  verifyNativeAdapter(
-    packageName: string,
-    options?: {
-      readonly expectedProviderId?: string;
-      readonly resolutionBaseDir?: string;
-    },
-  ): VerifiedNativeLibrary;
   dispose(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
 };
-
-function resolveArtifactForSpecifier(
-  artifactByName: ReadonlyMap<string, PackedArtifact>,
-  specifier: string,
-): PackedArtifact | undefined {
-  const exact = artifactByName.get(specifier);
-  if (exact !== undefined) {
-    return exact;
-  }
-  const parts = specifier.split("/");
-  const rootName = specifier.startsWith("@")
-    ? parts.length >= 2
-      ? `${parts[0]!}/${parts[1]!}`
-      : specifier
-    : parts[0]!;
-  return artifactByName.get(rootName);
-}
 
 /**
  * Prepares an isolated out-of-repo acceptance host with packed workspace
@@ -234,19 +206,6 @@ export async function prepareAcceptanceHost(
       return found;
     };
 
-    const nativeLibraries: Record<string, VerifiedNativeLibrary> = {};
-    for (const packageName of options.verifyNativeAdapters ?? []) {
-      const adapterArtifact = resolveArtifactForSpecifier(
-        artifactByName,
-        packageName,
-      );
-      nativeLibraries[packageName] = verifyInstalledNativeLibrary({
-        checkoutDir: hostDir,
-        packageName,
-        ...(adapterArtifact === undefined ? {} : { artifact: adapterArtifact }),
-      });
-    }
-
     let sessionCounter = 0;
     let disposePromise: Promise<void> | undefined;
 
@@ -298,7 +257,6 @@ export async function prepareAcceptanceHost(
       runtimeDir,
       artifacts,
       audit,
-      nativeLibraries,
       resolvePath,
       readText: hostFiles.readText,
       writeText: hostFiles.writeText,
@@ -403,25 +361,6 @@ export async function prepareAcceptanceHost(
           pathToFileURL(resolvePath(relativePath)).href
         )) as { readonly default: TConfig };
         return configModule.default;
-      },
-      verifyNativeAdapter(packageName, verifyOptions = {}) {
-        const adapterArtifact = resolveArtifactForSpecifier(
-          artifactByName,
-          packageName,
-        );
-        return verifyInstalledNativeLibrary({
-          checkoutDir: hostDir,
-          packageName,
-          ...(adapterArtifact === undefined
-            ? {}
-            : { artifact: adapterArtifact }),
-          ...(verifyOptions.expectedProviderId === undefined
-            ? {}
-            : { expectedProviderId: verifyOptions.expectedProviderId }),
-          ...(verifyOptions.resolutionBaseDir === undefined
-            ? {}
-            : { resolutionBaseDir: verifyOptions.resolutionBaseDir }),
-        });
       },
       dispose,
       [Symbol.asyncDispose]: dispose,

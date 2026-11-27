@@ -1,61 +1,67 @@
-import { defineConfig, defineModel, defineRule } from "@boringparts/verule";
+import { defineConfig, defineRule } from "@boringparts/verule";
 
 export default defineConfig({
-  projects: ["packages/esm/tsconfig.json", "packages/cjs/tsconfig.json"],
-  models: [
-    defineModel({
-      id: "dual-pkg-model",
-      instanceBehaviors: [
-        {
-          kind: "forwards-argument",
-          match: { module: "dual-pkg", member: "modeledFactory" },
-          argumentIndex: 0,
-        },
-      ],
-    }),
+  projects: [
+    "packages/esm/tsconfig.json",
+    "packages/cjs/tsconfig.json",
+    "packages/shared-pkg/tsconfig.json",
   ],
   rules: [
     defineRule({
-      id: "check-conditional-package-copy",
+      id: "check-first-party-package-copy",
       run: async (ctx) => {
         const varDecls = await ctx.findSyntax({
           kinds: ["VariableDeclaration"],
         });
         const calls = await ctx.findSyntax({ kinds: ["CallExpression"] });
         const tokDecl = varDecls.find((d) => d.text.startsWith("tok"));
+        const forwardedDecl = varDecls.find((d) =>
+          d.text.startsWith("forwarded ="),
+        );
         const outDecl = varDecls.find((d) => d.text.startsWith("out ="));
-        const modDecl = varDecls.find((d) => d.text.startsWith("mod ="));
-        const callSyn = calls.find((c) => c.text.includes("forwardOrClone("));
-        if (!tokDecl?.initializer || !outDecl?.initializer || !callSyn) return;
+        const untrackedDecl = varDecls.find((d) =>
+          d.text.startsWith("untracked ="),
+        );
+        const cloneCall = calls.find((c) => c.text.includes("cloneToken("));
+        const extCall = calls.find((c) => c.text.includes("opaqueExternal("));
+        if (!tokDecl?.initializer || !cloneCall) return;
 
-        const [callProj] = await ctx.resolveCalls([callSyn.ref], {
-          select: { returnType: true, signature: true },
-        });
-        if (!callProj?.returnType || !callProj.signature) {
-          throw new Error(
-            "Expected signature and return type from declaration",
-          );
+        const [cloneImpl] = await ctx.resolveImplementations([cloneCall.ref]);
+        if (cloneImpl?.status === "inconclusive") {
+          ctx.recordGaps(cloneImpl.gaps);
+        }
+        if (extCall) {
+          const [extImpl] = await ctx.resolveImplementations([extCall.ref]);
+          if (extImpl && extImpl.status !== "external") {
+            throw new Error(
+              `Expected opaqueExternal() to resolve as external, got ${extImpl.status}`,
+            );
+          }
+        }
+        if (untrackedDecl?.initializer) {
+          await ctx.resolveInstances([untrackedDecl.initializer]);
         }
 
-        const [implRes] = await ctx.resolveImplementations([callSyn.ref]);
-        const [tokInst, outInst] = await ctx.resolveInstances([
+        const targets = [
           tokDecl.initializer,
-          outDecl.initializer,
-        ]);
-        if (modDecl?.initializer) {
-          await ctx.resolveInstances([modDecl.initializer]);
-        }
+          ...(forwardedDecl?.initializer ? [forwardedDecl.initializer] : []),
+          ...(outDecl?.initializer ? [outDecl.initializer] : []),
+        ];
+        const resolved = await ctx.resolveInstances(targets);
+        const tokInst = resolved[0];
+        const outInst = outDecl?.initializer ? resolved.at(-1) : undefined;
 
         if (
-          tokInst?.instance &&
-          outInst?.instance &&
-          tokInst.instanceKey !== outInst.instanceKey
+          tokInst?.status === "proved" &&
+          outInst?.status === "proved" &&
+          tokInst.instanceKey !== outInst.instanceKey &&
+          outDecl
         ) {
           ctx.report({
             at: outDecl.location,
             message:
-              "Conditional export returned a cloned copy instead of the original instance.",
-            basis: implRes ? [outInst, implRes] : [outInst],
+              "First-party workspace package returned a cloned copy instead of forwarding the original instance.",
+            basis: cloneImpl ? [outInst, cloneImpl] : [outInst],
           });
         }
       },
