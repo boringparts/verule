@@ -35,7 +35,3 @@ updates:
       - dependency-name: mcr.microsoft.com/devcontainers/typescript-node
         update-types:
           - version-update:semver-major
-  - package-ecosystem: rust-toolchain
-    directory: /
-    schedule:
-      interval: weekly

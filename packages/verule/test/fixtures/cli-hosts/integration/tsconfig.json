@@ -1,7 +1,9 @@
 {
   "extends": "@verule/tooling-config/node.json",
   "compilerOptions": {
+    "lib": ["es2024"],
     "noEmit": true,
+    "skipLibCheck": true,
     "types": ["node"]
   },
   "include": ["*/*.ts", "*/*.mts", "*/variants/*.ts"]

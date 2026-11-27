@@ -33,14 +33,22 @@ export {
 export {
   resolveDefaultBlockedPaths,
   runBareVeruleInHost,
+  runNodeInHost,
   spawnBareVeruleInHost,
   type BareVeruleRunResult,
   type IsolationEvidence,
   type IsolationMode,
   type RunBareVeruleOptions,
+  type RunNodeInHostOptions,
   type SpawnBareVeruleOptions,
   type SpawnedBareVerule,
 } from "./isolation.ts";
+export {
+  ensureControlledNode24Runtime,
+  EXPECTED_ACCEPTANCE_NODE_VERSION,
+  prependBinDirsToEnvPath,
+  type ControlledNodeRuntime,
+} from "./node-runtime.ts";
 export {
   computeMedian,
   deduplicateTiers,

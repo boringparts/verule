@@ -24,7 +24,12 @@ import {
   type AcceptanceHostOverlay,
   copyAcceptanceHost,
 } from "./host-materials.ts";
-import { type BareVeruleRunResult, runBareVeruleInHost } from "./isolation.ts";
+import {
+  type BareVeruleRunResult,
+  runBareVeruleInHost,
+  runNodeInHost,
+} from "./isolation.ts";
+import { ensureControlledNode24Runtime } from "./node-runtime.ts";
 import {
   type AcceptanceSharedSession,
   type AcceptanceWatchSession,
@@ -106,6 +111,10 @@ export type PreparedAcceptanceHost = {
     args: readonly string[],
     options?: HostRunCliOptions,
   ): Promise<BareVeruleRunResult>;
+  runNode(
+    args: readonly string[],
+    options?: HostRunCliOptions,
+  ): Promise<BareVeruleRunResult>;
   check(options?: HostCheckOptions): Promise<CliCheckResult>;
   startWatch(options?: StartHostWatchOptions): Promise<AcceptanceWatchSession>;
   startSession(
@@ -142,6 +151,7 @@ export async function prepareAcceptanceHost(
   try {
     mkdirSync(storeDir, { recursive: true });
     mkdirSync(runtimeDir, { recursive: true });
+    const nodeRuntime = ensureControlledNode24Runtime(join(runtimeDir, "bin"));
     const { appDir, dataDir } = copyAcceptanceHost(hostDir, options.overlay);
 
     const bundle =
@@ -177,6 +187,7 @@ export async function prepareAcceptanceHost(
       artifacts,
       directPackages,
       storeDir,
+      runtimeBinDir: nodeRuntime.binDir,
       ...(options.env === undefined ? {} : { env: options.env }),
     });
     if (installation.status === "install-failed") {
@@ -225,16 +236,17 @@ export async function prepareAcceptanceHost(
     const hostFiles = createHostFileAccessors(hostDir);
     const resolvePath = hostFiles.resolvePath;
 
-    const runCli = (
+    const buildIsolatedRunOptions = (
       args: readonly string[],
       cliOptions: HostRunCliOptions = {},
-    ): Promise<BareVeruleRunResult> => {
+    ) => {
       const mergedEnv = cliOptions.env ?? options.env;
-      return runBareVeruleInHost({
+      return {
         checkoutDir: hostDir,
         args,
         isolated: cliOptions.isolated ?? true,
         pnpmStoreDir: storeDir,
+        runtimeBinDir: nodeRuntime.binDir,
         ...(options.blockedPaths === undefined
           ? {}
           : { blockedPaths: options.blockedPaths }),
@@ -245,8 +257,20 @@ export async function prepareAcceptanceHost(
           ? {}
           : { timeoutMs: cliOptions.timeoutMs }),
         ...(mergedEnv === undefined ? {} : { env: mergedEnv }),
-      });
+      };
     };
+
+    const runCli = (
+      args: readonly string[],
+      cliOptions: HostRunCliOptions = {},
+    ): Promise<BareVeruleRunResult> =>
+      runBareVeruleInHost(buildIsolatedRunOptions(args, cliOptions));
+
+    const runNode = (
+      args: readonly string[],
+      nodeOptions: HostRunCliOptions = {},
+    ): Promise<BareVeruleRunResult> =>
+      runNodeInHost(buildIsolatedRunOptions(args, nodeOptions));
 
     return {
       environmentDir,
@@ -263,6 +287,7 @@ export async function prepareAcceptanceHost(
       replaceText: hostFiles.replaceText,
       artifact: getArtifact,
       runCli,
+      runNode,
       async check(
         checkOptions: HostCheckOptions = {},
       ): Promise<CliCheckResult> {
@@ -303,6 +328,7 @@ export async function prepareAcceptanceHost(
             : { config: watchOptions.config }),
           isolated: watchOptions.isolated ?? true,
           pnpmStoreDir: storeDir,
+          runtimeBinDir: nodeRuntime.binDir,
           ...(options.blockedPaths === undefined
             ? {}
             : { blockedPaths: options.blockedPaths }),
@@ -332,6 +358,7 @@ export async function prepareAcceptanceHost(
             : { config: sessionOptions.config }),
           isolated: sessionOptions.isolated ?? true,
           pnpmStoreDir: storeDir,
+          runtimeBinDir: nodeRuntime.binDir,
           ...(options.blockedPaths === undefined
             ? {}
             : { blockedPaths: options.blockedPaths }),

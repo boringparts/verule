@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,6 +17,44 @@ const DEFAULT_CONFIG_CANDIDATES = [
 ] as const;
 
 let nextReloadGeneration = 1;
+let activeConfigImports = 0;
+let savedEmitWarning: typeof process.emitWarning | undefined;
+
+function isTypeStrippingWarning(
+  warning: string | Error,
+  typeOrOptions?: unknown,
+): boolean {
+  const warningName =
+    typeof typeOrOptions === "string"
+      ? typeOrOptions
+      : typeof typeOrOptions === "object" &&
+          typeOrOptions !== null &&
+          "type" in typeOrOptions
+        ? typeOrOptions.type
+        : typeof warning === "object"
+          ? warning.name
+          : undefined;
+  const warningMessage =
+    typeof warning === "string" ? warning : warning.message;
+  return (
+    warningName === "ExperimentalWarning" &&
+    warningMessage.includes("Type Stripping")
+  );
+}
+
+// Node 24.0.0 emits ExperimentalWarning to stderr on the first .ts import,
+// which corrupts structured `--output json` / `ndjson` CLI output.
+const suppressTypeStrippingWarning: typeof process.emitWarning = function (
+  warning,
+  ...args
+) {
+  if (isTypeStrippingWarning(warning, args[0])) {
+    return;
+  }
+  if (savedEmitWarning !== undefined) {
+    Reflect.apply(savedEmitWarning, process, [warning, ...args]);
+  }
+};
 
 export type LoadedProjectConfig = {
   readonly configPath: string;
@@ -75,34 +113,59 @@ export async function loadProjectConfigWithDependencies(
   const reloadMarker = `verule-reload=${reloadToken}`;
   const trackedFiles = new Set<string>([configPath]);
 
+  const preserveSymlinks = process.execArgv.includes("--preserve-symlinks");
   const hook = registerHooks({
     resolve(specifier, context, nextResolve) {
       const resolved = nextResolve(specifier, context);
+      if (!resolved.url.startsWith("file://")) {
+        return resolved;
+      }
+      const queryIndex = resolved.url.indexOf("?");
+      const rawUrl =
+        queryIndex === -1 ? resolved.url : resolved.url.slice(0, queryIndex);
+      const existingQuery =
+        queryIndex === -1 ? "" : resolved.url.slice(queryIndex);
+      let canonicalUrl = rawUrl;
+      if (!preserveSymlinks) {
+        try {
+          canonicalUrl = pathToFileURL(
+            realpathSync(fileURLToPath(rawUrl)),
+          ).href;
+        } catch {
+          // Keep original URL if the target cannot be realpathed.
+        }
+      }
       const fromReloadedGraph =
         typeof context.parentURL === "string" &&
         context.parentURL.includes(reloadMarker);
       if (
         fromReloadedGraph &&
         isLocalImportSpecifier(specifier) &&
-        resolved.url.startsWith("file://") &&
-        !resolved.url.includes("/node_modules/")
+        !canonicalUrl.includes("/node_modules/")
       ) {
-        const cleanUrl = resolved.url.split("?")[0]!;
         try {
-          trackedFiles.add(fileURLToPath(cleanUrl));
+          trackedFiles.add(fileURLToPath(canonicalUrl));
         } catch {
           // Ignore non-file paths.
         }
         return {
           ...resolved,
-          url: `${cleanUrl}?${reloadMarker}`,
+          url: `${canonicalUrl}?${reloadMarker}`,
         };
       }
-      return resolved;
+      const restoredUrl = `${canonicalUrl}${existingQuery}`;
+      return restoredUrl === resolved.url
+        ? resolved
+        : { ...resolved, url: restoredUrl };
     },
   });
 
   let loaded: unknown;
+  if (activeConfigImports === 0) {
+    savedEmitWarning = process.emitWarning.bind(process);
+    process.emitWarning = suppressTypeStrippingWarning;
+  }
+  activeConfigImports += 1;
   try {
     loaded = await import(`${configUrl}?${reloadMarker}`);
   } catch (err) {
@@ -113,6 +176,15 @@ export async function loadProjectConfigWithDependencies(
       { cause: err },
     );
   } finally {
+    activeConfigImports -= 1;
+    if (
+      activeConfigImports === 0 &&
+      savedEmitWarning !== undefined &&
+      process.emitWarning === suppressTypeStrippingWarning
+    ) {
+      process.emitWarning = savedEmitWarning;
+      savedEmitWarning = undefined;
+    }
     hook.deregister();
   }
 
