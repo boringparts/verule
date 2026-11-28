@@ -19,13 +19,18 @@ import {
   type PackedArtifact,
   runBareVeruleInHost,
   spawnBareVeruleInHost,
+  startSharedSessionProcess,
+  startWatchProcess,
   verifyHostArtifactResolution,
 } from "../../src/index.ts";
 
 function createFakeVeruleTarballs(
   dir: string,
   engineVersion = "0.0.0-test",
-  options: { readonly veruleEngines?: Readonly<Record<string, string>> } = {},
+  options: {
+    readonly veruleEngines?: Readonly<Record<string, string>>;
+    readonly cliScript?: string;
+  } = {},
 ): {
   readonly artifacts: readonly PackedArtifact[];
   readonly binarySha256: string;
@@ -112,6 +117,7 @@ function createFakeVeruleTarballs(
     {
       "dist/index.js": "export { getEngineVersion } from 'tssae';\n",
       "dist/cli.js":
+        options.cliScript ??
         "#!/usr/bin/env node\nimport { readFileSync, writeFileSync } from 'node:fs';\nimport { getEngineVersion } from '@boringparts/verule';\nif (process.env.VERULE_SHARED_PROBE) { writeFileSync(process.env.VERULE_SHARED_PROBE, 'shared-ok'); process.stdout.write(readFileSync(process.env.VERULE_SHARED_PROBE, 'utf8') + '\\n'); }\nif (process.argv.includes('--version')) { console.log('verule 0.1.0'); } else { console.log(`verule 0.1.0 (engine ${await getEngineVersion()})`); }\n",
     },
     ["dist/cli.js"],
@@ -454,3 +460,293 @@ void test("rejects packages requiring Node ^26.13.1 under strict engine checking
     assert.match(outcome.stderr, /24\.0\.0/u, outcome.stderr);
   }
 });
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPidFile(
+  filePath: string,
+  timeoutMs = 5_000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) {
+      const parsed = Number(readFileSync(filePath, "utf8").trim());
+      if (Number.isInteger(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for PID file: ${filePath}`);
+}
+
+void test(
+  "kills bwrap wrapper and SIGINT-ignoring grandchild processes across process groups on close and timeout",
+  { skip: process.platform !== "linux" },
+  async () => {
+    using fixture = mkdtempDisposableSync(
+      join(tmpdir(), "verule-bwrap-pg-cleanup-"),
+    );
+    const devRepoDir = join(fixture.path, "dev-repo");
+    const fakeBinDir = join(fixture.path, "fake-bin");
+    const bundleDir = join(fixture.path, "bundle");
+    const hostDir = join(fixture.path, "host");
+    const storeDir = join(fixture.path, "store");
+    for (const dir of [devRepoDir, fakeBinDir, bundleDir, hostDir, storeDir]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
+    writeFileSync(
+      join(hostDir, "package.json"),
+      '{"name":"bwrap-pg-host","private":true,"type":"module"}\n',
+    );
+
+    const pidLogPath = join(fixture.path, "bwrap-wrapper-pids.log");
+    const fakeBwrapPath = join(fakeBinDir, "bwrap");
+    writeFileSync(
+      fakeBwrapPath,
+      `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const separatorIndex = args.indexOf("--");
+if (separatorIndex === -1 || separatorIndex + 1 >= args.length) {
+  process.stderr.write("fake bwrap missing -- separator\\n");
+  process.exit(2);
+}
+const blockedTmpfsPaths = [];
+for (let index = 0; index < separatorIndex; index += 1) {
+  if (args[index] === "--tmpfs" && index + 1 < separatorIndex) {
+    blockedTmpfsPaths.push(args[index + 1]);
+  }
+}
+const command = args[separatorIndex + 1];
+const commandArgs = args.slice(separatorIndex + 2);
+if (
+  blockedTmpfsPaths.some((blocked) =>
+    commandArgs.some((arg) => arg === blocked || arg.startsWith(\`\${blocked}/\`)),
+  )
+) {
+  process.stderr.write("ENOENT: blocked by fake bwrap --tmpfs\\n");
+  process.exit(1);
+}
+
+const pidLog = process.env.VERULE_FAKE_BWRAP_PID_LOG;
+if (pidLog && command !== "true") {
+  appendFileSync(pidLog, \`\${String(process.pid)}\\n\`);
+}
+
+// Simulate bwrap not forwarding SIGINT/SIGTERM to child processes when signaled by PID alone.
+process.on("SIGINT", () => {});
+process.on("SIGTERM", () => {});
+
+const child = spawn(command, commandArgs, { stdio: "inherit" });
+child.on("exit", (code, signal) => {
+  if (signal !== null) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
+});
+`,
+    );
+    chmodSync(fakeBwrapPath, 0o755);
+
+    const hangWithGrandchildCli = `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+process.on("SIGINT", () => {});
+process.on("SIGTERM", () => {});
+
+const command = process.argv[2] ?? "check";
+writeFileSync(join(process.cwd(), \`\${command}.cli.pid\`), String(process.pid));
+
+spawn(
+  process.execPath,
+  [
+    "-e",
+    [
+      'const { writeFileSync } = require("node:fs");',
+      'process.on("SIGINT", () => {});',
+      'process.on("SIGTERM", () => {});',
+      'writeFileSync(process.argv[1], String(process.pid));',
+      'setInterval(() => {}, 1_000);',
+      'process.stdin.resume();',
+    ].join("\\n"),
+    join(process.cwd(), \`\${command}.grandchild.pid\`),
+  ],
+  { stdio: "inherit" },
+);
+
+if (command === "watch") {
+  process.stdout.write(JSON.stringify({ kind: "stream", command: "verule watch" }) + "\\n");
+}
+setInterval(() => {}, 1_000);
+process.stdin.resume();
+`;
+
+    const bundle = createFakeVeruleTarballs(bundleDir, "0.0.0-bwrap-pg", {
+      cliScript: hangWithGrandchildCli,
+    });
+    const installOutcome = await installArtifactPackages({
+      checkoutDir: hostDir,
+      packageManager: "pnpm",
+      artifacts: bundle.artifacts,
+      storeDir,
+    });
+    assert.equal(installOutcome.status, "ready");
+
+    const originalPath = process.env.PATH;
+    const originalPidLog = process.env.VERULE_FAKE_BWRAP_PID_LOG;
+    const trackedPids = new Set<number>();
+
+    const trackFromFile = (pidFile: string): number => {
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      if (Number.isInteger(pid) && pid > 0) {
+        trackedPids.add(pid);
+      }
+      return pid;
+    };
+
+    try {
+      process.env.PATH = `${fakeBinDir}${delimiter}${originalPath ?? ""}`;
+      process.env.VERULE_FAKE_BWRAP_PID_LOG = pidLogPath;
+
+      const watch = await startWatchProcess({
+        checkoutDir: hostDir,
+        isolated: true,
+        blockedPaths: [devRepoDir],
+        pnpmStoreDir: storeDir,
+      });
+      assert.equal(watch.isolation?.mode, "bwrap");
+      const watchCliPid = await waitForPidFile(join(hostDir, "watch.cli.pid"));
+      const watchGrandchildPid = await waitForPidFile(
+        join(hostDir, "watch.grandchild.pid"),
+      );
+      trackedPids.add(watchCliPid);
+      trackedPids.add(watchGrandchildPid);
+
+      await assert.rejects(
+        () => watch.nextReport({ timeoutMs: 150 }),
+        /Timed out waiting for watch report/u,
+      );
+
+      const closeStartedAt = performance.now();
+      await watch.close({ timeoutMs: 200 });
+      const closeDurationMs = performance.now() - closeStartedAt;
+
+      const wrapperPidsAfterWatch = readFileSync(pidLogPath, "utf8")
+        .trim()
+        .split("\n")
+        .map(Number)
+        .filter((pid) => Number.isInteger(pid) && pid > 0);
+      for (const pid of wrapperPidsAfterWatch) {
+        trackedPids.add(pid);
+      }
+
+      assert.ok(
+        closeDurationMs < 1_500,
+        `Expected watch.close() to release process group promptly, took ${String(Math.round(closeDurationMs))}ms`,
+      );
+      for (const wrapperPid of wrapperPidsAfterWatch) {
+        assert.equal(
+          isProcessAlive(wrapperPid),
+          false,
+          `Expected fake bwrap wrapper (${String(wrapperPid)}) to be dead`,
+        );
+      }
+      assert.equal(
+        isProcessAlive(watchCliPid),
+        false,
+        `Expected watch CLI (${String(watchCliPid)}) to be dead`,
+      );
+      assert.equal(
+        isProcessAlive(watchGrandchildPid),
+        false,
+        `Expected watch grandchild (${String(watchGrandchildPid)}) to be dead`,
+      );
+
+      await assert.rejects(
+        () =>
+          startSharedSessionProcess({
+            checkoutDir: hostDir,
+            socketPath: join(fixture.path, "hang-session.sock"),
+            isolated: true,
+            blockedPaths: [devRepoDir],
+            pnpmStoreDir: storeDir,
+            timeoutMs: 500,
+          }),
+        /Timed out waiting for shared session ready/u,
+      );
+      const sessionCliPid = trackFromFile(join(hostDir, "session.cli.pid"));
+      const sessionGrandchildPid = trackFromFile(
+        join(hostDir, "session.grandchild.pid"),
+      );
+      assert.equal(
+        isProcessAlive(sessionCliPid),
+        false,
+        `Expected session CLI (${String(sessionCliPid)}) to be dead`,
+      );
+      assert.equal(
+        isProcessAlive(sessionGrandchildPid),
+        false,
+        `Expected session grandchild (${String(sessionGrandchildPid)}) to be dead`,
+      );
+
+      const runResult = await runBareVeruleInHost({
+        checkoutDir: hostDir,
+        args: ["check"],
+        isolated: true,
+        blockedPaths: [devRepoDir],
+        pnpmStoreDir: storeDir,
+        timeoutMs: 500,
+      });
+      assert.equal(runResult.isolation?.mode, "bwrap");
+      assert.equal(runResult.timedOut, true);
+      const checkCliPid = trackFromFile(join(hostDir, "check.cli.pid"));
+      const checkGrandchildPid = trackFromFile(
+        join(hostDir, "check.grandchild.pid"),
+      );
+      assert.equal(
+        isProcessAlive(checkCliPid),
+        false,
+        `Expected check CLI (${String(checkCliPid)}) to be dead`,
+      );
+      assert.equal(
+        isProcessAlive(checkGrandchildPid),
+        false,
+        `Expected check grandchild (${String(checkGrandchildPid)}) to be dead`,
+      );
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+      if (originalPidLog === undefined) {
+        delete process.env.VERULE_FAKE_BWRAP_PID_LOG;
+      } else {
+        process.env.VERULE_FAKE_BWRAP_PID_LOG = originalPidLog;
+      }
+      for (const pid of trackedPids) {
+        if (isProcessAlive(pid)) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Ignore cleanup failure for already-exited processes.
+          }
+        }
+      }
+    }
+  },
+);
