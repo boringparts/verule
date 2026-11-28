@@ -1,9 +1,4 @@
-import {
-  type ChildProcess,
-  execFile,
-  execFileSync,
-  spawn,
-} from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -91,6 +86,42 @@ function supportsAllowNetFlag(nodeExecutablePath: string): boolean {
   return supported;
 }
 
+/**
+ * Sends `signal` to the spawned child's process group on POSIX platforms so
+ * wrapper processes (`bwrap`, `.bin` shims) and their descendants terminate
+ * together, falling back to `child.kill(signal)` on Windows or when the group
+ * is unavailable.
+ */
+export function signalChildProcessGroup(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+): void {
+  if (process.platform !== "win32" && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to signaling the direct child if the process group is unavailable.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Ignore if the child already exited.
+  }
+}
+
+/**
+ * Destroys piped stdio handles and unrefs the child so any orphaned
+ * descriptor cannot keep the parent test-runner event loop alive.
+ */
+export function releaseChildProcessHandles(child: ChildProcess): void {
+  child.stdin?.destroy();
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
 function runAsyncExec(
   command: string,
   args: readonly string[],
@@ -109,41 +140,140 @@ function runAsyncExec(
 }> {
   return new Promise((resolveResult) => {
     const startedAt = performance.now();
-    execFile(
-      command,
-      args,
-      {
-        cwd: options.cwd,
-        env: options.env,
-        encoding: "utf8",
-        timeout: options.timeoutMs,
-        maxBuffer: maxOutputBytes,
-      },
-      (error, stdout, stderr) => {
-        const durationMs = performance.now() - startedAt;
-        if (error === null) {
-          resolveResult({
-            status: 0,
-            stdout,
-            stderr,
-            durationMs,
-            timedOut: false,
-            signal: null,
-          });
-          return;
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let maxBufferExceeded = false;
+    let settled = false;
+    let killEscalationTimer: NodeJS.Timeout | undefined;
+    let exitGraceTimer: NodeJS.Timeout | undefined;
+
+    const finish = (
+      status: number,
+      signal: NodeJS.Signals | null,
+      fallbackErrorMessage?: string,
+    ): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (killEscalationTimer !== undefined) {
+        clearTimeout(killEscalationTimer);
+        killEscalationTimer = undefined;
+      }
+      if (exitGraceTimer !== undefined) {
+        clearTimeout(exitGraceTimer);
+        exitGraceTimer = undefined;
+      }
+      releaseChildProcessHandles(child);
+
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
+      const stderr =
+        rawStderr.length > 0 ? rawStderr : (fallbackErrorMessage ?? "");
+      resolveResult({
+        status,
+        stdout,
+        stderr,
+        durationMs: performance.now() - startedAt,
+        timedOut,
+        signal,
+      });
+    };
+
+    const terminateProcessGroup = (): void => {
+      signalChildProcessGroup(child, "SIGTERM");
+      if (killEscalationTimer === undefined) {
+        killEscalationTimer = setTimeout(() => {
+          killEscalationTimer = undefined;
+          signalChildProcessGroup(child, "SIGKILL");
+        }, 500);
+        killEscalationTimer.unref();
+      }
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      terminateProcessGroup();
+    }, options.timeoutMs);
+    timeoutTimer.unref();
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxOutputBytes) {
+        maxBufferExceeded = true;
+        terminateProcessGroup();
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > maxOutputBytes) {
+        maxBufferExceeded = true;
+        terminateProcessGroup();
+        return;
+      }
+      stderrChunks.push(chunk);
+    });
+
+    child.once("error", (error) => {
+      finish(1, null, error.message);
+    });
+
+    child.once("exit", (code, signal) => {
+      // Guard against an orphaned descendant keeping stdio pipes open after child exit.
+      exitGraceTimer = setTimeout(() => {
+        exitGraceTimer = undefined;
+        if (timedOut || maxBufferExceeded) {
+          signalChildProcessGroup(child, "SIGKILL");
         }
-        const timedOut =
-          error.killed === true && !error.message.includes("maxBuffer");
-        resolveResult({
-          status: typeof error.code === "number" ? error.code : 1,
-          stdout,
-          stderr: stderr.length > 0 ? stderr : error.message,
-          durationMs,
-          timedOut,
-          signal: error.signal ?? null,
-        });
-      },
-    );
+        const limitFailed = timedOut || maxBufferExceeded;
+        const status =
+          !limitFailed && signal === null && code === 0
+            ? 0
+            : code !== null && code !== 0
+              ? code
+              : 1;
+        finish(
+          status,
+          signal,
+          timedOut
+            ? `Command timed out after ${String(options.timeoutMs)}ms`
+            : maxBufferExceeded
+              ? `Command output exceeded maxBuffer (${String(maxOutputBytes)} bytes)`
+              : undefined,
+        );
+      }, 100);
+      exitGraceTimer.unref();
+    });
+
+    child.once("close", (code, signal) => {
+      const limitFailed = timedOut || maxBufferExceeded;
+      const status =
+        !limitFailed && signal === null && code === 0
+          ? 0
+          : code !== null && code !== 0
+            ? code
+            : 1;
+      const fallbackMessage = timedOut
+        ? `Command timed out after ${String(options.timeoutMs)}ms`
+        : maxBufferExceeded
+          ? `Command output exceeded maxBuffer (${String(maxOutputBytes)} bytes)`
+          : undefined;
+      finish(status, signal, fallbackMessage);
+    });
   });
 }
 
@@ -567,6 +697,9 @@ export async function spawnBareVeruleInHost(
       cwd: prepared.cwd,
       env: prepared.env,
       stdio: ["pipe", "pipe", "pipe"],
+      // Place the spawned child in its own process group on POSIX so cleanup signals
+      // reach bwrap, .bin shims, and grandchild Node/engine processes together.
+      detached: process.platform !== "win32",
     });
   } catch (error) {
     prepared.cleanup();

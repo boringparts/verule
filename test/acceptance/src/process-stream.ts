@@ -5,7 +5,9 @@ import type { CheckReport, ProjectSummary } from "@boringparts/verule";
 
 import {
   type IsolationEvidence,
+  releaseChildProcessHandles,
   runBareVeruleInHost,
+  signalChildProcessGroup,
   spawnBareVeruleInHost,
   type SpawnedBareVerule,
 } from "./isolation.ts";
@@ -383,6 +385,9 @@ class NdjsonProcessController {
         } catch {
           // Ignore closed stdin pipe.
         }
+        // Only signal the direct child for graceful shutdown so verule can close
+        // tssae-engine cleanly instead of killing the engine socket mid-shutdown;
+        // escalate to process-group SIGKILL if the group does not exit in time.
         try {
           child.kill("SIGINT");
         } catch {
@@ -391,11 +396,16 @@ class NdjsonProcessController {
 
         const exitedCleanly = await this.#waitForExit(timeoutMs);
         if (!exitedCleanly) {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Ignore if child already exited.
-          }
+          signalChildProcessGroup(child, "SIGKILL");
+          await this.#waitForExit(2_000);
+        }
+      } else if (
+        this.#spawnError === undefined &&
+        (!this.#stdoutEnded || !this.#stderrEnded)
+      ) {
+        const drained = await this.#waitForExit(200);
+        if (!drained) {
+          signalChildProcessGroup(child, "SIGKILL");
           await this.#waitForExit(2_000);
         }
       }
@@ -404,6 +414,7 @@ class NdjsonProcessController {
         clearTimeout(this.#exitGraceTimer);
         this.#exitGraceTimer = undefined;
       }
+      releaseChildProcessHandles(child);
       this.#spawned.cleanup();
       this.#onCleanup?.();
     }
