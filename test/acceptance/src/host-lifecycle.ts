@@ -124,7 +124,9 @@ export type PreparedAcceptanceHost = {
   startSession(
     options?: StartHostSessionOptions,
   ): Promise<AcceptanceSharedSession>;
+  /** Imports `@boringparts/verule` in the parent test-runner process; use `runNode()` to verify isolated Node `24.0.0` host execution. */
   loadSdk(): Promise<typeof import("@boringparts/verule")>;
+  /** Imports a host config in the parent test-runner process; use `runNode()` to verify isolated Node `24.0.0` host execution. */
   loadConfig<TConfig = NormalizedVeruleConfig>(
     relativePath: string,
   ): Promise<TConfig>;
