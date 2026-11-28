@@ -9,38 +9,61 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const EXPECTED_ACCEPTANCE_NODE_VERSION = "24.0.0";
 
-export type ControlledNodeRuntime = {
+type ControlledNodeRuntime = {
   readonly binDir: string;
   readonly executablePath: string;
   readonly version: string;
 };
 
 const nodeExecutableName = process.platform === "win32" ? "node.exe" : "node";
-const acceptanceRequire = createRequire(import.meta.url);
+const moduleDir = dirname(fileURLToPath(import.meta.url));
 const verifiedExecutables = new Map<string, string>();
+let cachedWorkspaceNode24Executable: string | undefined;
 let sharedFallbackBinDir: string | undefined;
 
 function resolveWorkspaceNode24Executable(): string {
-  const veruleEntry = acceptanceRequire.resolve("@boringparts/verule");
-  const verulePackageDir = dirname(dirname(veruleEntry));
-  const candidateBin = join(
-    verulePackageDir,
-    "node_modules",
-    ".bin",
-    nodeExecutableName,
+  if (
+    cachedWorkspaceNode24Executable !== undefined &&
+    existsSync(cachedWorkspaceNode24Executable)
+  ) {
+    return cachedWorkspaceNode24Executable;
+  }
+  const stdout = execFileSync(
+    "pnpm",
+    [
+      "--filter",
+      "@boringparts/verule",
+      "exec",
+      "node",
+      "-p",
+      "process.execPath",
+    ],
+    {
+      cwd: moduleDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
-  if (!existsSync(candidateBin)) {
+  const candidateBin = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .at(-1);
+  if (candidateBin === undefined || !existsSync(candidateBin)) {
     throw new Error(
-      `Missing workspace Node ${EXPECTED_ACCEPTANCE_NODE_VERSION} binary at ${candidateBin}`,
+      `Missing workspace Node ${EXPECTED_ACCEPTANCE_NODE_VERSION} binary from pnpm exec output: ${stdout.trim()}`,
     );
   }
-  return realpathSync(candidateBin);
+  const resolved = realpathSync(candidateBin);
+  verifyNode24Version(resolved);
+  cachedWorkspaceNode24Executable = resolved;
+  return resolved;
 }
 
 function getSharedFallbackBinDir(): string {

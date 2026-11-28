@@ -111,6 +111,10 @@ export type PreparedAcceptanceHost = {
     args: readonly string[],
     options?: HostRunCliOptions,
   ): Promise<BareVeruleRunResult>;
+  /**
+   * Executes Node in the isolated host with the controlled Node `24.0.0`
+   * runtime rather than the parent test-runner executable.
+   */
   runNode(
     args: readonly string[],
     options?: HostRunCliOptions,
@@ -129,9 +133,10 @@ export type PreparedAcceptanceHost = {
 };
 
 /**
- * Prepares an isolated out-of-repo acceptance host with packed workspace
- * artifacts installed and verified, guaranteeing LIFO resource reclamation on
- * any mid-preparation failure or subsequent `dispose()`.
+ * Prepares an isolated out-of-repo acceptance host on the controlled Node
+ * `24.0.0` runtime with packed workspace artifacts installed under strict
+ * engine checks (`engineStrict: true` by default), guaranteeing LIFO resource
+ * reclamation on any mid-preparation failure or subsequent `dispose()`.
  */
 export async function prepareAcceptanceHost(
   options: PrepareAcceptanceHostOptions = {},

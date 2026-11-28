@@ -1,6 +1,11 @@
 {
   "name": "@boringparts/verule",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boringparts/verule.git",
+    "directory": "packages/verule"
+  },
   "bin": {
     "verule": "./dist/cli.js"
   },
@@ -38,7 +43,7 @@
   },
   "dependencies": {
     "@boringparts/cli-contract": "catalog:",
-    "tssae": "0.1.0",
+    "tssae": "^0.2.0",
     "zod": "catalog:"
   },
   "devDependencies": {

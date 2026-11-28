@@ -14,10 +14,7 @@ minimumReleaseAgeExclude:
   - "@boringparts/*"
 allowBuilds:
   esbuild: true
-overrides:
-  tssae: "file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-0.1.0.tgz"
-  "@tssae/zod": "file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-zod-0.1.0.tgz"
-  "@tssae/drizzle": "file:/workspaces/verule/.scratch/ir-migration/packed-tssae/tssae-drizzle-0.1.0.tgz"
+overrides: {}
 packages:
   - apps/*
   - packages/*
@@ -28,8 +25,8 @@ packages:
   - test/acceptance-host/overlays/*/data
 catalog:
   "@changesets/cli": 3.0.3
-  "@tssae/drizzle": "0.1.0"
-  "@tssae/zod": "0.1.0"
+  "@tssae/drizzle": "^0.1.0"
+  "@tssae/zod": "^0.1.0"
   "@types/node": ^26.0.0
   "@verule/rules-reference": "workspace:*"
   "@boringparts/verule": "workspace:*"

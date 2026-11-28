@@ -33,7 +33,9 @@ export type InstallArtifactPackagesOptions = {
   readonly artifacts: readonly PackedArtifact[];
   readonly directPackages?: readonly string[];
   readonly storeDir?: string;
+  /** Enforces `engines` compatibility during installation; defaults to `true`. */
   readonly engineStrict?: boolean;
+  /** Out-of-repo `bin` directory providing the controlled Node `24.0.0` executable. */
   readonly runtimeBinDir?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
 };
@@ -89,7 +91,9 @@ function runAsyncCommand(
 
 /**
  * Installs direct Verule packages (and transitive unscoped `tssae`) from one
- * local artifact batch into an existing workspace or repository.
+ * local artifact batch into an existing workspace or repository under the
+ * controlled Node `24.0.0` runtime with `engineStrict` enabled by default
+ * (`true`).
  */
 export async function installArtifactPackages(
   options: InstallArtifactPackagesOptions,
