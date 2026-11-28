@@ -27,7 +27,7 @@ catalog:
   "@changesets/cli": 3.0.3
   "@tssae/drizzle": "^0.1.0"
   "@tssae/zod": "^0.1.0"
-  "@types/node": ^26.0.0
+  "@types/node": ^24.19.2
   "@verule/rules-reference": "workspace:*"
   "@boringparts/verule": "workspace:*"
   drizzle-zod: 0.8.3
