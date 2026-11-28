@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { INLINE_IGNORE_RULE_ID } from "@boringparts/verule";
 import type { CheckReport, VeruleConfig } from "@boringparts/verule";
 import {
+  EXPECTED_ACCEPTANCE_NODE_VERSION,
   type PreparedAcceptanceHost,
   withAcceptanceHost,
 } from "@verule/acceptance";
@@ -38,12 +39,135 @@ async function runInstalledSdk(
   return checkReport;
 }
 
+async function verifyNode24SdkAndCliRuntime(
+  host: PreparedAcceptanceHost,
+  expectedReport: CheckReport,
+): Promise<void> {
+  host.writeText(
+    "node24-sdk-probe.ts",
+    `import assert from "node:assert/strict";
+import { openSession, runCheck } from "@boringparts/verule";
+import config from "./packages/app/verule.config.ts";
+
+assert.equal(process.versions.node, ${JSON.stringify(EXPECTED_ACCEPTANCE_NODE_VERSION)});
+const checkReport = await runCheck({ cwd: process.cwd(), config });
+const session = await openSession({ cwd: process.cwd(), config });
+let sessionReport;
+try {
+  sessionReport = await session.check();
+} finally {
+  await session.close();
+}
+process.stdout.write(
+  JSON.stringify({
+    nodeVersion: process.versions.node,
+    checkReport,
+    sessionReport,
+  }),
+);
+`,
+  );
+  const sdkProbe = await host.runNode(["node24-sdk-probe.ts"]);
+  assert.equal(sdkProbe.status, 0, sdkProbe.stderr);
+  assert.equal(sdkProbe.isolation?.controlProbeBlocked, true);
+  const sdkPayload = JSON.parse(sdkProbe.stdout) as {
+    readonly nodeVersion: string;
+    readonly checkReport: CheckReport;
+    readonly sessionReport: CheckReport;
+  };
+  assert.equal(sdkPayload.nodeVersion, EXPECTED_ACCEPTANCE_NODE_VERSION);
+  assert.deepEqual(sdkPayload.checkReport, expectedReport);
+  assert.deepEqual(sdkPayload.sessionReport, expectedReport);
+
+  const probeConfigPath = "packages/app/verule.node24-probe.config.ts";
+  host.writeText(
+    probeConfigPath,
+    `import assert from "node:assert/strict";
+import { defineConfig, defineRule } from "@boringparts/verule";
+
+assert.equal(process.versions.node, ${JSON.stringify(EXPECTED_ACCEPTANCE_NODE_VERSION)});
+
+const node24RuntimeRule = defineRule({
+  id: "node24-runtime-probe",
+  run: async (ctx) => {
+    assert.equal(process.versions.node, ${JSON.stringify(EXPECTED_ACCEPTANCE_NODE_VERSION)});
+    const calls = await ctx.findSyntax({
+      files: ["packages/app/src/review.ts"],
+      kinds: ["CallExpression"],
+    });
+    const firstCall = calls[0];
+    if (firstCall !== undefined) {
+      ctx.report({
+        at: firstCall.location,
+        message: \`node=\${process.versions.node}\`,
+        basis: [firstCall],
+      });
+    }
+  },
+});
+
+export default defineConfig({
+  tsconfig: "packages/app/tsconfig.json",
+  rules: [node24RuntimeRule],
+});
+`,
+  );
+
+  const cliCheck = await host.check({ config: probeConfigPath });
+  assert.equal(cliCheck.status, 1, cliCheck.stderr);
+  assert.equal(cliCheck.isolation?.controlProbeBlocked, true);
+  assert.equal(
+    cliCheck.report.diagnostics[0]?.message,
+    `node=${EXPECTED_ACCEPTANCE_NODE_VERSION}`,
+  );
+
+  const watch = await host.startWatch({ config: probeConfigPath });
+  try {
+    assert.equal(watch.isolation?.controlProbeBlocked, true);
+    const watchReport = await watch.nextReport();
+    assert.equal(
+      watchReport.diagnostics[0]?.message,
+      `node=${EXPECTED_ACCEPTANCE_NODE_VERSION}`,
+    );
+  } finally {
+    const watchExit = await watch.close();
+    assert.equal(watchExit.code, 0, watchExit.stderr);
+  }
+
+  const shared = await host.startSession({ config: probeConfigPath });
+  try {
+    assert.equal(shared.isolation?.controlProbeBlocked, true);
+    const sessionCheck = await shared.check();
+    assert.equal(sessionCheck.status, 1, sessionCheck.stderr);
+    assert.equal(
+      sessionCheck.report.diagnostics[0]?.message,
+      `node=${EXPECTED_ACCEPTANCE_NODE_VERSION}`,
+    );
+  } finally {
+    const sessionExit = await shared.close();
+    assert.equal(sessionExit.code, 0, sessionExit.stderr);
+  }
+}
+
 void test("runs the packed CLI on the neutral cross-package host", async (t) => {
   await withAcceptanceHost({}, async (host) => {
     const veruleArtifact = host.artifact("@boringparts/verule");
     const tssaeArtifact = host.artifact("tssae");
-    assert.equal(veruleArtifact.version, "0.1.0");
+    assert.equal(veruleArtifact.version, "0.2.0");
     assert.notEqual(veruleArtifact.manifest.private, true);
+    assert.deepEqual(veruleArtifact.manifest.repository, {
+      type: "git",
+      url: "git+https://github.com/boringparts/verule.git",
+      directory: "packages/verule",
+    });
+    assert.equal(
+      (
+        veruleArtifact.manifest.dependencies as
+          | Record<string, string>
+          | undefined
+      )?.tssae,
+      "^0.2.0",
+    );
     assert.deepEqual(veruleArtifact.manifest.bin, {
       verule: "./dist/cli.js",
     });
@@ -159,6 +283,7 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
       `Unselected candidate evidence leaked into diagnostic: ${JSON.stringify(diag.evidence)}`,
     );
     assert.deepEqual(await runInstalledSdk(host), result.report);
+    await verifyNode24SdkAndCliRuntime(host, result.report);
     assert.ok(
       result.report.gaps.some(
         (gap) =>

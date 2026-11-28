@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempDisposableSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
@@ -28,7 +28,7 @@ async function importConfig(configPath: string): Promise<VeruleConfig> {
 }
 
 void describe("deployed CLI e2e", () => {
-  let deployment: Disposable & { readonly path: string };
+  let deploymentDir = "";
   let manifestVersion = "";
   let deployedSdkPackageDir = "";
   let entry = "";
@@ -45,7 +45,7 @@ void describe("deployed CLI e2e", () => {
   }
 
   before(() => {
-    deployment = mkdtempDisposableSync(join(tmpdir(), "verule-cli-"));
+    deploymentDir = mkdtempSync(join(tmpdir(), "verule-cli-"));
     try {
       execFileSync(
         "pnpm",
@@ -55,33 +55,34 @@ void describe("deployed CLI e2e", () => {
           "deploy",
           "--prod",
           "--frozen-lockfile",
-          deployment.path,
+          deploymentDir,
         ],
         { cwd: new URL("../../", import.meta.url), stdio: "pipe" },
       );
-      const deployed = createRequire(join(deployment.path, "package.json"));
+      const deployed = createRequire(join(deploymentDir, "package.json"));
       const manifest = deployed("./package.json") as {
         bin: { verule: string };
         version: string;
       };
       const deployedSdkEntry = deployed.resolve("@boringparts/verule");
-      assert.ok(
-        deployedSdkEntry.startsWith(realpathSync(deployment.path) + sep),
-      );
+      assert.ok(deployedSdkEntry.startsWith(realpathSync(deploymentDir) + sep));
       manifestVersion = manifest.version;
       deployedSdkPackageDir = dirname(dirname(deployedSdkEntry));
-      entry = join(deployment.path, manifest.bin.verule);
+      entry = join(deploymentDir, manifest.bin.verule);
       sdk = deployed(
         "@boringparts/verule",
       ) as typeof import("@boringparts/verule");
     } catch (error) {
-      deployment[Symbol.dispose]();
+      rmSync(deploymentDir, { recursive: true, force: true });
+      deploymentDir = "";
       throw error;
     }
   });
 
   after(() => {
-    deployment?.[Symbol.dispose]();
+    if (deploymentDir) {
+      rmSync(deploymentDir, { recursive: true, force: true });
+    }
   });
 
   void it("discovers version, help, schema, and rejects unknown flags", async () => {
@@ -660,10 +661,10 @@ void describe("deployed CLI e2e", () => {
     await withCliTempHost(
       { host: "e2e/basic", sdkPackageDir: deployedSdkPackageDir },
       async (host) => {
-        using sessionSocketDir = mkdtempDisposableSync(
+        const sessionSocketDir = mkdtempSync(
           join(tmpdir(), "verule-e2e-sock-"),
         );
-        const sharedSocketPath = join(sessionSocketDir.path, "verule.sock");
+        const sharedSocketPath = join(sessionSocketDir, "verule.sock");
         const rulesConfigPath = host.resolvePath("verule.rules.config.ts");
         const initialHandlers = host.readText("src/handlers.ts");
         const cleanHandlers = host.readText("variants/handlers-clean.ts");
@@ -790,6 +791,7 @@ void describe("deployed CLI e2e", () => {
           );
         } finally {
           sessionProc.dispose();
+          rmSync(sessionSocketDir, { recursive: true, force: true });
         }
       },
     );
@@ -801,10 +803,10 @@ void describe("deployed CLI e2e", () => {
       async (host) => {
         await host.typecheck();
 
-        using manifestSockDir = mkdtempDisposableSync(
+        const manifestSockDir = mkdtempSync(
           join(tmpdir(), "verule-manifest-sock-"),
         );
-        const manifestSocketPath = join(manifestSockDir.path, "manifest.sock");
+        const manifestSocketPath = join(manifestSockDir, "manifest.sock");
         const manifestConfigPath = host.resolvePath("verule.config.ts");
 
         const manifestSession = spawnNdjsonProcess(
@@ -887,6 +889,7 @@ void describe("deployed CLI e2e", () => {
           assert.equal(existsSync(manifestSocketPath), false);
         } finally {
           manifestSession.dispose();
+          rmSync(manifestSockDir, { recursive: true, force: true });
         }
       },
     );

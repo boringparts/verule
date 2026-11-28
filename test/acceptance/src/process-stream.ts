@@ -467,6 +467,7 @@ export type StartWatchProcessOptions = {
   readonly config?: string;
   readonly isolated?: boolean;
   readonly pnpmStoreDir?: string;
+  readonly runtimeBinDir?: string;
   readonly blockedPaths?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly defaultTimeoutMs?: number;
@@ -492,6 +493,9 @@ export async function startWatchProcess(
     ...(options.pnpmStoreDir === undefined
       ? {}
       : { pnpmStoreDir: options.pnpmStoreDir }),
+    ...(options.runtimeBinDir === undefined
+      ? {}
+      : { runtimeBinDir: options.runtimeBinDir }),
     ...(options.blockedPaths === undefined
       ? {}
       : { blockedPaths: options.blockedPaths }),
@@ -585,6 +589,7 @@ export type StartSharedSessionProcessOptions = {
   readonly config?: string;
   readonly isolated?: boolean;
   readonly pnpmStoreDir?: string;
+  readonly runtimeBinDir?: string;
   readonly blockedPaths?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
@@ -616,6 +621,9 @@ export async function startSharedSessionProcess(
     ...(options.pnpmStoreDir === undefined
       ? {}
       : { pnpmStoreDir: options.pnpmStoreDir }),
+    ...(options.runtimeBinDir === undefined
+      ? {}
+      : { runtimeBinDir: options.runtimeBinDir }),
     ...(options.blockedPaths === undefined
       ? {}
       : { blockedPaths: options.blockedPaths }),
@@ -672,6 +680,9 @@ export async function startSharedSessionProcess(
       ...(options.pnpmStoreDir === undefined
         ? {}
         : { pnpmStoreDir: options.pnpmStoreDir }),
+      ...(options.runtimeBinDir === undefined
+        ? {}
+        : { runtimeBinDir: options.runtimeBinDir }),
       ...(options.blockedPaths === undefined
         ? {}
         : { blockedPaths: options.blockedPaths }),

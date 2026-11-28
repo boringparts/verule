@@ -25,24 +25,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read Node version
-        id: node-runtime
-        run: echo "runtime=node@$(jq -er '.engines.node' package.json)" >> "$GITHUB_OUTPUT"
       - name: Set up pnpm and Node.js
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: ${{ steps.node-runtime.outputs.runtime }}
+          node-version-file: false
           install: false
           cache: true
-      - name: Set up Rust toolchain
-        run: |
-          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
-          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
-          rustup default "$channel"
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Check source (light)
-        run: node --conditions=source scripts/task-gates.ts check
+        run: pnpm exec node --conditions=source scripts/task-gates.ts check
       - name: Build packages in dependency order
         run: pnpm exec turbo run build
       - name: Pack unpublished versions
@@ -58,7 +50,7 @@ jobs:
         if: steps.pack.outputs.pack-dir-artifact-id != ''
         env:
           VERULE_ACCEPTANCE_PACK_DIR: ${{ github.workspace }}/.changeset/packed
-        run: node --conditions=source scripts/task-gates.ts check:heavy
+        run: pnpm exec node --conditions=source scripts/task-gates.ts check:heavy
 
   publish:
     name: Publish npm packages and GitHub Release
@@ -75,13 +67,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read Node version
-        id: node-runtime
-        run: echo "runtime=node@$(jq -er '.engines.node' package.json)" >> "$GITHUB_OUTPUT"
       - name: Set up pnpm and Node.js
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: ${{ steps.node-runtime.outputs.runtime }}
+          node-version-file: false
           install: false
           cache: false
       - name: Install dependencies

@@ -125,8 +125,6 @@ export type PerfEnvironmentMetadata = {
   readonly totalMemoryBytes: number;
   readonly nodeVersion: string;
   readonly pnpmVersion: string;
-  readonly cargoVersion?: string;
-  readonly rustcVersion?: string;
   readonly isolationMode?: string;
   readonly artifacts: readonly PerfArtifactSummary[];
   readonly cacheConditions: {
@@ -615,7 +613,7 @@ export function formatPerfMarkdownReport(report: PerfBaselineReport): string {
     `- **执行时间（UTC）**：\`${environment.timestampUtc}\``,
     `- **Git 提交**：\`${environment.gitCommit}\`${environment.gitDirty ? "（工作区存在未提交改动）" : "（工作区干净）"}`,
     `- **机器与系统**：\`${environment.platform}/${environment.arch}\`（${environment.osRelease}），CPU \`${environment.cpuModel}\` × ${String(environment.cpuCores)}，内存 ${totalGib} GiB`,
-    `- **工具链版本**：Node \`${environment.nodeVersion}\`，pnpm \`${environment.pnpmVersion}\`${environment.cargoVersion === undefined ? "" : `，cargo \`${environment.cargoVersion}\``}${environment.rustcVersion === undefined ? "" : `，rustc \`${environment.rustcVersion}\``}`,
+    `- **工具链版本**：Node \`${environment.nodeVersion}\`，pnpm \`${environment.pnpmVersion}\``,
     `- **隔离与观测**：沙箱模式 \`${environment.isolationMode ?? "unknown"}\`，计时采样阶段关闭详细观测（\`--observe\` off）；生成、安装、类型检查、\`--observe detail\` 规模核验与冷查对账均在计时之外`,
     `- **采样与缓存条件**：每档串行采样 ${String(report.samples)} 轮（重试上限 ${String(report.retries)}）；制品单次打包并复用，每档独立安装宿主；\`${environment.cacheConditions.osPageCacheMode}\`（同机同进程连续串行执行，不清理操作系统页缓存，且预检已预热产物与文件页缓存）`,
     "",
@@ -1229,16 +1227,6 @@ function collectEnvironmentMetadata(options: {
     "";
   const pnpmVersion =
     tryCommandOutput("pnpm", ["--version"], options.workspaceRoot) ?? "unknown";
-  const cargoVersion = tryCommandOutput(
-    "cargo",
-    ["--version"],
-    options.workspaceRoot,
-  );
-  const rustcVersion = tryCommandOutput(
-    "rustc",
-    ["--version"],
-    options.workspaceRoot,
-  );
 
   return {
     timestampUtc: new Date().toISOString(),
@@ -1252,8 +1240,6 @@ function collectEnvironmentMetadata(options: {
     totalMemoryBytes: os.totalmem(),
     nodeVersion: process.version,
     pnpmVersion,
-    ...(cargoVersion === undefined ? {} : { cargoVersion }),
-    ...(rustcVersion === undefined ? {} : { rustcVersion }),
     ...(options.isolationMode === undefined
       ? {}
       : { isolationMode: options.isolationMode }),

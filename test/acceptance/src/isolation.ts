@@ -6,7 +6,12 @@ import {
 } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+
+import {
+  ensureControlledNode24Runtime,
+  prependBinDirsToEnvPath,
+} from "./node-runtime.ts";
 
 export type IsolationMode = "bwrap" | "node-permission";
 
@@ -32,6 +37,7 @@ export type RunBareVeruleOptions = {
   readonly args: readonly string[];
   readonly isolated?: boolean;
   readonly pnpmStoreDir?: string;
+  readonly runtimeBinDir?: string;
   readonly blockedPaths?: readonly string[];
   readonly sharedReadWritePaths?: readonly string[];
   readonly allowNet?: boolean;
@@ -39,11 +45,14 @@ export type RunBareVeruleOptions = {
   readonly timeoutMs?: number;
 };
 
+export type RunNodeInHostOptions = RunBareVeruleOptions;
+
 export type SpawnBareVeruleOptions = {
   readonly checkoutDir: string;
   readonly args: readonly string[];
   readonly isolated?: boolean;
   readonly pnpmStoreDir?: string;
+  readonly runtimeBinDir?: string;
   readonly blockedPaths?: readonly string[];
   readonly sharedReadWritePaths?: readonly string[];
   readonly allowNet?: boolean;
@@ -61,6 +70,26 @@ export type SpawnedBareVerule = {
 const maxOutputBytes = 16 * 1024 * 1024;
 const defaultTimeoutMs = 30_000;
 const bwrapProbeCache = new Map<string, Promise<boolean>>();
+const allowNetSupportCache = new Map<string, boolean>();
+
+function supportsAllowNetFlag(nodeExecutablePath: string): boolean {
+  const cached = allowNetSupportCache.get(nodeExecutablePath);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let supported = false;
+  try {
+    const helpOutput = execFileSync(nodeExecutablePath, ["--help"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    supported = helpOutput.includes("--allow-net");
+  } catch {
+    supported = false;
+  }
+  allowNetSupportCache.set(nodeExecutablePath, supported);
+  return supported;
+}
 
 function runAsyncExec(
   command: string,
@@ -216,6 +245,8 @@ function canUseBwrap(
 function buildNodePermissionOptions(options: {
   readonly checkoutRealpath: string;
   readonly isolatedTmpDir: string;
+  readonly runtimeBinDir: string;
+  readonly nodeExecutablePath: string;
   readonly sharedReadWritePaths: readonly string[];
   readonly allowNet: boolean;
   readonly pnpmStorePath?: string;
@@ -223,9 +254,10 @@ function buildNodePermissionOptions(options: {
   const readAllowed = new Set<string>([
     options.checkoutRealpath,
     options.isolatedTmpDir,
+    options.runtimeBinDir,
     ...options.sharedReadWritePaths,
-    dirname(process.execPath),
-    dirname(realpathSync(process.execPath)),
+    dirname(options.nodeExecutablePath),
+    dirname(realpathSync(options.nodeExecutablePath)),
   ]);
   for (const systemDir of [
     "/pnpm/store",
@@ -255,7 +287,9 @@ function buildNodePermissionOptions(options: {
     "--permission",
     ...[...readAllowed].map((path) => `--allow-fs-read=${path}`),
     ...writeAllowed.map((path) => `--allow-fs-write=${path}`),
-    ...(options.allowNet ? ["--allow-net"] : []),
+    ...(options.allowNet && supportsAllowNetFlag(options.nodeExecutablePath)
+      ? ["--allow-net"]
+      : []),
     "--allow-child-process",
     "--allow-worker",
   ];
@@ -264,6 +298,7 @@ function buildNodePermissionOptions(options: {
 
 async function runControlProbe(options: {
   readonly mode: IsolationMode;
+  readonly nodeExecutablePath: string;
   readonly blockedPaths: readonly string[];
   readonly checkoutRealpath: string;
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -279,13 +314,14 @@ async function runControlProbe(options: {
   const probeScript =
     "const fs = require('node:fs'); fs.readFileSync(process.argv[1], 'utf8');";
 
-  const command = options.mode === "bwrap" ? "bwrap" : process.execPath;
+  const command =
+    options.mode === "bwrap" ? "bwrap" : options.nodeExecutablePath;
   const args =
     options.mode === "bwrap"
       ? [
           ...options.bwrapPrefixArgs,
           "--",
-          process.execPath,
+          options.nodeExecutablePath,
           "-e",
           probeScript,
           probeFile,
@@ -328,22 +364,25 @@ type PreparedBareVeruleExecution = {
   cleanup(): void;
 };
 
-async function prepareBareVeruleExecution(
+async function prepareIsolatedHostExecution(
   options: Omit<RunBareVeruleOptions, "timeoutMs"> & {
+    readonly executable: "verule" | "node";
     readonly dieWithParent?: boolean;
   },
 ): Promise<PreparedBareVeruleExecution> {
   const checkoutRealpath = realpathSync(options.checkoutDir);
   const binDir = join(checkoutRealpath, "node_modules", ".bin");
+  const nodeRuntime = ensureControlledNode24Runtime(options.runtimeBinDir);
   const baseEnv = options.env ?? process.env;
-  const envWithPath: Record<string, string | undefined> = {
-    ...baseEnv,
-    PATH: `${binDir}${delimiter}${baseEnv.PATH ?? ""}`,
-  };
+  const envWithPath = prependBinDirsToEnvPath(baseEnv, [
+    binDir,
+    nodeRuntime.binDir,
+  ]);
 
   if (options.isolated !== true) {
     return {
-      command: "verule",
+      command:
+        options.executable === "node" ? nodeRuntime.executablePath : "verule",
       args: options.args,
       cwd: checkoutRealpath,
       env: envWithPath,
@@ -412,6 +451,8 @@ async function prepareBareVeruleExecution(
           NODE_OPTIONS: buildNodePermissionOptions({
             checkoutRealpath,
             isolatedTmpDir,
+            runtimeBinDir: nodeRuntime.binDir,
+            nodeExecutablePath: nodeRuntime.executablePath,
             sharedReadWritePaths,
             allowNet: options.allowNet === true,
             ...(pnpmStorePath === undefined ? {} : { pnpmStorePath }),
@@ -421,6 +462,7 @@ async function prepareBareVeruleExecution(
 
     const probe = await runControlProbe({
       mode,
+      nodeExecutablePath: nodeRuntime.executablePath,
       blockedPaths,
       checkoutRealpath,
       env: isolatedEnv,
@@ -432,9 +474,15 @@ async function prepareBareVeruleExecution(
       );
     }
 
-    const command = useBwrap ? "bwrap" : "verule";
+    const hostExecutable =
+      options.executable === "node"
+        ? nodeRuntime.executablePath
+        : useBwrap
+          ? resolve(binDir, "verule")
+          : "verule";
+    const command = useBwrap ? "bwrap" : hostExecutable;
     const args = useBwrap
-      ? [...bwrapPrefixArgs, "--", resolve(binDir, "verule"), ...options.args]
+      ? [...bwrapPrefixArgs, "--", hostExecutable, ...options.args]
       : options.args;
 
     return {
@@ -456,15 +504,10 @@ async function prepareBareVeruleExecution(
   }
 }
 
-/**
- * Runs the host-installed bare `verule` command from `checkoutDir`, optionally
- * isolating filesystem reads so the inspected process cannot access the
- * development repository.
- */
-export async function runBareVeruleInHost(
-  options: RunBareVeruleOptions,
+async function runPreparedHostCommand(
+  options: RunBareVeruleOptions & { readonly executable: "verule" | "node" },
 ): Promise<BareVeruleRunResult> {
-  const prepared = await prepareBareVeruleExecution(options);
+  const prepared = await prepareIsolatedHostExecution(options);
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
   try {
     const result = await runAsyncExec(prepared.command, prepared.args, {
@@ -485,14 +528,36 @@ export async function runBareVeruleInHost(
 }
 
 /**
+ * Runs the host-installed bare `verule` command from `checkoutDir`, optionally
+ * isolating filesystem reads so the inspected process cannot access the
+ * development repository.
+ */
+export function runBareVeruleInHost(
+  options: RunBareVeruleOptions,
+): Promise<BareVeruleRunResult> {
+  return runPreparedHostCommand({ ...options, executable: "verule" });
+}
+
+/**
+ * Runs a Node `24.0.0` script or expression inside the host checkout with
+ * optional dev-repo read isolation.
+ */
+export function runNodeInHost(
+  options: RunNodeInHostOptions,
+): Promise<BareVeruleRunResult> {
+  return runPreparedHostCommand({ ...options, executable: "node" });
+}
+
+/**
  * Spawns a long-lived host-installed bare `verule` command (`watch` or
  * `session`) with piped `stdio` and optional dev-repo read isolation.
  */
 export async function spawnBareVeruleInHost(
   options: SpawnBareVeruleOptions,
 ): Promise<SpawnedBareVerule> {
-  const prepared = await prepareBareVeruleExecution({
+  const prepared = await prepareIsolatedHostExecution({
     ...options,
+    executable: "verule",
     dieWithParent: true,
   });
 
