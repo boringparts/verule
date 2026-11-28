@@ -43,12 +43,7 @@ export {
   type SpawnBareVeruleOptions,
   type SpawnedBareVerule,
 } from "./isolation.ts";
-export {
-  ensureControlledNode24Runtime,
-  EXPECTED_ACCEPTANCE_NODE_VERSION,
-  prependBinDirsToEnvPath,
-  type ControlledNodeRuntime,
-} from "./node-runtime.ts";
+export { EXPECTED_ACCEPTANCE_NODE_VERSION } from "./node-runtime.ts";
 export {
   computeMedian,
   deduplicateTiers,

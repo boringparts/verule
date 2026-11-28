@@ -153,8 +153,21 @@ void test("runs the packed CLI on the neutral cross-package host", async (t) => 
   await withAcceptanceHost({}, async (host) => {
     const veruleArtifact = host.artifact("@boringparts/verule");
     const tssaeArtifact = host.artifact("tssae");
-    assert.equal(veruleArtifact.version, "0.1.0");
+    assert.equal(veruleArtifact.version, "0.2.0");
     assert.notEqual(veruleArtifact.manifest.private, true);
+    assert.deepEqual(veruleArtifact.manifest.repository, {
+      type: "git",
+      url: "git+https://github.com/boringparts/verule.git",
+      directory: "packages/verule",
+    });
+    assert.equal(
+      (
+        veruleArtifact.manifest.dependencies as
+          | Record<string, string>
+          | undefined
+      )?.tssae,
+      "^0.2.0",
+    );
     assert.deepEqual(veruleArtifact.manifest.bin, {
       verule: "./dist/cli.js",
     });
