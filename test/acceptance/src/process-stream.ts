@@ -385,13 +385,16 @@ class NdjsonProcessController {
         } catch {
           // Ignore closed stdin pipe.
         }
-        // Only signal the direct child for graceful shutdown so verule can close
-        // tssae-engine cleanly instead of killing the engine socket mid-shutdown;
+        // Under bwrap, the top-level wrapper does not trap SIGINT and dies with
+        // signal=SIGINT before the sandboxed verule process can handle stdin EOF
+        // and exit cleanly with code 0. Only send SIGINT when not wrapped by bwrap;
         // escalate to process-group SIGKILL if the group does not exit in time.
-        try {
-          child.kill("SIGINT");
-        } catch {
-          // Ignore if child already exited.
+        if (this.#spawned.isolation?.mode !== "bwrap") {
+          try {
+            child.kill("SIGINT");
+          } catch {
+            // Ignore if child already exited.
+          }
         }
 
         const exitedCleanly = await this.#waitForExit(timeoutMs);

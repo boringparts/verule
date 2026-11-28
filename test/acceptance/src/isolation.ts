@@ -232,34 +232,10 @@ function runAsyncExec(
       finish(1, null, error.message);
     });
 
-    child.once("exit", (code, signal) => {
-      // Guard against an orphaned descendant keeping stdio pipes open after child exit.
-      exitGraceTimer = setTimeout(() => {
-        exitGraceTimer = undefined;
-        if (timedOut || maxBufferExceeded) {
-          signalChildProcessGroup(child, "SIGKILL");
-        }
-        const limitFailed = timedOut || maxBufferExceeded;
-        const status =
-          !limitFailed && signal === null && code === 0
-            ? 0
-            : code !== null && code !== 0
-              ? code
-              : 1;
-        finish(
-          status,
-          signal,
-          timedOut
-            ? `Command timed out after ${String(options.timeoutMs)}ms`
-            : maxBufferExceeded
-              ? `Command output exceeded maxBuffer (${String(maxOutputBytes)} bytes)`
-              : undefined,
-        );
-      }, 100);
-      exitGraceTimer.unref();
-    });
-
-    child.once("close", (code, signal) => {
+    const completeExit = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
       const limitFailed = timedOut || maxBufferExceeded;
       const status =
         !limitFailed && signal === null && code === 0
@@ -273,7 +249,29 @@ function runAsyncExec(
           ? `Command output exceeded maxBuffer (${String(maxOutputBytes)} bytes)`
           : undefined;
       finish(status, signal, fallbackMessage);
+    };
+
+    child.once("exit", (code, signal) => {
+      // Guard against an orphaned descendant keeping stdio pipes open after child exit.
+      exitGraceTimer = setTimeout(() => {
+        exitGraceTimer = undefined;
+        if (timedOut || maxBufferExceeded) {
+          signalChildProcessGroup(child, "SIGKILL");
+          // Give the kernel a brief window to tear down SIGKILLed descendants and close
+          // inherited stdio pipes before returning to callers that inspect child PIDs.
+          exitGraceTimer = setTimeout(() => {
+            exitGraceTimer = undefined;
+            completeExit(code, signal);
+          }, 500);
+          exitGraceTimer.unref();
+          return;
+        }
+        completeExit(code, signal);
+      }, 100);
+      exitGraceTimer.unref();
     });
+
+    child.once("close", completeExit);
   });
 }
 
