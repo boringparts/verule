@@ -487,32 +487,11 @@ async function waitForPidFile(
   throw new Error(`Timed out waiting for PID file: ${filePath}`);
 }
 
-void test(
-  "kills bwrap wrapper and SIGINT-ignoring grandchild processes across process groups on close and timeout",
-  { skip: process.platform !== "linux" },
-  async () => {
-    using fixture = mkdtempDisposableSync(
-      join(tmpdir(), "verule-bwrap-pg-cleanup-"),
-    );
-    const devRepoDir = join(fixture.path, "dev-repo");
-    const fakeBinDir = join(fixture.path, "fake-bin");
-    const bundleDir = join(fixture.path, "bundle");
-    const hostDir = join(fixture.path, "host");
-    const storeDir = join(fixture.path, "store");
-    for (const dir of [devRepoDir, fakeBinDir, bundleDir, hostDir, storeDir]) {
-      mkdirSync(dir, { recursive: true });
-    }
-    writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
-    writeFileSync(
-      join(hostDir, "package.json"),
-      '{"name":"bwrap-pg-host","private":true,"type":"module"}\n',
-    );
-
-    const pidLogPath = join(fixture.path, "bwrap-wrapper-pids.log");
-    const fakeBwrapPath = join(fakeBinDir, "bwrap");
-    writeFileSync(
-      fakeBwrapPath,
-      `#!/usr/bin/env node
+function installFakeBwrap(binDir: string): string {
+  const fakeBwrapPath = join(binDir, "bwrap");
+  writeFileSync(
+    fakeBwrapPath,
+    `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
@@ -544,10 +523,8 @@ if (pidLog && command !== "true") {
   appendFileSync(pidLog, \`\${String(process.pid)}\\n\`);
 }
 
-// Simulate bwrap not forwarding SIGINT/SIGTERM to child processes when signaled by PID alone.
-process.on("SIGINT", () => {});
-process.on("SIGTERM", () => {});
-
+// Keep real /usr/bin/bwrap's default signal disposition so direct SIGINT kills
+// the wrapper immediately instead of letting the sandboxed process shut down cleanly.
 const child = spawn(command, commandArgs, { stdio: "inherit" });
 child.on("exit", (code, signal) => {
   if (signal !== null) {
@@ -557,8 +534,34 @@ child.on("exit", (code, signal) => {
   process.exit(code ?? 1);
 });
 `,
+  );
+  chmodSync(fakeBwrapPath, 0o755);
+  return fakeBwrapPath;
+}
+
+void test(
+  "kills bwrap wrapper and SIGINT-ignoring grandchild processes across process groups on close and timeout",
+  { skip: process.platform !== "linux" },
+  async () => {
+    using fixture = mkdtempDisposableSync(
+      join(tmpdir(), "verule-bwrap-pg-cleanup-"),
     );
-    chmodSync(fakeBwrapPath, 0o755);
+    const devRepoDir = join(fixture.path, "dev-repo");
+    const fakeBinDir = join(fixture.path, "fake-bin");
+    const bundleDir = join(fixture.path, "bundle");
+    const hostDir = join(fixture.path, "host");
+    const storeDir = join(fixture.path, "store");
+    for (const dir of [devRepoDir, fakeBinDir, bundleDir, hostDir, storeDir]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
+    writeFileSync(
+      join(hostDir, "package.json"),
+      '{"name":"bwrap-pg-host","private":true,"type":"module"}\n',
+    );
+
+    const pidLogPath = join(fixture.path, "bwrap-wrapper-pids.log");
+    installFakeBwrap(fakeBinDir);
 
     const hangWithGrandchildCli = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
@@ -746,6 +749,129 @@ process.stdin.resume();
             // Ignore cleanup failure for already-exited processes.
           }
         }
+      }
+    }
+  },
+);
+
+void test(
+  "closes bwrap-isolated watch and session cleanly with exit code 0 on stdin EOF",
+  { skip: process.platform !== "linux" },
+  async () => {
+    using fixture = mkdtempDisposableSync(
+      join(tmpdir(), "verule-bwrap-graceful-eof-"),
+    );
+    const devRepoDir = join(fixture.path, "dev-repo");
+    const fakeBinDir = join(fixture.path, "fake-bin");
+    const bundleDir = join(fixture.path, "bundle");
+    const hostDir = join(fixture.path, "host");
+    const storeDir = join(fixture.path, "store");
+    for (const dir of [devRepoDir, fakeBinDir, bundleDir, hostDir, storeDir]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(join(devRepoDir, "package.json"), '{"name":"dev-repo"}\n');
+    writeFileSync(
+      join(hostDir, "package.json"),
+      '{"name":"bwrap-graceful-host","private":true,"type":"module"}\n',
+    );
+
+    installFakeBwrap(fakeBinDir);
+
+    const gracefulCli = `#!/usr/bin/env node
+import { createServer } from "node:net";
+import { rmSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const command = args[0] ?? "check";
+
+if (command === "watch") {
+  process.stdout.write(JSON.stringify({ kind: "stream", command: "verule watch" }) + "\\n");
+  process.stdin.once("end", () => {
+    process.stdout.write(JSON.stringify({ kind: "streamSuccess" }) + "\\n");
+    process.exit(0);
+  });
+  process.stdin.resume();
+}
+
+if (command === "session") {
+  const socketIdx = args.indexOf("--socket");
+  const socketPath = args[socketIdx + 1];
+  const server = createServer((socket) => {
+    socket.end("{}\\n");
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  process.stdout.write(JSON.stringify({ kind: "stream", command: "verule session" }) + "\\n");
+  process.stdout.write(
+    JSON.stringify({
+      kind: "record",
+      variant: "ready",
+      data: {
+        reportVersion: "1",
+        endpoint: socketPath,
+        snapshotId: 1,
+        projects: [],
+      },
+    }) + "\\n",
+  );
+  process.stdin.once("end", () => {
+    server.close(() => {
+      rmSync(socketPath, { force: true });
+      process.stdout.write(JSON.stringify({ kind: "streamSuccess" }) + "\\n");
+      process.exit(0);
+    });
+  });
+  process.stdin.resume();
+}
+`;
+
+    const bundle = createFakeVeruleTarballs(bundleDir, "0.0.0-bwrap-eof", {
+      cliScript: gracefulCli,
+    });
+    const installOutcome = await installArtifactPackages({
+      checkoutDir: hostDir,
+      packageManager: "pnpm",
+      artifacts: bundle.artifacts,
+      storeDir,
+    });
+    assert.equal(installOutcome.status, "ready");
+
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = `${fakeBinDir}${delimiter}${originalPath ?? ""}`;
+
+      const watch = await startWatchProcess({
+        checkoutDir: hostDir,
+        isolated: true,
+        blockedPaths: [devRepoDir],
+        pnpmStoreDir: storeDir,
+      });
+      assert.equal(watch.isolation?.mode, "bwrap");
+      const watchExit = await watch.close();
+      assert.equal(watchExit.code, 0, watchExit.stderr);
+      assert.equal(watchExit.signal, null);
+      assert.ok(
+        watchExit.records.some((record) => record.kind === "streamSuccess"),
+      );
+
+      const session = await startSharedSessionProcess({
+        checkoutDir: hostDir,
+        socketPath: join(fixture.path, "graceful-session.sock"),
+        isolated: true,
+        blockedPaths: [devRepoDir],
+        pnpmStoreDir: storeDir,
+      });
+      assert.equal(session.isolation?.mode, "bwrap");
+      const sessionExit = await session.close();
+      assert.equal(sessionExit.code, 0, sessionExit.stderr);
+      assert.equal(sessionExit.signal, null);
+      assert.ok(
+        sessionExit.records.some((record) => record.kind === "streamSuccess"),
+      );
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
       }
     }
   },
