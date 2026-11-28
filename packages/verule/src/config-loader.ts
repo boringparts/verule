@@ -16,6 +16,11 @@ const DEFAULT_CONFIG_CANDIDATES = [
   "verule.config.js",
 ] as const;
 
+// Property-typed view avoids `unbound-method` while preserving the exact function
+// reference for restoration (whereas `.bind(process)` would allocate a wrapper).
+const processEmitWarningHost: { emitWarning: typeof process.emitWarning } =
+  process;
+
 let nextReloadGeneration = 1;
 let activeConfigImports = 0;
 let savedEmitWarning: typeof process.emitWarning | undefined;
@@ -42,8 +47,10 @@ function isTypeStrippingWarning(
   );
 }
 
-// Node 24.0.0 emits ExperimentalWarning to stderr on the first .ts import,
-// which corrupts structured `--output json` / `ndjson` CLI output.
+// Node 24.0.0 emits `ExperimentalWarning: Type Stripping` to stderr on the first
+// `.ts` import, which corrupts CLI JSON envelopes and NDJSON streams. We suppress
+// only that warning across dynamic config imports using an active-import refcount
+// so overlapping loads share one hook and restore the exact original handler on exit.
 const suppressTypeStrippingWarning: typeof process.emitWarning = function (
   warning,
   ...args
@@ -99,6 +106,45 @@ function isLocalImportSpecifier(specifier: string): boolean {
   );
 }
 
+function hasPreserveSymlinksFlag(): boolean {
+  if (process.execArgv.includes("--preserve-symlinks")) {
+    return true;
+  }
+  const nodeOptions = process.env.NODE_OPTIONS?.trim();
+  if (!nodeOptions) {
+    return false;
+  }
+  return nodeOptions.split(/\s+/u).includes("--preserve-symlinks");
+}
+
+function stripUrlQuery(url: string): {
+  readonly baseUrl: string;
+  readonly query: string;
+} {
+  const queryIndex = url.indexOf("?");
+  return queryIndex === -1
+    ? { baseUrl: url, query: "" }
+    : { baseUrl: url.slice(0, queryIndex), query: url.slice(queryIndex) };
+}
+
+function trackNonNodeModulesFileUrl(
+  trackedFiles: Set<string>,
+  fileUrl: string,
+  requireExisting = false,
+): void {
+  if (!fileUrl.startsWith("file://") || fileUrl.includes("/node_modules/")) {
+    return;
+  }
+  try {
+    const filePath = fileURLToPath(fileUrl);
+    if (!requireExisting || existsSync(filePath)) {
+      trackedFiles.add(filePath);
+    }
+  } catch {
+    // Ignore non-file paths.
+  }
+}
+
 /**
  * Dynamically imports a Verule configuration file with ESM cache-busting for the config
  * and its local relative module graph, returning the validated config and dependency paths.
@@ -113,18 +159,20 @@ export async function loadProjectConfigWithDependencies(
   const reloadMarker = `verule-reload=${reloadToken}`;
   const trackedFiles = new Set<string>([configPath]);
 
-  const preserveSymlinks = process.execArgv.includes("--preserve-symlinks");
+  const preserveSymlinks = hasPreserveSymlinksFlag();
   const hook = registerHooks({
     resolve(specifier, context, nextResolve) {
       const resolved = nextResolve(specifier, context);
       if (!resolved.url.startsWith("file://")) {
         return resolved;
       }
-      const queryIndex = resolved.url.indexOf("?");
-      const rawUrl =
-        queryIndex === -1 ? resolved.url : resolved.url.slice(0, queryIndex);
-      const existingQuery =
-        queryIndex === -1 ? "" : resolved.url.slice(queryIndex);
+      const { baseUrl: rawUrl, query: existingQuery } = stripUrlQuery(
+        resolved.url,
+      );
+      // In Node 24.0.0, `nextResolve` from a symlinked `cli.js` entry can return
+      // an unresolved symlink path, preventing pnpm's isolated `node_modules` from
+      // resolving transitive dependencies such as `tssae`. Canonicalize `file://`
+      // URLs via `realpathSync` unless `--preserve-symlinks` is explicitly active.
       let canonicalUrl = rawUrl;
       if (!preserveSymlinks) {
         try {
@@ -138,20 +186,26 @@ export async function loadProjectConfigWithDependencies(
       const fromReloadedGraph =
         typeof context.parentURL === "string" &&
         context.parentURL.includes(reloadMarker);
-      if (
-        fromReloadedGraph &&
-        isLocalImportSpecifier(specifier) &&
-        !canonicalUrl.includes("/node_modules/")
-      ) {
+      if (fromReloadedGraph && isLocalImportSpecifier(specifier)) {
+        // Track both the unresolved local path (for symlink retargeting) and
+        // canonical realpath (for target edits) outside `node_modules` so
+        // `verule watch` reloads on either change.
         try {
-          trackedFiles.add(fileURLToPath(canonicalUrl));
+          const { baseUrl: unresolvedUrl } = stripUrlQuery(
+            new URL(specifier, context.parentURL).href,
+          );
+          trackNonNodeModulesFileUrl(trackedFiles, unresolvedUrl, true);
         } catch {
-          // Ignore non-file paths.
+          // Ignore malformed specifiers.
         }
-        return {
-          ...resolved,
-          url: `${canonicalUrl}?${reloadMarker}`,
-        };
+        trackNonNodeModulesFileUrl(trackedFiles, rawUrl);
+        if (!canonicalUrl.includes("/node_modules/")) {
+          trackNonNodeModulesFileUrl(trackedFiles, canonicalUrl);
+          return {
+            ...resolved,
+            url: `${canonicalUrl}?${reloadMarker}`,
+          };
+        }
       }
       const restoredUrl = `${canonicalUrl}${existingQuery}`;
       return restoredUrl === resolved.url
@@ -162,8 +216,8 @@ export async function loadProjectConfigWithDependencies(
 
   let loaded: unknown;
   if (activeConfigImports === 0) {
-    savedEmitWarning = process.emitWarning.bind(process);
-    process.emitWarning = suppressTypeStrippingWarning;
+    savedEmitWarning = processEmitWarningHost.emitWarning;
+    processEmitWarningHost.emitWarning = suppressTypeStrippingWarning;
   }
   activeConfigImports += 1;
   try {
@@ -180,9 +234,9 @@ export async function loadProjectConfigWithDependencies(
     if (
       activeConfigImports === 0 &&
       savedEmitWarning !== undefined &&
-      process.emitWarning === suppressTypeStrippingWarning
+      processEmitWarningHost.emitWarning === suppressTypeStrippingWarning
     ) {
-      process.emitWarning = savedEmitWarning;
+      processEmitWarningHost.emitWarning = savedEmitWarning;
       savedEmitWarning = undefined;
     }
     hook.deregister();
